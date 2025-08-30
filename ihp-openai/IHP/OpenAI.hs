@@ -17,12 +17,14 @@ import qualified Control.Retry as Retry
 import qualified Control.Exception.Safe as Exception
 import Control.Applicative ((<|>))
 import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Maybe as Maybe
 import qualified Network.URI as URI
 import qualified Data.Text.Encoding as Text
 import qualified System.IO.Streams.Attoparsec as Streams
 import Data.Aeson.Parser (json')
 import Control.Monad
+import qualified Data.Foldable as Foldable
 
 data Config
     = Config
@@ -161,24 +163,24 @@ instance ToJSON JsonSchema where
             mergeObj _ _ = error "JsonSchema.mergeObj failed with invalid type"
     toJSON JsonSchemaString =
         object [ "type" .= ("string" :: Text) ]
-    
+
     toJSON JsonSchemaInteger =
         object [ "type" .= ("integer" :: Text) ]
-    
+
     toJSON JsonSchemaNumber =
         object [ "type" .= ("number" :: Text) ]
-    
+
     toJSON (JsonSchemaArray items) =
         object
             [ "type" .= ("array" :: Text)
             , "items" .= items
             ]
-    
+
     toJSON (JsonSchemaEnum values) =
         object
             [ "type" .= ("string" :: Text)
             , "enum" .= values
-            ]        
+            ]
 
 userMessage :: Text -> Message
 userMessage content = Message { role = UserRole, content, name = Nothing, toolCallId = Nothing, toolCalls = [], cacheControl = Nothing }
@@ -285,7 +287,7 @@ streamCompletionWithoutRetry Config { .. } completionRequest' onStart callback =
             pure context
         )
     let
-        endpoint = "/chat/completions"
+        endpoint = if usesResponsesAPI completionRequest then "/responses" else "/chat/completions"
         url :: Text = baseUrl <> endpoint
         basePath :: ByteString = Text.encodeUtf8 (Text.pack (Maybe.fromMaybe (error "invalid OpenAI baseUrl") ((.uriPath) <$> URI.parseURI (Text.unpack url))))
     withOpenSSL do
@@ -295,7 +297,8 @@ streamCompletionWithoutRetry Config { .. } completionRequest' onStart callback =
                     setContentType "application/json"
                     Network.Http.Client.setHeader "Authorization" ("Bearer " <> (Text.encodeUtf8 secretKey))
                     applyExtraHeaders completionRequest.extraHeaders
-            sendRequest connection q (jsonBody completionRequest)
+            let requestBody = if usesResponsesAPI completionRequest then buildResponsesRequestBody completionRequest else toJSON completionRequest
+            sendRequest connection q (jsonBody requestBody)
             onStart
             receiveResponse connection handler
 
@@ -349,6 +352,8 @@ parseResponseChunk ParserState { curBuffer, emptyLineFound, chunks } input
     | ByteString.null input && emptyLineFound = ParserResult { chunk = Nothing, state = ParserState { curBuffer = "", emptyLineFound = True, chunks } }
     -- lines starting with : are comments, ignore
     | ":" `ByteString.isPrefixOf` input = ParserResult { chunk = Nothing, state = ParserState { curBuffer = curBuffer, emptyLineFound = False, chunks } }
+    -- Responses API streams include explicit 'event:' lines; ignore them
+    | "event:" `ByteString.isPrefixOf` input = ParserResult { chunk = Nothing, state = ParserState { curBuffer = curBuffer, emptyLineFound = False, chunks } }
     -- try to parse line together with buffer otherwise
     | otherwise = case ByteString.stripPrefix "data: " (ByteString.strip (curBuffer <> input)) of
             -- the stream terminated by a data: [DONE] message
@@ -361,7 +366,18 @@ parseResponseChunk ParserState { curBuffer, emptyLineFound, chunks } input
                             { chunk = Just completionChunk
                             , state = ParserState { curBuffer = "", emptyLineFound = False, chunks = chunks <> [completionChunk] }
                             }
-                    Left err -> error (show err <> " while parsing " <> show input)
+                    Left _ ->
+                        case buildChunkFromResponsesEvent json of
+                            Just completionChunk ->
+                                ParserResult
+                                    { chunk = Just completionChunk
+                                    , state = ParserState { curBuffer = "", emptyLineFound = False, chunks = chunks <> [completionChunk] }
+                                    }
+                            Nothing ->
+                                ParserResult
+                                    { chunk = Nothing
+                                    , state = ParserState { curBuffer = curBuffer, emptyLineFound = False, chunks }
+                                    }
                         --ParserResult
                         --    { chunk = Nothing
                         --    , state = ParserState { curBuffer = curBuffer <> json, emptyLineFound = False, chunks = chunks } }
@@ -390,7 +406,7 @@ fetchCompletion config completionRequest = do
 fetchCompletionWithoutRetry :: Config -> CompletionRequest -> IO CompletionResult
 fetchCompletionWithoutRetry Config { .. } completionRequest = do
         let
-            endpoint = "/chat/completions"
+            endpoint = if usesResponsesAPI completionRequest then "/responses" else "/chat/completions"
             url :: Text = baseUrl <> endpoint
             basePath :: ByteString = Text.encodeUtf8 (Text.pack (Maybe.fromMaybe (error "invalid OpenAI baseUrl") ((.uriPath) <$> URI.parseURI (Text.unpack url))))
         modifyContextSSL (\context -> do
@@ -405,11 +421,141 @@ fetchCompletionWithoutRetry Config { .. } completionRequest = do
                                 Network.Http.Client.setHeader "Authorization" ("Bearer " <> Text.encodeUtf8 secretKey)
                                 applyExtraHeaders completionRequest.extraHeaders
 
-                    sendRequest connection q (jsonBody completionRequest)
-                    receiveResponse connection jsonHandler
+                    let requestBody = if usesResponsesAPI completionRequest then buildResponsesRequestBody completionRequest else toJSON completionRequest
+                    sendRequest connection q (jsonBody requestBody)
+                    if usesResponsesAPI completionRequest
+                        then receiveResponse connection responsesHandler
+                        else receiveResponse connection jsonHandler
 
 enableStream :: CompletionRequest -> CompletionRequest
 enableStream completionRequest = completionRequest { stream = True }
+
+-- Decide whether to call the new Responses API (required for GPT-5 models)
+usesResponsesAPI :: CompletionRequest -> Bool
+usesResponsesAPI CompletionRequest { model } =
+    Text.isPrefixOf "gpt-5" model || Text.isInfixOf "-5" model
+
+-- Build a Responses API request body from our CompletionRequest
+buildResponsesRequestBody :: CompletionRequest -> Value
+buildResponsesRequestBody CompletionRequest { messages, model, maxTokens, temperature, presencePenalty, frequencePenalty, tools, reasoningEffort, parallelToolCalls, stream } =
+    object $ Maybe.catMaybes
+        [ Just ("model" .= model)
+        , Just ("input" .= map messageToResponsesInput messages)
+        , ("max_output_tokens" .=) <$> maxTokens
+        , ("temperature" .=) <$> temperature
+        , ("presence_penalty" .=) <$> presencePenalty
+        , ("frequency_penalty" .=) <$> frequencePenalty
+        , ("tools" .=) <$> emptyListToNothing tools
+        , ("reasoning_effort" .=) <$> reasoningEffort
+        , ("parallel_tool_calls" .=) <$> parallelToolCalls
+        , Just ("stream" .= stream)
+        ]
+    where
+        messageToResponsesInput :: Message -> Value
+        messageToResponsesInput Message { role, content, cacheControl } =
+            object $ Maybe.catMaybes
+                [ Just ("role" .= role)
+                , Just ("content" .= case cacheControl of
+                        Just cc -> [ object [ "type" .= ("text" :: Text), "text" .= content, "cache_control" .= cc ] ]
+                        Nothing -> [ object [ "type" .= ("text" :: Text), "text" .= content ] ]
+                    )
+                ]
+
+-- Handler for non-streaming Responses API replies
+responsesHandler :: Response -> Streams.InputStream ByteString -> IO CompletionResult
+responsesHandler response stream = do
+    let status = getStatusCode response
+    jsonBytes :: ByteString <- Streams.fold mappend mempty stream
+    if status == 200
+        then case eitherDecodeStrict jsonBytes of
+            Right (val :: Value) ->
+                case extractOutputTextFromResponsesValue val of
+                    Just txt -> pure CompletionResult { choices = [ Choice { text = txt } ] }
+                    Nothing -> error ("Failed to extract output_text from Responses payload: " <> show val)
+            Left err -> error ("Failed to decode Responses payload: " <> err)
+        else case eitherDecodeStrict jsonBytes of
+            Right (CompletionError { message }) -> pure (CompletionError { message })
+            Right _ -> error "Should never happen"
+            Left _ -> pure (CompletionError { message = "an error happend: " <> Text.pack (show jsonBytes) })
+
+extractOutputTextFromResponsesValue :: Value -> Maybe Text
+extractOutputTextFromResponsesValue (Object o) =
+    -- Prefer the convenience field when present
+    case KeyMap.lookup (Key.fromText "output_text") o of
+        Just (String t) -> Just t
+        _ ->
+            -- Fallback to concatenating text from output[].content[].text
+            case KeyMap.lookup (Key.fromText "output") o of
+                Just (Array arr) ->
+                    let pieces = Foldable.toList arr >>= extractTextFromOutputItem in
+                    if null pieces then Nothing else Just (mconcat pieces)
+                _ -> Nothing
+    where
+        extractTextFromOutputItem :: Value -> [Text]
+        extractTextFromOutputItem (Object item) =
+            case KeyMap.lookup (Key.fromText "content") item of
+                Just (Array contentArr) -> Foldable.toList contentArr >>= extractTextFromContent
+                _ -> []
+        extractTextFromOutputItem _ = []
+
+        extractTextFromContent :: Value -> [Text]
+        extractTextFromContent (Object c) =
+            case KeyMap.lookup (Key.fromText "text") c of
+                Just (String t) -> [t]
+                _ -> []
+        extractTextFromContent _ = []
+extractOutputTextFromResponsesValue _ = Nothing
+
+-- Try to build a CompletionChunk (our internal streaming unit) from a Responses SSE event line
+buildChunkFromResponsesEvent :: ByteString -> Maybe CompletionChunk
+buildChunkFromResponsesEvent jsonBytes = do
+    val <- decodeStrict jsonBytes :: Maybe Value
+    case val of
+        Object o -> do
+            -- Only process delta-like events
+            let mType = case KeyMap.lookup (Key.fromText "type") o of
+                    Just (String t) -> Just t
+                    _ -> Nothing
+            case mType of
+                Just t | Text.isInfixOf "delta" t -> do
+                    let mDelta = KeyMap.lookup (Key.fromText "delta") o
+                    textDelta <- extractTextFromDelta mDelta
+                    let mId = case KeyMap.lookup (Key.fromText "id") o of
+                            Just (String i) -> i
+                            _ -> "responses-event"
+                    let mModel = case KeyMap.lookup (Key.fromText "model") o of
+                            Just (String m) -> m
+                            _ -> "gpt-5"
+                    Just CompletionChunk
+                        { id = mId
+                        , choices = [ CompletionChunkChoice { delta = Delta { content = Just textDelta, toolCalls = Nothing, role = Nothing }, finishReason = Nothing } ]
+                        , created = 0
+                        , model = mModel
+                        , systemFingerprint = Nothing
+                        , usage = Nothing
+                        }
+                _ -> Nothing
+        _ -> Nothing
+
+extractTextFromDelta :: Maybe Value -> Maybe Text
+extractTextFromDelta Nothing = Nothing
+extractTextFromDelta (Just (Object d)) =
+    case KeyMap.lookup (Key.fromText "text") d of
+        Just (String t) -> Just t
+        _ -> case KeyMap.lookup (Key.fromText "content") d of
+            Just (Array arr) ->
+                let pieces = Foldable.toList arr >>= getTextIfPresent in
+                if null pieces then Nothing else Just (mconcat pieces)
+            _ -> Nothing
+    where
+        getTextIfPresent :: Value -> [Text]
+        getTextIfPresent (Object o) =
+            case KeyMap.lookup (Key.fromText "text") o of
+                Just (String t) -> [t]
+                _ -> []
+        getTextIfPresent _ = []
+extractTextFromDelta (Just (String t)) = Just t
+extractTextFromDelta _ = Nothing
 
 data CompletionChunk = CompletionChunk
     { id :: !Text

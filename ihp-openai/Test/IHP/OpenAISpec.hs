@@ -1,3 +1,5 @@
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
 import Test.Hspec
@@ -6,6 +8,10 @@ import NeatInterpolation (trimming)
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text as Text
 import Data.Aeson
+import qualified Data.Maybe as Maybe
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Key as Key
+import qualified Data.Vector as Vector
 
 main :: IO ()
 main = hspec do
@@ -701,3 +707,58 @@ tests = do
                 |]
 
                 decodeStrictText (response) `shouldBe` (Just CompletionError { message = "You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors." })
+
+        describe "Responses API" do
+            it "detects GPT-5 models for Responses API routing" do
+                let req5 = newCompletionRequest { model = "gpt-5" }
+                let req4 = newCompletionRequest { model = "gpt-4-turbo" }
+                usesResponsesAPI req5 `shouldBe` True
+                usesResponsesAPI req4 `shouldBe` False
+
+            it "builds a valid Responses request body" do
+                let req = newCompletionRequest
+                        { model = "gpt-5"
+                        , messages = [ userMessage "Hello" ]
+                        }
+                let v = buildResponsesRequestBody req
+                -- Expect an input array with a single item containing text content
+                case v of
+                    Object o -> do
+                        KeyMap.lookup (Key.fromText "model") o `shouldBe` Just (String "gpt-5")
+                        case KeyMap.lookup (Key.fromText "input") o of
+                            Just (Array arr) -> Vector.length arr `shouldBe` 1
+                            _ -> expectationFailure "input should be an array"
+                    _ -> expectationFailure "responses body should be an object"
+
+            it "parses Responses SSE delta events into CompletionChunk" do
+                let input = [trimming|
+                    event: response.created
+                    data: {"id":"res_123","type":"response.created","model":"gpt-5"}
+
+                    event: response.output_text.delta
+                    data: {"id":"res_123","type":"response.output_text.delta","delta":"Hello","model":"gpt-5"}
+
+                    event: response.completed
+                    data: {"id":"res_123","type":"response.completed"}
+                |]
+                let finalState = foldl (\state line -> (parseResponseChunk state (Text.encodeUtf8 line)).state) emptyParserState (Text.lines input)
+                let hasHello = any (elem (Just "Hello") . map (.delta.content) . (.choices)) finalState.chunks
+                hasHello `shouldBe` True
+
+            it "extracts output_text from non-streaming Responses JSON" do
+                let payload1 = [trimming|
+                    { "id": "res_123", "output_text": "Hello world" }
+                |]
+                let payload2 = [trimming|
+                    { "id": "res_123", "output": [ { "content": [ { "type": "output_text", "text": "Hello world" } ] } ] }
+                |]
+                case decodeStrictText payload1 of
+                    Just (v1 :: Value) -> extractOutputTextFromResponsesValue v1 `shouldBe` Just "Hello world"
+                    _ -> expectationFailure "failed to decode payload1"
+                case decodeStrictText payload2 of
+                    Just (v2 :: Value) -> extractOutputTextFromResponsesValue v2 `shouldBe` Just "Hello world"
+                    _ -> expectationFailure "failed to decode payload2"
+
+-- Helpers
+decodeStrictText :: FromJSON a => Text.Text -> Maybe a
+decodeStrictText = decodeStrict . Text.encodeUtf8
