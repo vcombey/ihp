@@ -9,6 +9,7 @@ import IHP.Prelude
 import IHP.Controller.RequestContext
 import Control.Concurrent.MVar (MVar)
 import qualified IHP.PGListener as PGListener
+import Data.HashMap.Strict (HashMap)
 
 data AutoRefreshState = AutoRefreshDisabled | AutoRefreshEnabled { sessionId :: !UUID }
 
@@ -21,6 +22,8 @@ data AutoRefreshSession = AutoRefreshSession
         , event :: !(MVar ())
         -- | All tables this auto refresh session watches
         , tables :: !(Set ByteString)
+        -- | Optional row ids tracked per table; if empty, table-level refresh applies
+        , rowFilters :: !(HashMap ByteString (Set ByteString))
         -- | The last rendered html of this action. Initially this is the result of the initial page rendering
         , lastResponse :: !LByteString
         -- | Keep track of the last ping to this session to close it after too much time has passed without anything happening

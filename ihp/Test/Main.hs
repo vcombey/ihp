@@ -43,6 +43,7 @@ import qualified Test.QueryBuilderSpec
 import qualified Test.RouterSupportSpec
 import qualified Test.ViewSupportSpec
 import qualified Test.AutoRefreshSpec
+import qualified Test.AutoRefreshRowSpec
 import qualified Test.ServerSideComponent.HtmlParserSpec
 import qualified Test.ServerSideComponent.HtmlDiffSpec
 import qualified Test.FileStorage.ControllerFunctionsSpec
@@ -78,6 +79,7 @@ main = hspec do
     Test.RouterSupportSpec.tests
     Test.ViewSupportSpec.tests
     Test.AutoRefreshSpec.tests
+    Test.AutoRefreshRowSpec.tests
     Test.ServerSideComponent.HtmlParserSpec.tests
     Test.ServerSideComponent.HtmlDiffSpec.tests
     Test.FileStorage.ControllerFunctionsSpec.tests

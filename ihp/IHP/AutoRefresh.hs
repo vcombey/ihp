@@ -20,6 +20,8 @@ import qualified Control.Exception as Exception
 import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Maybe as Maybe
 import qualified Data.Text as Text
+import qualified Data.Aeson as Aeson
+import qualified Data.HashMap.Strict as HashMap
 import IHP.WebSocket
 import IHP.Controller.Context
 import IHP.Controller.Response 
@@ -74,9 +76,11 @@ autoRefresh runAction = do
             setSession "autoRefreshSessions" (map UUID.toText (id:availableSessions) |> Text.intercalate "")
 
             withTableReadTracker do
+                withRowReadTracker do
                 let handleResponse exception@(ResponseException response) = case response of
                         Wai.ResponseBuilder status headers builder -> do
                             tables <- readIORef ?touchedTables
+                            rowFilters <- readIORef ?touchedRowIds
                             lastPing <- getCurrentTime
 
                             -- It's important that we evaluate the response to HNF here
@@ -94,7 +98,7 @@ autoRefresh runAction = do
                             lastResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
 
                             event <- MVar.newEmptyMVar
-                            let session = AutoRefreshSession { id, renderView, event, tables, lastResponse, lastPing }
+                            let session = AutoRefreshSession { id, renderView, event, tables, rowFilters, lastResponse, lastPing }
                             modifyIORef' autoRefreshServer (\s -> s { sessions = session:s.sessions } )
                             async (gcSessions autoRefreshServer)
 
@@ -172,15 +176,33 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
         withRowLevelSecurityDisabled do
             sqlExec createTriggerSql ()
 
-        pgListener |> PGListener.subscribe (channelName table) \notification -> do
+        pgListener |> PGListener.subscribeJSON (channelName table) \(payload :: RowChange) -> do
+                let changedIdBS = Just (cs payload.id)
                 sessions <- (.sessions) <$> readIORef autoRefreshServer
-                sessions
-                    |> filter (\session -> table `Set.member` session.tables)
+                let relevant = sessions
+                        |> filter (\session -> table `Set.member` session.tables)
+                        |> filter (\session -> case changedIdBS of
+                                Nothing -> True
+                                Just rowId -> case HashMap.lookup table session.rowFilters of
+                                    Nothing -> True
+                                    Just ids -> Set.member rowId ids)
+                relevant
                     |> map (\session -> session.event)
                     |> mapM (\event -> MVar.tryPutMVar event ())
                 pure ())
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
+
+data RowChange = RowChange { id :: Text }
+instance Aeson.FromJSON RowChange where
+    parseJSON = Aeson.withObject "RowChange" \o -> do
+        -- Accept either text UUIDs or numbers converted to text
+        v <- o Aeson..: "id"
+        case v of
+            Aeson.String t -> pure (RowChange t)
+            Aeson.Number n -> pure (RowChange (tshow n))
+            Aeson.Bool b -> pure (RowChange (if b then "true" else "false"))
+            _ -> fail "Unsupported id json type"
 
 -- | Returns the ids of all sessions available to the client based on what sessions are found in the session cookie
 getAvailableSessions :: (?context :: ControllerContext) => IORef AutoRefreshServer -> IO [UUID]
@@ -235,20 +257,29 @@ notificationTrigger :: ByteString -> PG.Query
 notificationTrigger tableName = PG.Query [i|
         BEGIN;
             CREATE OR REPLACE FUNCTION #{functionName}() RETURNS TRIGGER AS $$
+                DECLARE
+                    payload text;
                 BEGIN
-                    PERFORM pg_notify('#{channelName tableName}', '');
-                    RETURN new;
+                    -- Build a small JSON payload with the primary key id field
+                    IF (TG_OP = 'DELETE') THEN
+                        payload := json_build_object('id', OLD.id)::text;
+                    ELSE
+                        payload := json_build_object('id', NEW.id)::text;
+                    END IF;
+                    PERFORM pg_notify('#{channelName tableName}', payload);
+                    RETURN NULL;
                 END;
             $$ language plpgsql;
-            DROP TRIGGER IF EXISTS #{insertTriggerName} ON #{tableName};
-            CREATE TRIGGER #{insertTriggerName} AFTER INSERT ON "#{tableName}" FOR EACH STATEMENT EXECUTE PROCEDURE #{functionName}();
-            
-            DROP TRIGGER IF EXISTS #{updateTriggerName} ON #{tableName};
-            CREATE TRIGGER #{updateTriggerName} AFTER UPDATE ON "#{tableName}" FOR EACH STATEMENT EXECUTE PROCEDURE #{functionName}();
 
-            DROP TRIGGER IF EXISTS #{deleteTriggerName} ON #{tableName};
-            CREATE TRIGGER #{deleteTriggerName} AFTER DELETE ON "#{tableName}" FOR EACH STATEMENT EXECUTE PROCEDURE #{functionName}();
-        
+            DROP TRIGGER IF EXISTS #{insertTriggerName} ON "#{tableName}";
+            CREATE TRIGGER #{insertTriggerName} AFTER INSERT ON "#{tableName}" FOR EACH ROW EXECUTE PROCEDURE #{functionName}();
+
+            DROP TRIGGER IF EXISTS #{updateTriggerName} ON "#{tableName}";
+            CREATE TRIGGER #{updateTriggerName} AFTER UPDATE ON "#{tableName}" FOR EACH ROW EXECUTE PROCEDURE #{functionName}();
+
+            DROP TRIGGER IF EXISTS #{deleteTriggerName} ON "#{tableName}";
+            CREATE TRIGGER #{deleteTriggerName} AFTER DELETE ON "#{tableName}" FOR EACH ROW EXECUTE PROCEDURE #{functionName}();
+
         COMMIT;
     |]
     where

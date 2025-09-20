@@ -34,6 +34,8 @@ import GHC.Types
 import Data.Proxy
 import Data.Data
 import Data.Aeson (ToJSON (..), FromJSON (..))
+import Data.HashMap.Strict (HashMap)
+import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Aeson as Aeson
 import qualified Data.Set as Set
 import qualified Text.Read as Read
@@ -62,6 +64,7 @@ data ModelContext = ModelContext
     , logger :: Logger
     -- | A callback that is called whenever a specific table is accessed using a SELECT query
     , trackTableReadCallback :: Maybe (ByteString -> IO ())
+    , trackRowReadCallback :: Maybe (ByteString -> ByteString -> IO ())
     -- | Is set to a value if row level security was enabled at runtime
     , rowLevelSecurity :: Maybe RowLevelSecurityContext
     }
@@ -80,6 +83,7 @@ notConnectedModelContext logger = ModelContext
     , transactionConnection = Nothing
     , logger = logger
     , trackTableReadCallback = Nothing
+    , trackRowReadCallback = Nothing
     , rowLevelSecurity = Nothing
     }
 
@@ -89,6 +93,7 @@ createModelContext idleTime maxConnections databaseUrl logger = do
     connectionPool <- Pool.newPool poolConfig
 
     let trackTableReadCallback = Nothing
+    let trackRowReadCallback = Nothing
     let transactionConnection = Nothing
     let rowLevelSecurity = Nothing
     pure ModelContext { .. }
@@ -1026,6 +1031,34 @@ withTableReadTracker trackedSection = do
     let ?modelContext = oldModelContext { trackTableReadCallback }
     let ?touchedTables = touchedTablesVar
     trackedSection
+
+-- | Track row ids read by the current action, grouped by table. Used by AutoRefresh to only refresh sessions impacted by specific row changes.
+-- Provides '?touchedRowIds' implicit parameter as a map from table -> set of row ids (as ByteString)
+withRowReadTracker :: (?modelContext :: ModelContext) => ((?modelContext :: ModelContext, ?touchedRowIds :: IORef (HashMap ByteString (Set ByteString))) => IO a) -> IO a
+withRowReadTracker trackedSection = do
+    touchedRowIdsVar <- newIORef mempty
+    let trackRowReadCallback = Just \tableName rowId -> modifyIORef' touchedRowIdsVar (HashMap.insertWith (<>) tableName (Set.singleton rowId))
+    let oldModelContext = ?modelContext
+    let ?modelContext = oldModelContext { trackRowReadCallback }
+    let ?touchedRowIds = touchedRowIdsVar
+    trackedSection
+
+-- | Manually track that a specific row id of a table was read within AutoRefresh.
+trackRowRead :: (?modelContext :: ModelContext) => ByteString -> ByteString -> IO ()
+trackRowRead tableName rowId = case ?modelContext.trackRowReadCallback of
+    Just callback -> callback tableName rowId
+    Nothing -> pure ()
+{-# INLINABLE trackRowRead #-}
+
+-- | Convenience for tracking a list of row ids for a given table symbol.
+--
+-- Example:
+-- > trackRowIdsRead @"posts" (map (.id) posts)
+trackRowIdsRead :: forall (table :: Symbol). (?modelContext :: ModelContext, KnownSymbol table, InputValue (PrimaryKey table)) => [Id' table] -> IO ()
+trackRowIdsRead ids = do
+    let tableNameBS = symbolToByteString @table
+    forM_ ids $ \(Id pk) -> trackRowRead tableNameBS (cs (inputValue pk))
+{-# INLINABLE trackRowIdsRead #-}
 
 
 -- | Shorthand filter function
