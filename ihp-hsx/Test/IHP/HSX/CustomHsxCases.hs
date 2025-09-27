@@ -86,8 +86,4 @@ quoteHsxExpressionShared settings spliceStr =
   let blazeExp = Blaze.quoteHsxExpression settings spliceStr
       lucidExp = Lucid2.quoteHsxExpression settings spliceStr
       lucidExpM = Lucid2.quoteHsxExpressionM settings spliceStr
-   in [| MkAllBackends
-       { blazeMarkup = $blazeExp
-       , lucid2Html = $lucidExp
-       , lucid2HtmlM = $lucidExpM
-       } |]
+   in [| MkAllBackends $blazeExp $lucidExp $lucidExpM |]

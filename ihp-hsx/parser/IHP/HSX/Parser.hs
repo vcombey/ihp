@@ -99,7 +99,7 @@ hsxSelfClosingElement :: Parser Node
 hsxSelfClosingElement = do
     _ <- char '<'
     name <- hsxElementName
-    let isLeaf = name `Set.member` leafs
+    let isLeaf = (Text.toCaseFold name) `Set.member` leafsCI
     attributes <-
       if isLeaf
         then hsxNodeAttributes (string ">" <|> string "/>")
@@ -126,7 +126,7 @@ hsxNormalElement = do
     --
     -- Additionally we don't do the usual escaping for style and script bodies, as this will make e.g. the
     -- javascript unusuable.
-    children <- case name of
+    children <- case Text.toCaseFold name of
             "script" -> parsePreEscapedTextChildren Text.strip
             "style" -> parsePreEscapedTextChildren (collapseSpace . Text.strip)
             otherwise -> parseNormalHSXChildren
@@ -240,12 +240,26 @@ hsxQuotedValue = do
 
 hsxSplicedValue :: Parser AttributeValue
 hsxSplicedValue = do
-    (pos, value) <- between (char '{') (char '}') do
-        pos <- getSourcePos
-        code <- takeWhile1P Nothing (\c -> c /= '}')
-        pure (pos, code)
-    haskellExpression <- parseHaskellExpression pos (cs value)
+    (pos, expression) <- doParse
+    haskellExpression <- parseHaskellExpression pos (cs expression)
     pure (ExpressionValue haskellExpression)
+  where
+    -- Parse a braced expression and allow nested {...}
+    doParse = do
+        (pos, tree) <- node
+        let value = treeToString "" tree
+        pure (pos, Text.init $ Text.tail value)
+
+    parseTree = (snd <$> node) <|> leaf
+    node = between (char '{') (char '}') do
+            pos <- getSourcePos
+            tree <- many parseTree
+            pure (pos, TokenNode tree)
+    leaf = TokenLeaf <$> takeWhile1P Nothing (\c -> c /= '{' && c /= '}')
+    treeToString :: Text -> TokenTree -> Text
+    treeToString acc (TokenLeaf value)  = acc <> value
+    treeToString acc (TokenNode [])     = acc
+    treeToString acc (TokenNode (x:xs)) = ((treeToString (acc <> "{") x) <> (Text.concat $ fmap (treeToString "") xs)) <> "}"
 
 hsxClosingElement name = (hsxClosingElement' name) <?> friendlyErrorMessage
     where
@@ -298,12 +312,16 @@ hsxSplicedNode = do
 hsxElementName :: Parser Text
 hsxElementName = do
     name <- takeWhile1P (Just "identifier") (\c -> Char.isAlphaNum c || c == '_' || c == '-' || c == '!')
-    let isValidParent = name `Set.member` parents
-    let isValidLeaf = name `Set.member` leafs
+    -- Validate tag names case-insensitively against known parents and leafs.
+    let nameCI = Text.toCaseFold name
+    let isValidParent = nameCI `Set.member` parentsCI
+    let isValidLeaf = nameCI `Set.member` leafsCI
     let isValidCustomWebComponent = "-" `Text.isInfixOf` name 
                                   && not (Text.isPrefixOf "-" name)
                                   && not (Char.isNumber (Text.head name))
-    let isValidAdditionalTag = name `Set.member` ?settings.additionalTagNames
+    let isValidAdditionalTag =
+            let additionalCI = Set.map Text.toCaseFold ?settings.additionalTagNames
+            in nameCI `Set.member` additionalCI
     let checkingMarkup = ?settings.checkMarkup
     unless (isValidParent || isValidLeaf || isValidCustomWebComponent || isValidAdditionalTag || not checkingMarkup) (fail $ "Invalid tag name: " <> cs name)
     space
@@ -606,6 +624,13 @@ leafs = Set.fromList
         , "param"
         , "!DOCTYPE"
         ]
+
+-- Case-insensitive lookup sets for tags
+parentsCI :: Set Text
+parentsCI = Set.map Text.toCaseFold parents
+
+leafsCI :: Set Text
+leafsCI = Set.map Text.toCaseFold leafs
 
 stripTextNodeWhitespaces nodes = stripLastTextNodeWhitespaces (stripFirstTextNodeWhitespaces nodes)
 

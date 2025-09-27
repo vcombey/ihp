@@ -34,6 +34,10 @@ instance LucidAttributeValue Text where
     buildAttribute = makeAttributes
     {-# INLINE buildAttribute #-}
 
+instance LucidAttributeValue String where
+    buildAttribute attr = makeAttributes attr . Text.pack
+    {-# INLINE buildAttribute #-}
+
 newtype LucidAttributeRaw = MkLucidAttributeRaw { unLucidAttributeRaw :: Text }
 
 instance LucidAttributeValue LucidAttributeRaw where

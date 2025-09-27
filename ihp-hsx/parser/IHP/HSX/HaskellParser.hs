@@ -11,6 +11,7 @@ import GHC.Data.StringBuffer
 import GHC.Parser.PostProcess
 import Text.Megaparsec.Pos
 import qualified "template-haskell" Language.Haskell.TH as TH
+import qualified GHC.LanguageExtensions.Type as LangExt
 
 import qualified GHC.Data.EnumSet as EnumSet
 import GHC
@@ -71,7 +72,20 @@ parseHaskellExpression sourcePos extensions input =
         parseState = Lexer.initParserState parserOpts buffer location
 
         parserOpts :: Lexer.ParserOpts
-        parserOpts = Lexer.mkParserOpts (EnumSet.fromList extensions) diagOpts [] False False False False
+        parserOpts =
+          let
+            -- Minimal set of language extensions required to parse splice expressions
+            -- that may include nested quasiquotes like [hsx|...|]. We always enable
+            -- QuasiQuotes regardless of the caller's extensions.
+            baseExts :: [LangExt.Extension]
+            baseExts = [ LangExt.QuasiQuotes
+                       , LangExt.TemplateHaskell
+                       , LangExt.TemplateHaskellQuotes
+                       , LangExt.BlockArguments
+                       ]
+            exts :: EnumSet.EnumSet LangExt.Extension
+            exts = EnumSet.fromList baseExts
+          in Lexer.mkParserOpts exts diagOpts [] False False False False
 
 diagOpts :: DiagOpts
 diagOpts =

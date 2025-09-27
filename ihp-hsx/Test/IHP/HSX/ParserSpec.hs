@@ -81,6 +81,10 @@ tests = do
             let p = parseHsx settings position extensions "<!DOCTYPE html><html lang=\"en\"><body>hello</body></html>"
             p `shouldBe` (Right (Children [Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
 
+        it "should accept lowercase doctype" do
+            let p = parseHsx settings position extensions "<!doctype html><html lang=\"en\"><body>hello</body></html>"
+            p `shouldBe` (Right (Children [Node "!doctype" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
+
     describe "uncheckedHsx" do
         let settings = HsxSettings False Set.empty Set.empty
         it "should not check markup" do
@@ -141,6 +145,10 @@ tests = do
         it "should accept doctype" do
             let p = parseHsx settings position extensions "<!DOCTYPE html><html lang=\"en\"><body>hello</body></html>"
             p `shouldBe` (Right (Children [Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
+
+        it "should accept lowercase doctype" do
+            let p = parseHsx settings position extensions "<!doctype html><html lang=\"en\"><body>hello</body></html>"
+            p `shouldBe` (Right (Children [Node "!doctype" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
 
     describe "customHsx" do
         let customSettings = HsxSettings True 

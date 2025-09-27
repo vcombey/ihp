@@ -38,7 +38,7 @@ tests = do
 
         it "should work with complex haskell expressions" do
             let project = Project { name = "Testproject" }
-            [hsx|<h1>Project: {project.name}</h1>|] `shouldBeSameHtml` "<h1>Project: Testproject</h1>"
+            [hsx|<h1>Project: {name project}</h1>|] `shouldBeSameHtml` "<h1>Project: Testproject</h1>"
 
         it "should support lambdas and pattern matching on constructors" do
             let placeData = PlaceId "Punches Cross"
@@ -222,6 +222,29 @@ tests = do
             textFragment `shouldBe` "<div>1</div><div>2</div><div>3</div>"
             doubleTextFragment `shouldBe` "<div><div>1</div><div>2</div><div>3</div></div><div><div>4</div><div>5</div><div>6</div></div>"
 
+        it "should support conditionals inside splices" do
+            let cond = True
+            [hsx|<div>{if cond then ("A" :: Text) else ("B" :: Text)}</div>|] `shouldBeSameHtml` "<div>A</div>"
+
+        it "should support HSX in conditional splices" do
+            let cond = True
+                branch = if cond then [hsx|<span>A</span>|] else [hsx|<span>B</span>|]
+            [hsx|<div>{branch}</div>|]
+                `shouldBeSameHtml` "<div><span>A</span></div>"
+
+        -- Note: Using HSX in both branches works at expression level
+        -- (outside of HSX splices) as well
+
+        it "should support conditionals returning HSX" do
+            let cond = True
+            (if cond then [hsx|<div>A</div>|] else [hsx|<div>B</div>|])
+                `shouldBeSameHtml` "<div>A</div>"
+
+        it "should support nested braces in attribute expressions" do
+            -- This exercises parsing a Haskell expression with nested braces inside an attribute splice
+            let r = R 1 2
+            [hsx|<div data={show (r { a = 3 })}></div>|] `shouldBeSameHtml` "<div data=\"R {a = 3, b = 2}\"></div>"
+
     describe "customHsx" do
         it "should allow specified custom tags" do
             [myTagsOnlyHsx|<mycustomtag>hello</mycustomtag>|] `shouldBeSameHtml` "<mycustomtag>hello</mycustomtag>"
@@ -245,6 +268,8 @@ newtype NewPlaceId = NewPlaceId Text
 
 newPlaceData = NewPlaceId "New Punches Cross"
 locationId = LocationId 17 (PlaceId "Punches Cross")
+
+data R = R { a :: Int, b :: Int } deriving Show
 
 shouldBeSameHtml :: HasCallStack => AllBackends -> TL.Text -> Expectation
 shouldBeSameHtml MkAllBackends {..} expectedHtml = do

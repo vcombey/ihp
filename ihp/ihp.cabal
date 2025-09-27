@@ -277,3 +277,15 @@ library
 source-repository head
     type:     git
     location: https://github.com/digitallyinduced/ihp
+
+test-suite ihp-spec
+    type: exitcode-stdio-1.0
+    hs-source-dirs: Test
+    main-is: Spec.hs
+    build-depends:
+        base,
+        ihp,
+        hspec,
+        bytestring,
+        text
+    default-language: GHC2021

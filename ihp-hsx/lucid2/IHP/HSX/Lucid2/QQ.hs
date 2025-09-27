@@ -20,6 +20,7 @@ module IHP.HSX.Lucid2.QQ
 import           Prelude
 import Data.Foldable (Foldable(..))
 import Data.Text (Text)
+import qualified Data.Text as Text
 import           IHP.HSX.Parser
 import           IHP.HSX.Lucid2.Attribute
 import qualified IHP.HSX.Lucid2.ToHtml as M
@@ -80,7 +81,8 @@ quoteHsxExpression settings code = do
             pure $ Megaparsec.SourcePos (TH.loc_filename loc) (Megaparsec.mkPos line) (Megaparsec.mkPos col)
 
 compileToHaskell :: Node -> TH.ExpQ
-compileToHaskell (Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True) = [| doctype_ |]
+compileToHaskell (Node name [StaticAttribute "html" (TextValue "html")] [] True)
+  | Text.toCaseFold name == "!doctype" = [| doctype_ |]
 compileToHaskell (Node name attributes children isLeaf) =
     let
         renderedChildren = TH.listE $ map compileToHaskell children
@@ -172,7 +174,8 @@ quoteHsxExpressionM settings code = do
             pure $ Megaparsec.SourcePos (TH.loc_filename loc) (Megaparsec.mkPos line) (Megaparsec.mkPos col)
 
 compileToHaskellM :: Node -> TH.ExpQ
-compileToHaskellM (Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True) = [| M.Lucid2Html doctype_ |]
+compileToHaskellM (Node name [StaticAttribute "html" (TextValue "html")] [] True)
+  | Text.toCaseFold name == "!doctype" = [| M.Lucid2Html doctype_ |]
 compileToHaskellM (Node name attributes children isLeaf) =
     let
         renderedChildren = TH.listE $ map compileToHaskellM children

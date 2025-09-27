@@ -85,7 +85,8 @@ library ihp-hsx-parser
     import: common-extensions, common-flags, common-depends
     default-language: GHC2021
     build-depends:
-        ghc >= 9.4.4 && < 9.13
+        ghc >= 9.4.4 && < 9.13,
+        ghc-boot-th
     hs-source-dirs: parser
     exposed-modules:
         IHP.HSX.Parser
