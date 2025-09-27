@@ -22,7 +22,19 @@ Auto Refresh first has to be activated for an action by calling [`autoRefresh`](
 
 When the page is rendered a small JavaScript function will connect back to the IHP server using a WebSocket connection.
 
-Whenever an `INSERT`, `UPDATE` or `DELETE` happens to the tables used by your action IHP will rerun your action on the server-side. When the generated HTML looks different than the HTML generated on the initial page load it will send the new HTML to the browser using the WebSocket connection. The JavaScript listening on the WebSocket will use the new HTML to update the current page. It uses morphdom to only touch the parts of your current DOM that have changed.
+Whenever an `INSERT`, `UPDATE` or `DELETE` happens to the tables used by your action, IHP checks whether the concrete row change could affect the output of your page before rerendering. If a change is relevant, the action is rerun on the server-side. When the generated HTML looks different than the HTML generated on the initial page load it will send the new HTML to the browser using the WebSocket connection. The JavaScript listening on the WebSocket will use the new HTML to update the current page. It uses morphdom to only touch the parts of your current DOM that have changed.
+
+### Targeted Re-Rendering (Row-Aware Auto Refresh)
+
+Starting with this version, Auto Refresh is “row-aware” and avoids unnecessary rerenders on hot tables:
+
+- Row-level notifications: Database triggers now fire per row and include the changed row id as the notification payload.
+- Query tracking: During the initial render inside `autoRefresh do`, IHP records the SELECT statements (SQL + parameters) that produced the page (this is automatic for QueryBuilder `fetch` calls; see below for custom SQL).
+- Membership checks on change: On each notification, Auto Refresh tests whether the changed id would be part of any recorded SELECT for that table by running a tiny `SELECT EXISTS(SELECT 1 FROM (<recorded-select>) WHERE (id)::text = ?)`.
+  - If true (row is or became part of the page), the server rerenders the action and pushes the HTML diff to the client.
+  - If false (e.g. row belongs to another user, or doesn’t match the WHERE), the page is left untouched.
+
+This keeps the classic developer experience (SSR views, automatic DOM patching) while scaling better with many users and frequent writes.
 
 
 ### Using Auto Refresh
@@ -92,3 +104,47 @@ action StatsAction = autoRefresh do
 ```
 
 The [`trackTableRead`](https://ihp.digitallyinduced.com/api-docs/IHP-ModelSupport.html#v:trackTableRead) marks the table as accessed for Auto Refresh and leads to the table being watched.
+
+#### Making Targeted Re-Rendering Work With Custom SQL
+
+QueryBuilder-based `fetch` calls automatically register their SELECT SQL and parameters so Auto Refresh can run precise membership checks. For custom SQL, you can optionally register the SELECT you used so Auto Refresh can determine whether a specific row change should rerender your page:
+
+```haskell
+action StatsAction = autoRefresh do
+    let sql = "SELECT id, name FROM companies WHERE plan = ? ORDER BY created_at DESC LIMIT 50"
+    let params = (Only ("pro" :: Text))
+    companies <- sqlQuery sql params
+
+    -- 1) Mark table as accessed so it will be watched
+    trackTableRead "companies"
+
+    -- 2) Register the SELECT used to produce the page (SQL + params)
+    -- This lets Auto Refresh run `SELECT EXISTS` checks for inserts/updates
+    trackSelectQuery "companies" sql (PG.toRow params)
+
+    render StatsView { .. }
+```
+
+Notes:
+
+- You don’t need to register every SELECT; register the ones that influence the output you want to gate rerenders on (e.g., the main list).
+- For most pages, QueryBuilder-based code needs no changes — registration happens automatically.
+
+#### (Optional) Recording Returned Ids
+
+If you have the ids handy after a custom query, you can further reduce work by registering the ids that were actually rendered. Then updates/deletes to those ids can rerender without a membership roundtrip:
+
+```haskell
+-- After loading companies
+let idsAsText = map (tshow . unpackId . (.id)) companies
+trackRecordIdsRead "companies" idsAsText
+```
+
+This is optional; the membership checks alone are sufficient and work well when the WHERE clause is selective.
+
+### Differences to DataSync
+
+- DataSync pushes JSON patches (per-record change sets) to clients of SPA-like UIs; Auto Refresh stays fully SSR and pushes HTML snapshots.
+- Both now filter updates by id: DataSync at the row level for subscriptions, Auto Refresh before re-rendering a page.
+- Use DataSync for high-frequency, fine-grained interactive UIs; use Auto Refresh for SSR pages that benefit from targeted rerendering.
+

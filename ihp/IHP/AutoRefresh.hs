@@ -15,6 +15,8 @@ import IHP.Controller.Session
 import qualified Network.Wai.Internal as Wai
 import qualified Data.Binary.Builder as ByteString
 import qualified Data.Set as Set
+import qualified Data.HashMap.Strict as HashMap
+import qualified Data.ByteString.Char8 as BS
 import IHP.ModelSupport
 import qualified Control.Exception as Exception
 import qualified Control.Concurrent.MVar as MVar
@@ -25,6 +27,8 @@ import IHP.Controller.Context
 import IHP.Controller.Response 
 import qualified IHP.PGListener as PGListener
 import qualified Database.PostgreSQL.Simple.Types as PG
+import qualified Database.PostgreSQL.Simple.Notification as PGN
+import qualified Database.PostgreSQL.Simple.ToField as PGTF
 import Data.String.Interpolate.IsString
 
 initAutoRefresh :: (?context :: ControllerContext, ?applicationContext :: ApplicationContext) => IO ()
@@ -89,7 +93,10 @@ autoRefresh runAction = do
                             lastResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
 
                             event <- MVar.newEmptyMVar
-                            let session = AutoRefreshSession { id, renderView, event, tables, lastResponse, lastPing }
+                            recordIdsByTable <- readIORef ?trackedRecordIdsByTable
+                            selectQueriesByTable <- readIORef ?trackedSelectsByTable
+
+                            let session = AutoRefreshSession { id, renderView, event, tables, recordIdsByTable, selectQueriesByTable, lastResponse, lastPing }
                             modifyIORef' autoRefreshServer (\s -> s { sessions = session:s.sessions } )
                             async (gcSessions autoRefreshServer)
 
@@ -168,11 +175,27 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
             sqlExec createTriggerSql ()
 
         pgListener |> PGListener.subscribe (channelName table) \notification -> do
+                let idText = cs (PGN.notificationData notification) :: Text
                 sessions <- (.sessions) <$> readIORef autoRefreshServer
-                sessions
-                    |> filter (\session -> table `Set.member` session.tables)
-                    |> map (\session -> session.event)
-                    |> mapM (\event -> MVar.tryPutMVar event ())
+                forEach sessions \session -> do
+                    when (table `Set.member` session.tables) do
+                        let watchedIds = HashMap.lookupDefault Set.empty table session.recordIdsByTable
+                        if Set.member idText watchedIds then do
+                            _ <- MVar.tryPutMVar session.event ()
+                            pure ()
+                        else do
+                            let selects = HashMap.lookupDefault [] table session.selectQueriesByTable
+                            existsBools <- forM selects (\(sql, params) -> do
+                                let membershipSQL = PG.Query ("SELECT EXISTS(SELECT 1 FROM (" <> cs sql <> ") AS records WHERE (records.id)::text = ?) AS _exists")
+                                [PG.Only exists] <- sqlQuery membershipSQL (params <> [PGTF.toField idText])
+                                pure (exists :: Bool))
+                            let shouldRerender = or existsBools
+                            when shouldRerender do
+                                -- update watched ids in server state
+                                let updateSession s = if s.id == session.id then s { recordIdsByTable = HashMap.insert table (Set.insert idText watchedIds) s.recordIdsByTable } else s
+                                modifyIORef' autoRefreshServer (\server -> server { sessions = map updateSession server.sessions })
+                                _ <- MVar.tryPutMVar session.event ()
+                                pure ()
                 pure ())
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
@@ -231,18 +254,24 @@ notificationTrigger tableName = PG.Query [i|
         BEGIN;
             CREATE OR REPLACE FUNCTION #{functionName}() RETURNS TRIGGER AS $$
                 BEGIN
-                    PERFORM pg_notify('#{channelName tableName}', '');
+                    IF TG_OP = 'INSERT' THEN
+                    PERFORM pg_notify('#{channelName tableName}', NEW.id::text);
+                ELSIF TG_OP = 'UPDATE' THEN
+                    PERFORM pg_notify('#{channelName tableName}', NEW.id::text);
+                ELSIF TG_OP = 'DELETE' THEN
+                    PERFORM pg_notify('#{channelName tableName}', OLD.id::text);
+                END IF;
                     RETURN new;
                 END;
             $$ language plpgsql;
             DROP TRIGGER IF EXISTS #{insertTriggerName} ON #{tableName};
-            CREATE TRIGGER #{insertTriggerName} AFTER INSERT ON "#{tableName}" FOR EACH STATEMENT EXECUTE PROCEDURE #{functionName}();
+            CREATE TRIGGER #{insertTriggerName} AFTER INSERT ON "#{tableName}" FOR EACH ROW EXECUTE PROCEDURE #{functionName}();
             
             DROP TRIGGER IF EXISTS #{updateTriggerName} ON #{tableName};
-            CREATE TRIGGER #{updateTriggerName} AFTER UPDATE ON "#{tableName}" FOR EACH STATEMENT EXECUTE PROCEDURE #{functionName}();
+            CREATE TRIGGER #{updateTriggerName} AFTER UPDATE ON "#{tableName}" FOR EACH ROW EXECUTE PROCEDURE #{functionName}();
 
             DROP TRIGGER IF EXISTS #{deleteTriggerName} ON #{tableName};
-            CREATE TRIGGER #{deleteTriggerName} AFTER DELETE ON "#{tableName}" FOR EACH STATEMENT EXECUTE PROCEDURE #{functionName}();
+            CREATE TRIGGER #{deleteTriggerName} AFTER DELETE ON "#{tableName}" FOR EACH ROW EXECUTE PROCEDURE #{functionName}();
         
         COMMIT;
     |]

@@ -53,6 +53,7 @@ import GHC.Stack
 import qualified Numeric
 import qualified Data.Text.Encoding as Text
 import qualified Data.ByteString.Builder as Builder
+import qualified Data.HashMap.Strict as HashMap
 
 -- | Provides the db connection and some IHP-specific db configuration
 data ModelContext = ModelContext
@@ -62,6 +63,10 @@ data ModelContext = ModelContext
     , logger :: Logger
     -- | A callback that is called whenever a specific table is accessed using a SELECT query
     , trackTableReadCallback :: Maybe (ByteString -> IO ())
+    -- | A callback to record read record ids by table (used by AutoRefresh)
+    , trackRecordIdsReadCallback :: Maybe (ByteString -> [Text] -> IO ())
+    -- | A callback to record compiled SELECT sql + params per table (used by AutoRefresh)
+    , trackSelectQueryCallback :: Maybe (ByteString -> ByteString -> [Action] -> IO ())
     -- | Is set to a value if row level security was enabled at runtime
     , rowLevelSecurity :: Maybe RowLevelSecurityContext
     }
@@ -80,6 +85,8 @@ notConnectedModelContext logger = ModelContext
     , transactionConnection = Nothing
     , logger = logger
     , trackTableReadCallback = Nothing
+    , trackRecordIdsReadCallback = Nothing
+    , trackSelectQueryCallback = Nothing
     , rowLevelSecurity = Nothing
     }
 
@@ -89,6 +96,8 @@ createModelContext idleTime maxConnections databaseUrl logger = do
     connectionPool <- Pool.newPool poolConfig
 
     let trackTableReadCallback = Nothing
+    let trackRecordIdsReadCallback = Nothing
+    let trackSelectQueryCallback = Nothing
     let transactionConnection = Nothing
     let rowLevelSecurity = Nothing
     pure ModelContext { .. }
@@ -1005,6 +1014,20 @@ trackTableRead tableName = case ?modelContext.trackTableReadCallback of
     Nothing -> pure ()
 {-# INLINABLE trackTableRead #-}
 
+-- | Track record ids read by a SELECT on a table (used by AutoRefresh)
+trackRecordIdsRead :: (?modelContext :: ModelContext) => ByteString -> [Text] -> IO ()
+trackRecordIdsRead tableName ids = case ?modelContext.trackRecordIdsReadCallback of
+    Just callback -> callback tableName ids
+    Nothing -> pure ()
+{-# INLINABLE trackRecordIdsRead #-}
+
+-- | Track compiled SELECT query and its params (used by AutoRefresh)
+trackSelectQuery :: (?modelContext :: ModelContext) => ByteString -> ByteString -> [Action] -> IO ()
+trackSelectQuery tableName sql params = case ?modelContext.trackSelectQueryCallback of
+    Just callback -> callback tableName sql params
+    Nothing -> pure ()
+{-# INLINABLE trackSelectQuery #-}
+
 -- | Track all tables in SELECT queries executed within the given IO action.
 --
 -- You can read the touched tables by this function by accessing the variable @?touchedTables@ inside your given IO action.
@@ -1018,13 +1041,19 @@ trackTableRead tableName = case ?modelContext.trackTableReadCallback of
 -- >     tables <- readIORef ?touchedTables
 -- >     -- tables = Set.fromList ["projects", "users"]
 -- >
-withTableReadTracker :: (?modelContext :: ModelContext) => ((?modelContext :: ModelContext, ?touchedTables :: IORef (Set ByteString)) => IO ()) -> IO ()
+withTableReadTracker :: (?modelContext :: ModelContext) => ((?modelContext :: ModelContext, ?touchedTables :: IORef (Set ByteString), ?trackedRecordIdsByTable :: IORef (HashMap.HashMap ByteString (Set Text)), ?trackedSelectsByTable :: IORef (HashMap.HashMap ByteString [(ByteString, [Action])])) => IO ()) -> IO ()
 withTableReadTracker trackedSection = do
     touchedTablesVar <- newIORef Set.empty
+    trackedRecordIdsByTableVar <- newIORef HashMap.empty
+    trackedSelectsByTableVar <- newIORef HashMap.empty
     let trackTableReadCallback = Just \tableName -> modifyIORef' touchedTablesVar (Set.insert tableName)
+    let trackRecordIdsReadCallback = Just \tableName ids -> modifyIORef' trackedRecordIdsByTableVar (\m -> let cur = HashMap.lookupDefault Set.empty tableName m in HashMap.insert tableName (cur <> Set.fromList ids) m)
+    let trackSelectQueryCallback = Just \tableName sql params -> modifyIORef' trackedSelectsByTableVar (\m -> let cur = HashMap.lookupDefault [] tableName m in HashMap.insert tableName (cur <> [(sql, params)]) m)
     let oldModelContext = ?modelContext
-    let ?modelContext = oldModelContext { trackTableReadCallback }
+    let ?modelContext = oldModelContext { trackTableReadCallback, trackRecordIdsReadCallback, trackSelectQueryCallback }
     let ?touchedTables = touchedTablesVar
+    let ?trackedRecordIdsByTable = trackedRecordIdsByTableVar
+    let ?trackedSelectsByTable = trackedSelectsByTableVar
     trackedSection
 
 

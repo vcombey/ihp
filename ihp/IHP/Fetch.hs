@@ -112,6 +112,7 @@ commonFetch !queryBuilder = do
     let !(theQuery, theParameters) = queryBuilder
             |> toSQL
     trackTableRead (tableNameByteString @model)
+    trackSelectQuery (tableNameByteString @model) theQuery theParameters
     sqlQuery (Query $ cs theQuery) theParameters
 
 {-# INLINE commonFetchOneOrNothing #-}
@@ -122,6 +123,7 @@ commonFetchOneOrNothing !queryBuilder = do
             |> setJust #limitClause "LIMIT 1"
             |> toSQL'
     trackTableRead (tableNameByteString @model)
+    trackSelectQuery (tableNameByteString @model) theQuery theParameters
     results <- sqlQuery (Query $ cs theQuery) theParameters
     pure $ listToMaybe results
 
@@ -244,6 +246,7 @@ fetchSQLQuery :: (PG.FromRow model, ?modelContext :: ModelContext) => SQLQuery -
 fetchSQLQuery theQuery = do
     let (sql, theParameters) = toSQL' theQuery
     trackTableRead (theQuery.selectFrom)
+    trackSelectQuery (theQuery.selectFrom) sql theParameters
     sqlQuery (Query $ cs sql) theParameters
 
 -- | Returns the latest record or Nothing

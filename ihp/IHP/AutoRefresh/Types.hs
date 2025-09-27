@@ -9,6 +9,9 @@ import IHP.Prelude
 import IHP.Controller.RequestContext
 import Control.Concurrent.MVar (MVar)
 import qualified IHP.PGListener as PGListener
+import qualified Database.PostgreSQL.Simple.Types as PG
+import qualified Database.PostgreSQL.Simple.ToField as PGTF
+import qualified Data.HashMap.Strict as HashMap
 
 data AutoRefreshState = AutoRefreshDisabled | AutoRefreshEnabled { sessionId :: !UUID }
 data AutoRefreshSession = AutoRefreshSession
@@ -19,6 +22,10 @@ data AutoRefreshSession = AutoRefreshSession
         , event :: !(MVar ())
         -- | All tables this auto refresh session watches
         , tables :: !(Set ByteString)
+        -- | Per table: set of record ids (as text) that were part of the initial result set.
+        , recordIdsByTable :: !(HashMap.HashMap ByteString (Set Text))
+        -- | Per table: list of (SQL, params) of the SELECT queries used to produce the page
+        , selectQueriesByTable :: !(HashMap.HashMap ByteString [(ByteString, [PGTF.Action])])
         -- | The last rendered html of this action. Initially this is the result of the initial page rendering
         , lastResponse :: !LByteString
         -- | Keep track of the last ping to this session to close it after too much time has passed without anything happening
