@@ -20,18 +20,18 @@ tests = do
         it "keeps row json and extracts the primary key" do
             let userId :: UUID = "d3f0e0f8-6a4a-4b0a-9ac2-7c29f9c0a001"
             let row = Aeson.object ["id" Aeson..= userId, "user_id" Aeson..= userId]
-            let payload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, row }
-            let changeSet = insertChangeByTableName @'[User] "users" payload (emptyChangeSet @'[User])
+            let payload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, rowId = Aeson.toJSON userId }
+            let changeSet = insertChangeByTableName @'[User] "users" payload row (emptyChangeSet @'[User])
             let [change] = changesFor @User changeSet
             change.rowId `shouldBe` Just (Id userId :: Id User)
             rowField @"userId" change `shouldBe` Just userId
             rowsFor @User changeSet `shouldBe` [row]
 
-        it "skips row ids when the primary key column is missing" do
+        it "skips row ids when the payload id cannot be parsed" do
             let userId :: UUID = "d3f0e0f8-6a4a-4b0a-9ac2-7c29f9c0a002"
-            let row = Aeson.object ["user_id" Aeson..= userId]
-            let payload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, row }
-            let changeSet = insertChangeByTableName @'[User] "users" payload (emptyChangeSet @'[User])
+            let row = Aeson.object ["id" Aeson..= userId]
+            let payload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, rowId = Aeson.String "not-a-uuid" }
+            let changeSet = insertChangeByTableName @'[User] "users" payload row (emptyChangeSet @'[User])
             rowIdsFor @User changeSet `shouldBe` []
 
         it "routes changes to the matching table slot" do
@@ -39,21 +39,21 @@ tests = do
             let projectId :: UUID = "d3f0e0f8-6a4a-4b0a-9ac2-7c29f9c0a004"
             let userRow = Aeson.object ["id" Aeson..= userId, "user_id" Aeson..= userId]
             let projectRow = Aeson.object ["id" Aeson..= projectId, "user_id" Aeson..= userId]
-            let userPayload = AutoRefreshRowChangePayload { operation = AutoRefreshInsert, row = userRow }
-            let projectPayload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, row = projectRow }
+            let userPayload = AutoRefreshRowChangePayload { operation = AutoRefreshInsert, rowId = Aeson.toJSON userId }
+            let projectPayload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, rowId = Aeson.toJSON projectId }
             let changeSet =
                     emptyChangeSet @'[User, Project]
-                        |> insertChangeByTableName @'[User, Project] "projects" projectPayload
-                        |> insertChangeByTableName @'[User, Project] "users" userPayload
+                        |> insertChangeByTableName @'[User, Project] "projects" projectPayload projectRow
+                        |> insertChangeByTableName @'[User, Project] "users" userPayload userRow
             length (changesFor @Project changeSet) `shouldBe` 1
             length (changesFor @User changeSet) `shouldBe` 1
 
-        it "extracts composite primary keys from row json" do
+        it "extracts composite primary keys from the payload" do
             let userId :: UUID = "d3f0e0f8-6a4a-4b0a-9ac2-7c29f9c0a005"
             let projectId :: UUID = "d3f0e0f8-6a4a-4b0a-9ac2-7c29f9c0a006"
             let row = Aeson.object ["user_id" Aeson..= userId, "project_id" Aeson..= projectId]
-            let payload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, row }
-            let changeSet = insertChangeByTableName @'[Membership] "memberships" payload (emptyChangeSet @'[Membership])
+            let payload = AutoRefreshRowChangePayload { operation = AutoRefreshUpdate, rowId = Aeson.toJSON (userId, projectId) }
+            let changeSet = insertChangeByTableName @'[Membership] "memberships" payload row (emptyChangeSet @'[Membership])
             let membershipId = Id (userId, projectId) :: Id Membership
             hasRowId membershipId changeSet `shouldBe` True
             let [change] = changesFor @Membership changeSet

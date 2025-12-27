@@ -84,8 +84,8 @@ This uses row-level notifications and provides typed helpers like `changesFor @P
 
 ### Filtering by ids or foreign keys
 
-The change set includes full row JSON for each change. You can filter directly
-on any column without extra SQL.
+The change set includes full row JSON for each change (fetched server-side by id),
+so you can filter directly on any column without extra SQL.
 
 Example: refresh when any changed project belongs to the current user.
 
@@ -117,6 +117,9 @@ action DashboardAction { projectId, userId } =
             commentMatches = any (\change -> rowField @"projectId" change == Just projectId) (changesFor @Comment changes)
         in pure (projectMatches || taskMatches || commentMatches)
 ```
+
+Deletes do not include row data. The default behavior is to refresh any
+session watching a table when a DELETE happens.
 
 ### Custom SQL Queries with Auto Refresh
 

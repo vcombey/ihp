@@ -15,6 +15,7 @@ import qualified Data.UUID as UUID
 import IHP.Controller.Session
 import qualified Network.Wai.Internal as Wai
 import qualified Data.Binary.Builder as ByteString
+import qualified Data.ByteString.Char8 as B8
 import qualified Data.Set as Set
 import IHP.ModelSupport
 import qualified Control.Exception as Exception
@@ -77,8 +78,9 @@ autoRefreshWith options runAction = do
                         lastResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
                         event <- MVar.newEmptyMVar
                         pendingChanges <- newIORef (emptyChangeSet @tables)
+                        pendingDelete <- newIORef False
 
-                        let session = AutoRefreshSessionWithChanges { id, renderView, event, tables, lastResponse, lastPing, pendingChanges, shouldRefresh = shouldRefresh' }
+                        let session = AutoRefreshSessionWithChanges { id, renderView, event, tables, lastResponse, lastPing, pendingChanges, pendingDelete, shouldRefresh = shouldRefresh' }
                         modifyIORef' autoRefreshServer (\s -> s { sessions = session:s.sessions })
                         async (gcSessions autoRefreshServer)
 
@@ -194,11 +196,12 @@ instance WSApp AutoRefreshWSApp where
                         MVar.takeMVar event
                         (renderView requestContext) `catch` handleResponseException lastResponse
                         pure ()
-                AutoRefreshSessionWithChanges { renderView, event, lastResponse, pendingChanges, shouldRefresh } -> do
+                AutoRefreshSessionWithChanges { renderView, event, lastResponse, pendingChanges, pendingDelete, shouldRefresh } -> do
                     async $ forever do
                         MVar.takeMVar event
                         changes <- atomicModifyIORef' pendingChanges (\current -> (emptyChangeSet, current))
-                        shouldRender <- shouldRefresh changes
+                        shouldForceRefresh <- atomicModifyIORef' pendingDelete (\current -> (False, current))
+                        shouldRender <- if shouldForceRefresh then pure True else shouldRefresh changes
                         when shouldRender do
                             (renderView requestContext) `catch` handleResponseException lastResponse
                         pure ()
@@ -265,16 +268,23 @@ registerRowNotificationTrigger autoRefreshServer = do
             sqlExec createTriggerSql ()
 
         pgListener |> PGListener.subscribeJSON (rowChannelName table) \payload -> do
+                rowJson <- case payload.operation of
+                    AutoRefreshDelete -> pure Nothing
+                    _ -> fetchRowJsonByTableName table payload
                 sessions <- (.sessions) <$> readIORef autoRefreshServer
-                sessions |> mapM_ (handleRowChange table payload)
+                sessions |> mapM_ (handleRowChange table payload rowJson)
                 pure ())
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
     where
-        handleRowChange table payload session = case session of
-            AutoRefreshSessionWithChanges { tables, pendingChanges, event }
+        handleRowChange table payload rowJson session = case session of
+            AutoRefreshSessionWithChanges { tables, pendingChanges, pendingDelete, event }
                 | table `Set.member` tables -> do
-                    modifyIORef' pendingChanges (insertChangeByTableName table payload)
+                    case payload.operation of
+                        AutoRefreshDelete -> writeIORef pendingDelete True
+                        _ -> do
+                            forEach rowJson \row ->
+                                modifyIORef' pendingChanges (insertChangeByTableName table payload row)
                     MVar.tryPutMVar event ()
             AutoRefreshSession {} -> pure ()
 
@@ -356,19 +366,19 @@ notificationTrigger tableName = PG.Query [i|
         deleteTriggerName = "ar_did_delete_" <> tableName
 
 notificationRowTrigger :: ByteString -> [ByteString] -> PG.Query
-notificationRowTrigger tableName _primaryKeyColumns = PG.Query [i|
+notificationRowTrigger tableName primaryKeyColumns = PG.Query [i|
         BEGIN;
             CREATE OR REPLACE FUNCTION #{functionName}() RETURNS TRIGGER AS $$
                 DECLARE
-                    row_data json;
+                    row_id json;
                 BEGIN
                     IF (TG_OP = 'DELETE') THEN
-                        row_data := row_to_json(OLD);
-                        PERFORM pg_notify('#{rowChannelName tableName}', json_build_object('op', lower(TG_OP), 'row', row_data)::text);
+                        row_id := #{oldRowIdExpression};
+                        PERFORM pg_notify('#{rowChannelName tableName}', json_build_object('op', lower(TG_OP), 'id', row_id)::text);
                         RETURN OLD;
                     ELSE
-                        row_data := row_to_json(NEW);
-                        PERFORM pg_notify('#{rowChannelName tableName}', json_build_object('op', lower(TG_OP), 'row', row_data)::text);
+                        row_id := #{newRowIdExpression};
+                        PERFORM pg_notify('#{rowChannelName tableName}', json_build_object('op', lower(TG_OP), 'id', row_id)::text);
                         RETURN NEW;
                     END IF;
                 END;
@@ -389,6 +399,17 @@ notificationRowTrigger tableName _primaryKeyColumns = PG.Query [i|
         insertTriggerName = "ar_did_insert_row_" <> tableName
         updateTriggerName = "ar_did_update_row_" <> tableName
         deleteTriggerName = "ar_did_delete_row_" <> tableName
+        newRowIdExpression = rowIdExpression tableName "NEW" primaryKeyColumns
+        oldRowIdExpression = rowIdExpression tableName "OLD" primaryKeyColumns
+
+rowIdExpression :: ByteString -> ByteString -> [ByteString] -> ByteString
+rowIdExpression tableName recordAlias primaryKeyColumns =
+    case primaryKeyColumns of
+        [] -> error ("notificationRowTrigger: No primary keys found for " <> cs tableName)
+        [column] -> "to_json(" <> qualifiedColumn column <> ")"
+        columns -> "json_build_array(" <> B8.intercalate ", " (map qualifiedColumn columns) <> ")"
+    where
+        qualifiedColumn column = recordAlias <> ".\"" <> column <> "\""
 
 autoRefreshVaultKey :: Vault.Key (IORef AutoRefreshServer)
 autoRefreshVaultKey = unsafePerformIO Vault.newKey

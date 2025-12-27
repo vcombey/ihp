@@ -16,14 +16,15 @@ module IHP.AutoRefresh.Types where
 
 import IHP.Prelude
 import IHP.Controller.RequestContext
+import IHP.ModelSupport
 import Control.Concurrent.MVar (MVar)
 import qualified IHP.PGListener as PGListener
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as AesonKeyMap
 import Data.Kind (Type)
 import Data.Set (Set)
 import qualified Data.Set as Set
-import qualified Data.Vector as Vector
+import qualified Data.Aeson.KeyMap as AesonKeyMap
+import qualified Database.PostgreSQL.Simple.Types as PG
 
 data AutoRefreshOperation
     = AutoRefreshInsert
@@ -74,38 +75,51 @@ instance AutoRefreshChangeSetAppend tables => Semigroup (AutoRefreshChangeSet ta
 
 data AutoRefreshRowChangePayload = AutoRefreshRowChangePayload
     { operation :: !AutoRefreshOperation
-    , row :: !Aeson.Value
+    , rowId :: !Aeson.Value
     } deriving (Eq, Show)
 
 instance Aeson.FromJSON AutoRefreshRowChangePayload where
     parseJSON = Aeson.withObject "AutoRefreshRowChangePayload" \object ->
         AutoRefreshRowChangePayload
             <$> object Aeson..: "op"
-            <*> object Aeson..: "row"
+            <*> object Aeson..: "id"
 
 class AutoRefreshTableList (tables :: [Type]) where
     autoRefreshTableNames :: Set ByteString
     autoRefreshTableInfo :: [(ByteString, [ByteString])]
     emptyChangeSet :: AutoRefreshChangeSet tables
-    insertChangeByTableName :: ByteString -> AutoRefreshRowChangePayload -> AutoRefreshChangeSet tables -> AutoRefreshChangeSet tables
+    insertChangeByTableName :: ByteString -> AutoRefreshRowChangePayload -> Aeson.Value -> AutoRefreshChangeSet tables -> AutoRefreshChangeSet tables
+    fetchRowJsonByTableName :: (?modelContext :: ModelContext) => ByteString -> AutoRefreshRowChangePayload -> IO (Maybe Aeson.Value)
 
 instance AutoRefreshTableList '[] where
     autoRefreshTableNames = mempty
     autoRefreshTableInfo = []
     emptyChangeSet = AutoRefreshChangeSetNil
-    insertChangeByTableName _ _ changes = changes
+    insertChangeByTableName _ _ _ changes = changes
+    fetchRowJsonByTableName _ _ = pure Nothing
 
 instance (Table model, Aeson.FromJSON (Id model), AutoRefreshTableList rest) => AutoRefreshTableList (model ': rest) where
     autoRefreshTableNames = Set.insert (tableNameByteString @model) (autoRefreshTableNames @rest)
     autoRefreshTableInfo = (tableNameByteString @model, primaryKeyColumnNames @model) : (autoRefreshTableInfo @rest)
     emptyChangeSet = AutoRefreshChangeSetCons mempty (emptyChangeSet @rest)
-    insertChangeByTableName tableName payload (AutoRefreshChangeSetCons change rest)
-        | tableName == tableNameByteString @model = AutoRefreshChangeSetCons (insertRowChange payload change) rest
-        | otherwise = AutoRefreshChangeSetCons change (insertChangeByTableName @rest tableName payload rest)
+    insertChangeByTableName tableName payload row (AutoRefreshChangeSetCons change rest)
+        | tableName == tableNameByteString @model = AutoRefreshChangeSetCons (insertRowChange payload row change) rest
+        | otherwise = AutoRefreshChangeSetCons change (insertChangeByTableName @rest tableName payload row rest)
         where
-            insertRowChange AutoRefreshRowChangePayload { operation, row } (AutoRefreshTableChanges rows) =
-                let rowId = extractRowId @model row
-                in AutoRefreshTableChanges (AutoRefreshRowChange { operation, row, rowId } : rows)
+            insertRowChange AutoRefreshRowChangePayload { operation, rowId } row (AutoRefreshTableChanges rows) =
+                let parsedRowId = Aeson.parseMaybe Aeson.parseJSON rowId
+                in AutoRefreshTableChanges (AutoRefreshRowChange { operation, row, rowId = parsedRowId } : rows)
+    fetchRowJsonByTableName tableName payload
+        | tableName == tableNameByteString @model = fetchRowJsonById payload
+        | otherwise = fetchRowJsonByTableName @rest tableName payload
+        where
+            fetchRowJsonById AutoRefreshRowChangePayload { rowId } =
+                case Aeson.parseMaybe Aeson.parseJSON rowId of
+                    Just parsedRowId -> do
+                        let query = "SELECT row_to_json(" <> tableNameByteString @model <> ") FROM " <> tableNameByteString @model <> " WHERE " <> primaryKeyConditionColumnSelector @model <> " = ?"
+                        rows <- sqlQuery (PG.Query query) (PG.Only (primaryKeyConditionForId @model parsedRowId))
+                        pure (headMay rows)
+                    Nothing -> pure Nothing
 
 class AutoRefreshTableMember model (tables :: [Type]) where
     getTableChanges :: AutoRefreshChangeSet tables -> AutoRefreshTableChanges model
@@ -144,17 +158,6 @@ rowFieldByColumnName columnName = \case
         Aeson.parseMaybe Aeson.parseJSON value
     _ -> Nothing
 
-extractRowId :: forall model. (Table model, Aeson.FromJSON (Id model)) => Aeson.Value -> Maybe (Id model)
-extractRowId = \case
-    Aeson.Object object -> do
-        let primaryKeys = primaryKeyColumnNames @model
-        values <- traverse (\column -> AesonKeyMap.lookup (cs column) object) primaryKeys
-        let idValue = case values of
-                [value] -> value
-                _ -> Aeson.Array (Vector.fromList values)
-        Aeson.parseMaybe Aeson.parseJSON idValue
-    _ -> Nothing
-
 data AutoRefreshState = AutoRefreshDisabled | AutoRefreshEnabled { sessionId :: !UUID }
 data AutoRefreshSession = AutoRefreshSession
         { id :: !UUID
@@ -183,6 +186,8 @@ data AutoRefreshSession = AutoRefreshSession
         , lastPing :: !UTCTime
         -- | Pending changes coalesced since the last refresh
         , pendingChanges :: !(IORef (AutoRefreshChangeSet tables))
+        -- | Track delete events to force refresh without row data
+        , pendingDelete :: !(IORef Bool)
         -- | Decide if a refresh should run for the accumulated changes
         , shouldRefresh :: !(AutoRefreshChangeSet tables -> IO Bool)
         }
