@@ -373,15 +373,15 @@ notificationRowTrigger tableName primaryKeyColumns = PG.Query [i|
         BEGIN;
             CREATE OR REPLACE FUNCTION #{functionName}() RETURNS TRIGGER AS $$
                 DECLARE
-                    row_id json;
+                    row_id jsonb;
                 BEGIN
                     IF (TG_OP = 'DELETE') THEN
                         row_id := #{oldRowIdExpression};
-                        PERFORM pg_notify('#{rowChannelName tableName}', json_build_object('op', lower(TG_OP), 'id', row_id)::text);
+                        PERFORM pg_notify('#{rowChannelName tableName}', jsonb_build_object('op', lower(TG_OP), 'id', row_id)::text);
                         RETURN OLD;
                     ELSE
                         row_id := #{newRowIdExpression};
-                        PERFORM pg_notify('#{rowChannelName tableName}', json_build_object('op', lower(TG_OP), 'id', row_id)::text);
+                        PERFORM pg_notify('#{rowChannelName tableName}', jsonb_build_object('op', lower(TG_OP), 'id', row_id)::text);
                         RETURN NEW;
                     END IF;
                 END;
@@ -409,8 +409,8 @@ rowIdExpression :: ByteString -> [ByteString] -> ByteString
 rowIdExpression recordAlias primaryKeyColumns =
     case primaryKeyColumns of
         [] -> error "notificationRowTrigger: No primary keys found"
-        [column] -> "to_json(" <> qualifiedColumn column <> ")"
-        columns -> "json_build_array(" <> B8.intercalate ", " (map qualifiedColumn columns) <> ")"
+        [column] -> "to_jsonb(" <> qualifiedColumn column <> ")"
+        columns -> "jsonb_build_array(" <> B8.intercalate ", " (map qualifiedColumn columns) <> ")"
     where
         qualifiedColumn column = recordAlias <> ".\"" <> column <> "\""
 
@@ -424,7 +424,7 @@ fetchRowJsonById :: (?modelContext :: ModelContext) => ByteString -> [ByteString
 fetchRowJsonById tableName primaryKeyColumns AutoRefreshRowChangePayload { payloadRowId } = do
     let alias = "t"
     let rowIdExpr = rowIdExpression alias primaryKeyColumns
-    let query = "SELECT row_to_json(" <> alias <> ") FROM \"" <> tableName <> "\" AS " <> alias <> " WHERE " <> rowIdExpr <> " = ?::json"
+    let query = "SELECT row_to_json(" <> alias <> ") FROM \"" <> tableName <> "\" AS " <> alias <> " WHERE " <> rowIdExpr <> " = ?::jsonb"
     rows <- (sqlQuery (PG.Query query) (PG.Only payloadRowId) :: IO [PG.Only Aeson.Value])
     pure (headMay (map (\(PG.Only value) -> value) rows))
 
