@@ -22,6 +22,7 @@ import qualified Control.Exception as Exception
 import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Maybe as Maybe
 import qualified Data.Text as Text
+import qualified Data.Aeson as Aeson
 import IHP.WebSocket
 import IHP.Controller.Context
 import IHP.Controller.Response 
@@ -37,17 +38,16 @@ initAutoRefresh :: (?context :: ControllerContext) => IO ()
 initAutoRefresh = do
     putContext AutoRefreshDisabled
 
-data AutoRefreshOptions tables action = AutoRefreshOptions
-    { shouldRefresh :: action -> AutoRefreshChangeSet tables -> IO Bool
+data AutoRefreshOptions action = AutoRefreshOptions
+    { shouldRefresh :: action -> AutoRefreshChangeSet -> IO Bool
     }
 
-autoRefreshWith :: forall tables action. (
+autoRefreshWith :: forall action. (
     ?theAction :: action
     , Controller action
-    , AutoRefreshTableList tables
     , ?modelContext :: ModelContext
     , ?context :: ControllerContext
-    ) => AutoRefreshOptions tables action -> ((?modelContext :: ModelContext) => IO ()) -> IO ()
+    ) => AutoRefreshOptions action -> ((?modelContext :: ModelContext) => IO ()) -> IO ()
 autoRefreshWith options runAction = do
     autoRefreshState <- fromContext @AutoRefreshState
     let autoRefreshServer = autoRefreshServerFromRequest request
@@ -69,27 +69,27 @@ autoRefreshWith options runAction = do
 
             setSession "autoRefreshSessions" (map UUID.toText (id:availableSessions) |> Text.intercalate "")
 
-            let tables = autoRefreshTableNames @tables
             let shouldRefresh' = options.shouldRefresh ?theAction
 
-            let handleResponse exception@(ResponseException response) = case response of
-                    Wai.ResponseBuilder status headers builder -> do
-                        lastPing <- getCurrentTime
-                        lastResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
-                        event <- MVar.newEmptyMVar
-                        pendingChanges <- newIORef (emptyChangeSet @tables)
-                        pendingDelete <- newIORef False
+            withTableReadTracker do
+                let handleResponse exception@(ResponseException response) = case response of
+                        Wai.ResponseBuilder status headers builder -> do
+                            tables <- readIORef ?touchedTables
+                            lastPing <- getCurrentTime
+                            lastResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
+                            event <- MVar.newEmptyMVar
+                            pendingChanges <- newIORef mempty
 
-                        let session = AutoRefreshSessionWithChanges { id, renderView, event, tables, lastResponse, lastPing, pendingChanges, pendingDelete, shouldRefresh = shouldRefresh' }
-                        modifyIORef' autoRefreshServer (\s -> s { sessions = session:s.sessions })
-                        async (gcSessions autoRefreshServer)
+                            let session = AutoRefreshSessionWithChanges { id, renderView, event, tables, lastResponse, lastPing, pendingChanges, shouldRefresh = shouldRefresh' }
+                            modifyIORef' autoRefreshServer (\s -> s { sessions = session:s.sessions })
+                            async (gcSessions autoRefreshServer)
 
-                        registerRowNotificationTrigger @tables autoRefreshServer
+                            registerRowNotificationTrigger ?touchedTables autoRefreshServer
 
-                        throw exception
-                    _   -> error "Unimplemented WAI response type."
+                            throw exception
+                        _   -> error "Unimplemented WAI response type."
 
-            runAction `Exception.catch` handleResponse
+                runAction `Exception.catch` handleResponse
         AutoRefreshEnabled {} -> do
             runAction
 
@@ -196,12 +196,13 @@ instance WSApp AutoRefreshWSApp where
                         MVar.takeMVar event
                         (renderView requestContext) `catch` handleResponseException lastResponse
                         pure ()
-                AutoRefreshSessionWithChanges { renderView, event, lastResponse, pendingChanges, pendingDelete, shouldRefresh } -> do
+                AutoRefreshSessionWithChanges { renderView, event, lastResponse, pendingChanges, shouldRefresh } -> do
                     async $ forever do
                         MVar.takeMVar event
-                        changes <- atomicModifyIORef' pendingChanges (\current -> (emptyChangeSet, current))
-                        shouldForceRefresh <- atomicModifyIORef' pendingDelete (\current -> (False, current))
-                        shouldRender <- if shouldForceRefresh then pure True else shouldRefresh changes
+                        changes <- atomicModifyIORef' pendingChanges (\current -> (mempty, current))
+                        let AutoRefreshChangeSet changeList = changes
+                        let hasDelete = any (\change -> change.operation == AutoRefreshDelete) changeList
+                        shouldRender <- if hasDelete then pure True else shouldRefresh changes
                         when shouldRender do
                             (renderView requestContext) `catch` handleResponseException lastResponse
                         pure ()
@@ -252,25 +253,29 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
 
-registerRowNotificationTrigger :: forall tables. (AutoRefreshTableList tables, ?modelContext :: ModelContext) => IORef AutoRefreshServer -> IO ()
-registerRowNotificationTrigger autoRefreshServer = do
-    let tableInfo = autoRefreshTableInfo @tables
+registerRowNotificationTrigger :: (?modelContext :: ModelContext) => IORef (Set ByteString) -> IORef AutoRefreshServer -> IO ()
+registerRowNotificationTrigger touchedTablesVar autoRefreshServer = do
+    touchedTables <- Set.toList <$> readIORef touchedTablesVar
     subscribedRowTables <- (.subscribedRowTables) <$> (autoRefreshServer |> readIORef)
 
-    let subscriptionRequired = tableInfo |> filter (\(table, _) -> table `Set.notMember` subscribedRowTables)
-    modifyIORef' autoRefreshServer (\server -> server { subscribedRowTables = server.subscribedRowTables <> Set.fromList (map fst subscriptionRequired) })
+    let subscriptionRequired = touchedTables |> filter (\table -> table `Set.notMember` subscribedRowTables)
+    modifyIORef' autoRefreshServer (\server -> server { subscribedRowTables = server.subscribedRowTables <> Set.fromList subscriptionRequired })
 
     pgListener <- (.pgListener) <$> readIORef autoRefreshServer
-    subscriptions <- subscriptionRequired |> mapM (\(table, primaryKeys) -> do
-        let createTriggerSql = notificationRowTrigger table primaryKeys
+    subscriptions <- subscriptionRequired |> mapM (\table -> do
+        primaryKeyColumns <- fetchPrimaryKeyColumns table
+        when (null primaryKeyColumns) do
+            error ("notificationRowTrigger: No primary keys found for " <> cs table)
+
+        let createTriggerSql = notificationRowTrigger table primaryKeyColumns
 
         withRowLevelSecurityDisabled do
             sqlExec createTriggerSql ()
 
         pgListener |> PGListener.subscribeJSON (rowChannelName table) \payload -> do
-                rowJson <- case payload.operation of
+                rowJson <- case payload.payloadOperation of
                     AutoRefreshDelete -> pure Nothing
-                    _ -> fetchRowJsonByTableName table payload
+                    _ -> fetchRowJsonById table primaryKeyColumns payload
                 sessions <- (.sessions) <$> readIORef autoRefreshServer
                 sessions |> mapM_ (handleRowChange table payload rowJson)
                 pure ())
@@ -278,14 +283,12 @@ registerRowNotificationTrigger autoRefreshServer = do
     pure ()
     where
         handleRowChange table payload rowJson session = case session of
-            AutoRefreshSessionWithChanges { tables, pendingChanges, pendingDelete, event }
+            AutoRefreshSessionWithChanges { tables, pendingChanges, event }
                 | table `Set.member` tables -> do
-                    case payload.operation of
-                        AutoRefreshDelete -> writeIORef pendingDelete True
-                        _ -> do
-                            forEach rowJson \row ->
-                                modifyIORef' pendingChanges (insertChangeByTableName table payload row)
-                    MVar.tryPutMVar event ()
+                    let rowValue = fromMaybe Aeson.Null rowJson
+                    modifyIORef' pendingChanges (insertRowChange table payload rowValue)
+                    _ <- MVar.tryPutMVar event ()
+                    pure ()
             AutoRefreshSession {} -> pure ()
 
 -- | Returns the ids of all sessions available to the client based on what sessions are found in the session cookie
@@ -399,17 +402,31 @@ notificationRowTrigger tableName primaryKeyColumns = PG.Query [i|
         insertTriggerName = "ar_did_insert_row_" <> tableName
         updateTriggerName = "ar_did_update_row_" <> tableName
         deleteTriggerName = "ar_did_delete_row_" <> tableName
-        newRowIdExpression = rowIdExpression tableName "NEW" primaryKeyColumns
-        oldRowIdExpression = rowIdExpression tableName "OLD" primaryKeyColumns
+        newRowIdExpression = rowIdExpression "NEW" primaryKeyColumns
+        oldRowIdExpression = rowIdExpression "OLD" primaryKeyColumns
 
-rowIdExpression :: ByteString -> ByteString -> [ByteString] -> ByteString
-rowIdExpression tableName recordAlias primaryKeyColumns =
+rowIdExpression :: ByteString -> [ByteString] -> ByteString
+rowIdExpression recordAlias primaryKeyColumns =
     case primaryKeyColumns of
-        [] -> error ("notificationRowTrigger: No primary keys found for " <> cs tableName)
+        [] -> error "notificationRowTrigger: No primary keys found"
         [column] -> "to_json(" <> qualifiedColumn column <> ")"
         columns -> "json_build_array(" <> B8.intercalate ", " (map qualifiedColumn columns) <> ")"
     where
         qualifiedColumn column = recordAlias <> ".\"" <> column <> "\""
+
+fetchPrimaryKeyColumns :: (?modelContext :: ModelContext) => ByteString -> IO [ByteString]
+fetchPrimaryKeyColumns tableName = do
+    let query = "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = ?::regclass AND i.indisprimary ORDER BY array_position(i.indkey, a.attnum)"
+    rows <- (sqlQuery (PG.Query query) (PG.Only (cs tableName :: Text)) :: IO [PG.Only Text])
+    pure (map (cs . (\(PG.Only name) -> name)) rows)
+
+fetchRowJsonById :: (?modelContext :: ModelContext) => ByteString -> [ByteString] -> AutoRefreshRowChangePayload -> IO (Maybe Aeson.Value)
+fetchRowJsonById tableName primaryKeyColumns AutoRefreshRowChangePayload { payloadRowId } = do
+    let alias = "t"
+    let rowIdExpr = rowIdExpression alias primaryKeyColumns
+    let query = "SELECT row_to_json(" <> alias <> ") FROM \"" <> tableName <> "\" AS " <> alias <> " WHERE " <> rowIdExpr <> " = ?::json"
+    rows <- (sqlQuery (PG.Query query) (PG.Only payloadRowId) :: IO [PG.Only Aeson.Value])
+    pure (headMay (map (\(PG.Only value) -> value) rows))
 
 autoRefreshVaultKey :: Vault.Key (IORef AutoRefreshServer)
 autoRefreshVaultKey = unsafePerformIO Vault.newKey

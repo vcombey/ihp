@@ -66,37 +66,42 @@ action MyAction = do -- <-- We don't enable auto refresh at the action start in 
         render MyView { expensiveModels, cheap }
 ```
 
-### Type-indexed Auto Refresh (experimental)
+### Fine-grained Auto Refresh (experimental)
 
-If you want row-level filtering, you can declare the tables up front and decide on refreshes based on typed change sets:
+If you want row-level filtering, you can decide on refreshes based on row JSON:
 
 ```haskell
 action ShowProjectAction { projectId } =
-    autoRefreshWith @'[Project] AutoRefreshOptions { shouldRefresh } do
+    autoRefreshWith AutoRefreshOptions { shouldRefresh } do
         project <- fetch projectId
         render ShowView { .. }
   where
     shouldRefresh ShowProjectAction { projectId } changes =
-        pure (hasRowId projectId changes)
+        let projectChanges = changesForTable "projects" changes
+            isTarget change = rowField @"id" change == Just projectId
+        in pure (any isTarget projectChanges)
 ```
 
-This uses row-level notifications and provides typed helpers like `changesFor @Project` and `rowIdsFor @Project`.
+This uses row-level notifications with id-only payloads and provides helpers like `changesForTable` and `rowField`.
+Row JSON is fetched server-side once per notification and fanned out to sessions.
+
+If you want to access JSON fields by column name directly, use `rowFieldByColumnName "user_id"`.
 
 ### Filtering by ids or foreign keys
 
-The change set includes full row JSON for each change (fetched server-side by id),
+The change set includes full row JSON for each change,
 so you can filter directly on any column without extra SQL.
 
 Example: refresh when any changed project belongs to the current user.
 
 ```haskell
 action ProjectsAction { userId } =
-    autoRefreshWith @'[Project] AutoRefreshOptions { shouldRefresh } do
+    autoRefreshWith AutoRefreshOptions { shouldRefresh } do
         projects <- query @Project |> filterWhere (#userId, userId) |> fetch
         render ProjectsView { .. }
   where
     shouldRefresh ProjectsAction { userId } changes =
-        let changedProjects = changesFor @Project changes
+        let changedProjects = changesForTable "projects" changes
             belongsToUser change = rowField @"userId" change == Just userId
         in pure (any belongsToUser changedProjects)
 ```
@@ -105,21 +110,27 @@ Example: multiple table tracking with mixed checks.
 
 ```haskell
 action DashboardAction { projectId, userId } =
-    autoRefreshWith @'[Project, Task, Comment] AutoRefreshOptions { shouldRefresh } do
+    autoRefreshWith AutoRefreshOptions { shouldRefresh } do
         project <- fetch projectId
         tasks <- query @Task |> filterWhere (#projectId, projectId) |> fetch
         comments <- query @Comment |> filterWhere (#projectId, projectId) |> fetch
         render DashboardView { .. }
   where
     shouldRefresh DashboardAction { projectId, userId } changes =
-        let projectMatches = hasRowId projectId changes
-            taskMatches = any (\change -> rowField @"projectId" change == Just projectId) (changesFor @Task changes)
-            commentMatches = any (\change -> rowField @"projectId" change == Just projectId) (changesFor @Comment changes)
+        let projectMatches = any (\change -> rowField @"id" change == Just projectId) (changesForTable "projects" changes)
+            taskMatches = any (\change -> rowField @"projectId" change == Just projectId) (changesForTable "tasks" changes)
+            commentMatches = any (\change -> rowField @"projectId" change == Just projectId) (changesForTable "comments" changes)
         in pure (projectMatches || taskMatches || commentMatches)
 ```
 
-Deletes do not include row data. The default behavior is to refresh any
-session watching a table when a DELETE happens.
+DELETE always triggers a re-render (the `shouldRefresh` predicate is bypassed).
+
+If you want to check across all tables without filtering by table name:
+
+```haskell
+shouldRefresh MyAction { userId } changes =
+    pure (anyChangeWithField @"userId" userId changes)
+```
 
 ### Custom SQL Queries with Auto Refresh
 
