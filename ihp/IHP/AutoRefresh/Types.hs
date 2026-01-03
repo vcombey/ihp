@@ -17,6 +17,7 @@ import qualified Data.Aeson.Types as AesonTypes
 import Data.Semigroup (Semigroup (..))
 import Data.Set (Set)
 import qualified Data.Aeson.KeyMap as AesonKeyMap
+import qualified Data.UUID as UUID
 
 data AutoRefreshOperation
     = AutoRefreshInsert
@@ -36,6 +37,8 @@ data AutoRefreshRowChange = AutoRefreshRowChange
     { table :: !ByteString
     , operation :: !AutoRefreshOperation
     , row :: !Aeson.Value
+    , oldRow :: !(Maybe Aeson.Value)
+    , newRow :: !(Maybe Aeson.Value)
     } deriving (Eq, Show)
 
 newtype AutoRefreshChangeSet = AutoRefreshChangeSet
@@ -51,6 +54,9 @@ instance Monoid AutoRefreshChangeSet where
 data AutoRefreshRowChangePayload = AutoRefreshRowChangePayload
     { payloadOperation :: !AutoRefreshOperation
     , payloadRowId :: !Aeson.Value
+    , payloadOldRow :: !(Maybe Aeson.Value)
+    , payloadNewRow :: !(Maybe Aeson.Value)
+    , payloadLargePayloadId :: !(Maybe UUID.UUID)
     } deriving (Eq, Show)
 
 instance Aeson.FromJSON AutoRefreshRowChangePayload where
@@ -58,10 +64,28 @@ instance Aeson.FromJSON AutoRefreshRowChangePayload where
         AutoRefreshRowChangePayload
             <$> object Aeson..: "op"
             <*> object Aeson..: "id"
+            <*> object Aeson..:? "old"
+            <*> object Aeson..:? "new"
+            <*> do
+                payloadId <- object Aeson..:? "payloadId"
+                case payloadId of
+                    Nothing -> pure Nothing
+                    Just value -> Just <$> parseUUID value
+        where
+            parseUUID :: Text -> AesonTypes.Parser UUID.UUID
+            parseUUID value = case UUID.fromText value of
+                Just uuid -> pure uuid
+                Nothing -> fail "Invalid UUID for payloadId"
 
 insertRowChange :: ByteString -> AutoRefreshRowChangePayload -> Aeson.Value -> AutoRefreshChangeSet -> AutoRefreshChangeSet
-insertRowChange tableName AutoRefreshRowChangePayload { payloadOperation } row (AutoRefreshChangeSet existing) =
-    AutoRefreshChangeSet (AutoRefreshRowChange { table = tableName, operation = payloadOperation, row } : existing)
+insertRowChange tableName AutoRefreshRowChangePayload { payloadOperation, payloadOldRow, payloadNewRow } row (AutoRefreshChangeSet existing) =
+    AutoRefreshChangeSet (AutoRefreshRowChange { table = tableName, operation = payloadOperation, row, oldRow = payloadOldRow, newRow = payloadNewRow } : existing)
+
+insertRowChangeFromPayload :: ByteString -> AutoRefreshRowChangePayload -> AutoRefreshChangeSet -> AutoRefreshChangeSet
+insertRowChangeFromPayload tableName payload changeSet =
+    insertRowChange tableName payload rowValue changeSet
+    where
+        rowValue = fromMaybe Aeson.Null (payloadNewRow payload <|> payloadOldRow payload)
 
 changesForTable :: ByteString -> AutoRefreshChangeSet -> [AutoRefreshRowChange]
 changesForTable tableName = filter (\change -> change.table == tableName) . (.changes)
@@ -77,7 +101,15 @@ anyChangeWithField value (AutoRefreshChangeSet existing) =
     any (\change -> rowField @field change == Just value) existing
 
 rowField :: forall field value. (KnownSymbol field, Aeson.FromJSON value) => AutoRefreshRowChange -> Maybe value
-rowField change = rowFieldByColumnName (fieldNameToColumnName (symbolToText @field)) change.row
+rowField change = rowFieldByColumnName (fieldNameToColumnName (symbolToText @field)) rowValue
+    where
+        rowValue = fromMaybe change.row (change.newRow <|> change.oldRow)
+
+rowFieldNew :: forall field value. (KnownSymbol field, Aeson.FromJSON value) => AutoRefreshRowChange -> Maybe value
+rowFieldNew change = change.newRow >>= rowFieldByColumnName (fieldNameToColumnName (symbolToText @field))
+
+rowFieldOld :: forall field value. (KnownSymbol field, Aeson.FromJSON value) => AutoRefreshRowChange -> Maybe value
+rowFieldOld change = change.oldRow >>= rowFieldByColumnName (fieldNameToColumnName (symbolToText @field))
 
 rowFieldByColumnName :: forall value. (Aeson.FromJSON value) => Text -> Aeson.Value -> Maybe value
 rowFieldByColumnName columnName = \case

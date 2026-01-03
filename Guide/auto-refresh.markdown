@@ -82,8 +82,8 @@ action ShowProjectAction { projectId } =
         in pure (any isTarget projectChanges)
 ```
 
-This uses row-level notifications with id-only payloads and provides helpers like `changesForTable` and `rowField`.
-Row JSON is fetched server-side once per notification and fanned out to sessions.
+This uses row-level notifications and provides helpers like `changesForTable`, `rowField`, `rowFieldNew`, and `rowFieldOld`.
+For updates and deletes the payload includes both the old and the new row data, so you can decide based on what changed.
 
 If you want to access JSON fields by column name directly, use `rowFieldByColumnName "user_id"`.
 
@@ -123,7 +123,7 @@ action DashboardAction { projectId, userId } =
         in pure (projectMatches || taskMatches || commentMatches)
 ```
 
-DELETE always triggers a re-render (the `shouldRefresh` predicate is bypassed).
+Deletes are passed to `shouldRefresh` like any other change, so you can decide when to re-render.
 
 If you want to check across all tables without filtering by table name:
 

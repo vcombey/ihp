@@ -200,9 +200,7 @@ instance WSApp AutoRefreshWSApp where
                     async $ forever do
                         MVar.takeMVar event
                         changes <- atomicModifyIORef' pendingChanges (\current -> (mempty, current))
-                        let AutoRefreshChangeSet changeList = changes
-                        let hasDelete = any (\change -> change.operation == AutoRefreshDelete) changeList
-                        shouldRender <- if hasDelete then pure True else shouldRefresh changes
+                        shouldRender <- shouldRefresh changes
                         when shouldRender do
                             (renderView requestContext) `catch` handleResponseException lastResponse
                         pure ()
@@ -273,20 +271,17 @@ registerRowNotificationTrigger touchedTablesVar autoRefreshServer = do
             sqlExec createTriggerSql ()
 
         pgListener |> PGListener.subscribeJSON (rowChannelName table) \payload -> do
-                rowJson <- case payload.payloadOperation of
-                    AutoRefreshDelete -> pure Nothing
-                    _ -> fetchRowJsonById table primaryKeyColumns payload
+                resolvedPayload <- resolveAutoRefreshPayload payload
                 sessions <- (.sessions) <$> readIORef autoRefreshServer
-                sessions |> mapM_ (handleRowChange table payload rowJson)
+                sessions |> mapM_ (handleRowChange table resolvedPayload)
                 pure ())
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
     where
-        handleRowChange table payload rowJson session = case session of
+        handleRowChange table payload session = case session of
             AutoRefreshSessionWithChanges { tables, pendingChanges, event }
                 | table `Set.member` tables -> do
-                    let rowValue = fromMaybe Aeson.Null rowJson
-                    modifyIORef' pendingChanges (insertRowChange table payload rowValue)
+                    modifyIORef' pendingChanges (insertRowChangeFromPayload table payload)
                     _ <- MVar.tryPutMVar event ()
                     pure ()
             AutoRefreshSession {} -> pure ()
@@ -371,17 +366,41 @@ notificationTrigger tableName = PG.Query [i|
 notificationRowTrigger :: ByteString -> [ByteString] -> PG.Query
 notificationRowTrigger tableName primaryKeyColumns = PG.Query [i|
         BEGIN;
+            CREATE UNLOGGED TABLE IF NOT EXISTS large_pg_notifications (
+                id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL,
+                payload TEXT DEFAULT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS large_pg_notifications_created_at_index ON large_pg_notifications (created_at);
             CREATE OR REPLACE FUNCTION #{functionName}() RETURNS TRIGGER AS $$
                 DECLARE
                     row_id jsonb;
+                    payload TEXT;
+                    large_pg_notification_id UUID;
                 BEGIN
                     IF (TG_OP = 'DELETE') THEN
                         row_id := #{oldRowIdExpression};
-                        PERFORM pg_notify('#{rowChannelName tableName}', jsonb_build_object('op', lower(TG_OP), 'id', row_id)::text);
+                        payload := jsonb_build_object('op', lower(TG_OP), 'id', row_id, 'old', to_jsonb(OLD))::text;
+                        IF octet_length(payload) > 7800 THEN
+                            INSERT INTO large_pg_notifications (payload) VALUES (payload) RETURNING id INTO large_pg_notification_id;
+                            payload := jsonb_build_object('op', lower(TG_OP), 'id', row_id, 'payloadId', large_pg_notification_id::text)::text;
+                            DELETE FROM large_pg_notifications WHERE created_at < CURRENT_TIMESTAMP - interval '30s';
+                        END IF;
+                        PERFORM pg_notify('#{rowChannelName tableName}', payload);
                         RETURN OLD;
                     ELSE
                         row_id := #{newRowIdExpression};
-                        PERFORM pg_notify('#{rowChannelName tableName}', jsonb_build_object('op', lower(TG_OP), 'id', row_id)::text);
+                        IF (TG_OP = 'UPDATE') THEN
+                            payload := jsonb_build_object('op', lower(TG_OP), 'id', row_id, 'old', to_jsonb(OLD), 'new', to_jsonb(NEW))::text;
+                        ELSE
+                            payload := jsonb_build_object('op', lower(TG_OP), 'id', row_id, 'new', to_jsonb(NEW))::text;
+                        END IF;
+                        IF octet_length(payload) > 7800 THEN
+                            INSERT INTO large_pg_notifications (payload) VALUES (payload) RETURNING id INTO large_pg_notification_id;
+                            payload := jsonb_build_object('op', lower(TG_OP), 'id', row_id, 'payloadId', large_pg_notification_id::text)::text;
+                            DELETE FROM large_pg_notifications WHERE created_at < CURRENT_TIMESTAMP - interval '30s';
+                        END IF;
+                        PERFORM pg_notify('#{rowChannelName tableName}', payload);
                         RETURN NEW;
                     END IF;
                 END;
@@ -420,13 +439,17 @@ fetchPrimaryKeyColumns tableName = do
     rows <- (sqlQuery (PG.Query query) (PG.Only (cs tableName :: Text)) :: IO [PG.Only Text])
     pure (map (cs . (\(PG.Only name) -> name)) rows)
 
-fetchRowJsonById :: (?modelContext :: ModelContext) => ByteString -> [ByteString] -> AutoRefreshRowChangePayload -> IO (Maybe Aeson.Value)
-fetchRowJsonById tableName primaryKeyColumns AutoRefreshRowChangePayload { payloadRowId } = do
-    let alias = "t"
-    let rowIdExpr = rowIdExpression alias primaryKeyColumns
-    let query = "SELECT row_to_json(" <> alias <> ") FROM \"" <> tableName <> "\" AS " <> alias <> " WHERE " <> rowIdExpr <> " = ?::jsonb"
-    rows <- (sqlQuery (PG.Query query) (PG.Only payloadRowId) :: IO [PG.Only Aeson.Value])
-    pure (headMay (map (\(PG.Only value) -> value) rows))
+resolveAutoRefreshPayload :: (?modelContext :: ModelContext) => AutoRefreshRowChangePayload -> IO AutoRefreshRowChangePayload
+resolveAutoRefreshPayload payload = case payload.payloadLargePayloadId of
+    Nothing -> pure payload
+    Just payloadId -> fetchAutoRefreshPayload payloadId
+
+fetchAutoRefreshPayload :: (?modelContext :: ModelContext) => UUID.UUID -> IO AutoRefreshRowChangePayload
+fetchAutoRefreshPayload payloadId = do
+    (payload :: ByteString) <- sqlQueryScalar "SELECT payload FROM large_pg_notifications WHERE id = ? LIMIT 1" (PG.Only payloadId)
+    case Aeson.eitherDecodeStrict' payload of
+        Left errorMessage -> error ("AutoRefresh: Unable to decode payload: " <> cs errorMessage)
+        Right result -> pure result
 
 autoRefreshVaultKey :: Vault.Key (IORef AutoRefreshServer)
 autoRefreshVaultKey = unsafePerformIO Vault.newKey
