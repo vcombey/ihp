@@ -93,10 +93,10 @@ redirectToUrlSeeOther :: (?context :: ControllerContext) => Text -> IO ()
 redirectToUrlSeeOther url = do
     let RequestContext { respond } = ?context.requestContext
     let !parsedUrl = fromMaybe
-            (error ("redirectToPathSeeOther: Unable to parse url: " <> show url))
+            (error ("redirectToUrlSeeOther: Unable to parse url: " <> show url))
             (parseURI (cs url))
     let !redirectResponse = fromMaybe
-            (error "redirectToPathSeeOther: Unable to construct redirect response")
+            (error "redirectToUrlSeeOther: Unable to construct redirect response")
             (Network.Wai.Util.redirect status303 [] parsedUrl)
     respondAndExit redirectResponse
 {-# INLINABLE redirectToUrlSeeOther #-}
