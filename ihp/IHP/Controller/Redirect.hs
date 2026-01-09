@@ -7,20 +7,23 @@ module IHP.Controller.Redirect
 ( redirectTo
 , redirectToPath
 , redirectToUrl
+, redirectToSeeOther
+, redirectToPathSeeOther
+, redirectToUrlSeeOther
 , redirectBack
 , redirectBackWithFallback
 ) where
 
-import IHP.Prelude
-import qualified Network.Wai.Util
-import Network.URI (parseURI)
-import IHP.Controller.RequestContext
-import IHP.RouterSupport (HasPath (pathTo))
-import Network.HTTP.Types.Status
+import           IHP.Controller.RequestContext
+import           IHP.Prelude
+import           IHP.RouterSupport              (HasPath (pathTo))
+import           Network.HTTP.Types.Status      (status302, status303)
+import           Network.URI                    (parseURI)
 import qualified Network.Wai.Middleware.Approot as Approot
+import qualified Network.Wai.Util
 
-import IHP.Controller.Context
-import IHP.ControllerSupport
+import           IHP.Controller.Context
+import           IHP.ControllerSupport
 
 -- | Redirects to an action
 --
@@ -32,6 +35,13 @@ import IHP.ControllerSupport
 redirectTo :: (?context :: ControllerContext, HasPath action) => action -> IO ()
 redirectTo action = redirectToPath (pathTo action)
 {-# INLINABLE redirectTo #-}
+
+-- | Redirects to an action using HTTP 303 See Other
+--
+-- Forces the follow-up request to be a GET (useful after POST/DELETE).
+redirectToSeeOther :: (?context :: ControllerContext, HasPath action) => action -> IO ()
+redirectToSeeOther action = redirectToPathSeeOther (pathTo action)
+{-# INLINABLE redirectToSeeOther #-}
 
 -- TODO: redirectTo user
 
@@ -47,6 +57,15 @@ redirectToPath path = redirectToUrl (convertString baseUrl <> path)
     where
         baseUrl = Approot.getApproot ?context.requestContext.request
 {-# INLINABLE redirectToPath #-}
+
+-- | Redirects to a path using HTTP 303 See Other
+--
+-- Forces the follow-up request to be a GET (useful after POST/DELETE).
+redirectToPathSeeOther :: (?context :: ControllerContext) => Text -> IO ()
+redirectToPathSeeOther path = redirectToUrlSeeOther (convertString baseUrl <> path)
+    where
+        baseUrl = Approot.getApproot ?context.requestContext.request
+{-# INLINABLE redirectToPathSeeOther #-}
 
 -- | Redirects to a url (given as a string)
 --
@@ -66,6 +85,21 @@ redirectToUrl url = do
             (Network.Wai.Util.redirect status302 [] parsedUrl)
     respondAndExit redirectResponse
 {-# INLINABLE redirectToUrl #-}
+
+-- | Redirects to a url using HTTP 303 See Other
+--
+-- Forces the follow-up request to be a GET (useful after POST/DELETE).
+redirectToUrlSeeOther :: (?context :: ControllerContext) => Text -> IO ()
+redirectToUrlSeeOther url = do
+    let RequestContext { respond } = ?context.requestContext
+    let !parsedUrl = fromMaybe
+            (error ("redirectToPathSeeOther: Unable to parse url: " <> show url))
+            (parseURI (cs url))
+    let !redirectResponse = fromMaybe
+            (error "redirectToPathSeeOther: Unable to construct redirect response")
+            (Network.Wai.Util.redirect status303 [] parsedUrl)
+    respondAndExit redirectResponse
+{-# INLINABLE redirectToUrlSeeOther #-}
 
 
 -- | Redirects back to the last page
@@ -108,8 +142,9 @@ redirectBackWithFallback fallbackPathOrUrl = do
     case getHeader "Referer" of
         Just referer -> case parseURI (cs referer) of
                 Just uri -> redirectToUrl (tshow uri)           -- Referer Is URL "https://google.com/..."
-                Nothing -> redirectToPath (cs referer)          -- Referer Is Path "/../"
+                Nothing  -> redirectToPath (cs referer)          -- Referer Is Path "/../"
         Nothing -> case parseURI (cs fallbackPathOrUrl) of
                 Just uri -> redirectToUrl (tshow uri)           -- Fallback Is URL "https://google.com/..."
-                Nothing -> redirectToPath fallbackPathOrUrl     -- Fallback Is Path "/../"
+                Nothing  -> redirectToPath fallbackPathOrUrl     -- Fallback Is Path "/../"
 {-# INLINABLE redirectBackWithFallback #-}
+
