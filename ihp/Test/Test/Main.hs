@@ -19,6 +19,7 @@ import qualified Test.ValidationSupport.ValidateFieldSpec
 import qualified Test.View.CSSFrameworkSpec
 import qualified Test.View.FormSpec
 import qualified Test.ViewSupportSpec
+import qualified Test.AutoRefreshSpec
 
 main :: IO ()
 main = hspec do
@@ -38,3 +39,4 @@ main = hspec do
     Test.FileStorage.ControllerFunctionsSpec.tests
     Test.Controller.CookieSpec.tests
     Test.PGListenerSpec.tests
+    Test.AutoRefreshSpec.tests
