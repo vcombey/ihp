@@ -41,6 +41,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Network.Wai
 import Network.HTTP.Types.Header (ResponseHeaders, hContentType)
 import qualified Text.Blaze.Html.Renderer.Text as BlazeText
+import qualified System.Timeout as Timeout
 
 initAutoRefresh :: (?context :: ControllerContext) => IO ()
 initAutoRefresh = do
@@ -71,16 +72,17 @@ autoRefreshWith options runAction = do
 
             id <- UUID.nextRandom
 
+            putContext (AutoRefreshEnabled id)
+
+            setSession "autoRefreshSessions" (map UUID.toText (id:availableSessions) |> Text.intercalate "")
+
             frozenControllerContext <- freeze ?context
 
             let renderView = \requestContext -> do
                     controllerContext <- unfreeze frozenControllerContext
                     let ?context = controllerContext { requestContext }
+                    putContext (AutoRefreshEnabled id)
                     action ?theAction
-
-            putContext (AutoRefreshEnabled id)
-
-            setSession "autoRefreshSessions" (map UUID.toText (id:availableSessions) |> Text.intercalate "")
 
             let shouldRefresh' = options.shouldRefresh ?theAction
 
@@ -132,13 +134,6 @@ autoRefresh runAction = do
             --
             -- This frozen context is used as a "template" inside renderView to make a new controller context
             -- with the exact same content we had when rendering the initial page, whenever we do a server-side re-rendering
-            frozenControllerContext <- freeze ?context
-
-            let renderView = \requestContext -> do
-                    controllerContext <- unfreeze frozenControllerContext
-                    let ?context = controllerContext { requestContext }
-                    action ?theAction
-
             putContext (AutoRefreshEnabled id)
 
             -- We save the allowed session ids to the session cookie to only grant a client access
@@ -146,6 +141,14 @@ autoRefresh runAction = do
             --
             -- Otherwise you might try to guess session UUIDs to access other peoples auto refresh sessions
             setSession "autoRefreshSessions" (map UUID.toText (id:availableSessions) |> Text.intercalate "")
+
+            frozenControllerContext <- freeze ?context
+
+            let renderView = \requestContext -> do
+                    controllerContext <- unfreeze frozenControllerContext
+                    let ?context = controllerContext { requestContext }
+                    putContext (AutoRefreshEnabled id)
+                    action ?theAction
 
             withTableReadTracker do
                 let handleResponse exception@(ResponseException response) = case response of
@@ -198,7 +201,11 @@ instance WSApp AutoRefreshWSApp where
 
         availableSessions <- getAvailableSessions (autoRefreshServerFromRequest request)
 
+        Log.info
+            ("AutoRefresh: ws connect sessionId=" <> tshow sessionId <> " available=" <> tshow (length availableSessions))
+
         when (sessionId `elem` availableSessions) do
+            putContext (AutoRefreshEnabled sessionId)
             session <- getSessionById (autoRefreshServerFromRequest request) sessionId
 
             let handleResponseException lastResponse (ResponseException response) = case response of
@@ -206,9 +213,12 @@ instance WSApp AutoRefreshWSApp where
                         rawHtml <- pure (ByteString.toLazyByteString builder)
                         html <- ensureAutoRefreshMeta headers rawHtml
 
-                        Log.info ("AutoRefresh: inner = " <> show (status, headers, builder) <> " END")
+                        let changed = html /= lastResponse
+                        Log.info
+                            ("AutoRefresh: render status=" <> tshow status <> " len=" <> tshow (LBS.length html) <> " changed=" <> tshow changed)
 
                         when (html /= lastResponse) do
+                            Log.info ("AutoRefresh: send sessionId=" <> tshow sessionId)
                             sendTextData html
                             updateSession (autoRefreshServerFromRequest request) sessionId (\session' -> session' { lastResponse = html })
                     _   -> error "Unimplemented WAI response type."
@@ -218,7 +228,17 @@ instance WSApp AutoRefreshWSApp where
                 AutoRefreshSession { renderView, event, lastResponse } -> do
                     async $ forever do
                         MVar.takeMVar event
-                        (renderView requestContext) `catch` handleResponseException lastResponse
+                        Log.info ("AutoRefresh: render start sessionId=" <> tshow sessionId)
+                        let renderAction =
+                                (renderView requestContext) `catch` handleResponseException lastResponse
+                        let renderActionWithErrors =
+                                renderAction `Exception.catch` \(err :: Exception.SomeException) -> do
+                                    Log.error
+                                        ("AutoRefresh: render exception sessionId=" <> tshow sessionId <> " err=" <> tshow err)
+                        result <- Timeout.timeout (5 * 1000 * 1000) renderActionWithErrors
+                        case result of
+                            Nothing -> Log.error ("AutoRefresh: render timeout sessionId=" <> tshow sessionId)
+                            Just _ -> Log.info ("AutoRefresh: render finished sessionId=" <> tshow sessionId)
                         pure ()
                 AutoRefreshSessionWithChanges { renderView, event, lastResponse, pendingChanges, shouldRefresh } -> do
                     async $ forever do
@@ -226,7 +246,17 @@ instance WSApp AutoRefreshWSApp where
                         changes <- atomicModifyIORef' pendingChanges (\current -> (mempty, current))
                         shouldRender <- shouldRefresh changes
                         when shouldRender do
-                            (renderView requestContext) `catch` handleResponseException lastResponse
+                            Log.info ("AutoRefresh: render start sessionId=" <> tshow sessionId)
+                            let renderAction =
+                                    (renderView requestContext) `catch` handleResponseException lastResponse
+                            let renderActionWithErrors =
+                                    renderAction `Exception.catch` \(err :: Exception.SomeException) -> do
+                                        Log.error
+                                            ("AutoRefresh: render exception sessionId=" <> tshow sessionId <> " err=" <> tshow err)
+                            result <- Timeout.timeout (5 * 1000 * 1000) renderActionWithErrors
+                            case result of
+                                Nothing -> Log.error ("AutoRefresh: render timeout sessionId=" <> tshow sessionId)
+                                Just _ -> Log.info ("AutoRefresh: render finished sessionId=" <> tshow sessionId)
                         pure ()
 
             pure ()
