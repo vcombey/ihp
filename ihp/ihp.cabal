@@ -53,6 +53,7 @@ common shared-properties
             , inflections
             , text
             , postgresql-simple
+            , postgresql-libpq
             , wai-app-static
             , wai-util
             , bytestring
@@ -202,6 +203,8 @@ library
         , IHP.QueryBuilder.Join
         , IHP.QueryBuilder.Order
         , IHP.QueryBuilder.Union
+        , IHP.Postgres.Typed
+        , IHP.TypedSql
         , IHP.Fetch
         , IHP.RouterPrelude
         , IHP.Server
