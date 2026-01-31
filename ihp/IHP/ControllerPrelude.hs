@@ -38,6 +38,7 @@ module IHP.ControllerPrelude
     , module IHP.FileStorage.Preprocessor.ImageMagick
     , module IHP.Pagination.ControllerFunctions
     , module IHP.HSX.QQ
+    , module IHP.AutoRefresh.Types
     ) where
 import IHP.Prelude
 import IHP.Controller.Param
@@ -74,7 +75,8 @@ import IHP.ViewSupport (View)
 import qualified IHP.ViewSupport as ViewSupport
 
 import IHP.Job.Types
-import IHP.AutoRefresh (initAutoRefresh, autoRefresh)
+import IHP.AutoRefresh (initAutoRefresh, autoRefresh, autoRefreshWith, setAutoRefreshTarget, AutoRefreshOptions (..))
+import IHP.AutoRefresh.Types
 
 import IHP.LoginSupport.Helper.Controller
 import IHP.PageHead.ControllerFunctions
