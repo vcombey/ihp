@@ -28,6 +28,12 @@ withFreshContext block = do
 tests :: Spec
 tests = do
     describe "AutoRefresh meta tag" do
+        it "stores AutoRefreshTarget in the controller context" do
+            withFreshContext \context -> do
+                let ?context = context
+                setAutoRefreshTarget "#chat-pane"
+                fromContext @AutoRefreshTarget `shouldReturn` AutoRefreshTarget "#chat-pane"
+
         it "renders nothing when disabled" do
             withFreshContext \context -> do
                 let ?context = context
@@ -43,6 +49,15 @@ tests = do
                 frozen <- freeze context
                 let ?context = frozen
                 (cs renderMeta :: String) `shouldContain` "ihp-auto-refresh-id"
+
+        it "renders target attribute when target is set" do
+            withFreshContext \context -> do
+                let ?context = context
+                putContext (AutoRefreshEnabled UUID.nil)
+                setAutoRefreshTarget "#chat-pane"
+                frozen <- freeze context
+                let ?context = frozen
+                (cs renderMeta :: String) `shouldContain` "data-ihp-auto-refresh-target=\"#chat-pane\""
 
     describe "AutoRefresh change set" do
         it "stores row json and allows field access" do

@@ -143,6 +143,8 @@ rowFieldOld change = do
 -- | Internal state stored in the controller context, used to decide whether to render the auto refresh websocket meta tag.
 data AutoRefreshState = AutoRefreshDisabled | AutoRefreshEnabled { sessionId :: !UUID }
 
+newtype AutoRefreshTarget = AutoRefreshTarget Text deriving (Eq, Show)
+
 data AutoRefreshSession = AutoRefreshSession
         { id :: !UUID
         -- | A callback to rerun an action within the given request and respond
