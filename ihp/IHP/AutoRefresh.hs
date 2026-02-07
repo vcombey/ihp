@@ -7,18 +7,24 @@ module IHP.AutoRefresh where
 
 import IHP.Prelude
 import IHP.AutoRefresh.Types
+import IHP.AutoRefresh.View (autoRefreshMeta)
 import IHP.ControllerSupport
 import qualified Data.UUID.V4 as UUID
 import qualified Data.UUID as UUID
 import IHP.Controller.Session
 import qualified Network.Wai.Internal as Wai
 import qualified Data.Binary.Builder as ByteString
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Set as Set
 import IHP.ModelSupport
 import qualified Control.Exception as Exception
 import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Maybe as Maybe
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Text.Encoding.Error as TextEncodingError
+import qualified Data.Text.Lazy as LazyText
 import IHP.WebSocket
 import IHP.Controller.Context
 import IHP.Controller.Response 
@@ -29,6 +35,8 @@ import qualified IHP.Log as Log
 import qualified Data.Vault.Lazy as Vault
 import System.IO.Unsafe (unsafePerformIO)
 import Network.Wai
+import Network.HTTP.Types.Header (ResponseHeaders, hContentType)
+import qualified Text.Blaze.Html.Renderer.Text as BlazeText
 
 initAutoRefresh :: (?context :: ControllerContext) => IO ()
 initAutoRefresh = do
@@ -92,7 +100,12 @@ autoRefresh runAction = do
                             -- it will render a 'error "JSON not implemented"'. After this curl request
                             -- all future HTML requests to the current action will fail with a 503.
                             --
-                            lastResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
+                            rawResponse <- Exception.evaluate (ByteString.toLazyByteString builder)
+                            lastResponse <- ensureAutoRefreshAndLocalMeta headers rawResponse
+                            let response' =
+                                    if lastResponse == rawResponse
+                                        then response
+                                        else Wai.ResponseBuilder status headers (ByteString.fromLazyByteString lastResponse)
 
                             event <- MVar.newEmptyMVar
                             let session = AutoRefreshSession { id, renderView, event, tables, lastResponse, lastPing }
@@ -101,7 +114,7 @@ autoRefresh runAction = do
 
                             registerNotificationTrigger ?touchedTables autoRefreshServer
 
-                            throw exception
+                            throw (ResponseException response')
                         _   -> error "Unimplemented WAI response type."
 
                 runAction `Exception.catch` handleResponse
@@ -125,7 +138,8 @@ instance WSApp AutoRefreshWSApp where
 
             let handleResponseException (ResponseException response) = case response of
                     Wai.ResponseBuilder status headers builder -> do                        
-                        let html = ByteString.toLazyByteString builder
+                        rawHtml <- pure (ByteString.toLazyByteString builder)
+                        html <- ensureAutoRefreshAndLocalMeta headers rawHtml
 
                         Log.info ("AutoRefresh: inner = " <> show (status, headers, builder) <> " END")
 
@@ -239,6 +253,7 @@ channelName tableName = "ar_did_change_" <> tableName
 notificationTrigger :: ByteString -> PG.Query
 notificationTrigger tableName = PG.Query [i|
         BEGIN;
+            SET LOCAL client_min_messages = warning;
             CREATE OR REPLACE FUNCTION #{functionName}() RETURNS TRIGGER AS $$
                 BEGIN
                     PERFORM pg_notify('#{channelName tableName}', '');
@@ -261,6 +276,67 @@ notificationTrigger tableName = PG.Query [i|
         insertTriggerName = "ar_did_insert_" <> tableName
         updateTriggerName = "ar_did_update_" <> tableName
         deleteTriggerName = "ar_did_delete_" <> tableName
+
+ensureAutoRefreshAndLocalMeta :: (?context :: ControllerContext) => ResponseHeaders -> LBS.ByteString -> IO LBS.ByteString
+ensureAutoRefreshAndLocalMeta headers html
+    | not (isHtmlResponse headers) = pure html
+    | otherwise = do
+        meta <- renderAutoRefreshMeta
+        if LBS.null meta
+            then pure html
+            else do
+                let renderedMeta = LBS.toStrict meta
+                let renderedHtml = LBS.toStrict html
+                let hasAutoMarker = BS.isInfixOf "ihp-auto-refresh-id" renderedHtml
+                let hasLocalMarker = BS.isInfixOf "ihp-local-route" renderedHtml
+                let wantsAutoMarker = BS.isInfixOf "ihp-auto-refresh-id" renderedMeta
+                let wantsLocalMarker = BS.isInfixOf "ihp-local-route" renderedMeta
+                let shouldInject = (wantsAutoMarker && not hasAutoMarker) || (wantsLocalMarker && not hasLocalMarker)
+                if shouldInject
+                    then pure (insertMetaIntoHtmlHead meta html)
+                    else pure html
+
+renderAutoRefreshMeta :: (?context :: ControllerContext) => IO LBS.ByteString
+renderAutoRefreshMeta = do
+    frozenContext <- freeze ?context
+    let ?context = frozenContext
+    let metaText = LazyText.toStrict (BlazeText.renderHtml autoRefreshMeta)
+    pure (LBS.fromStrict (TextEncoding.encodeUtf8 metaText))
+
+insertMetaIntoHtmlHead :: LBS.ByteString -> LBS.ByteString -> LBS.ByteString
+insertMetaIntoHtmlHead meta html =
+    let
+        htmlText = decodeUtf8Lenient html
+        metaText = decodeUtf8Lenient meta
+        lower = Text.toLower htmlText
+        (beforeHead, rest) = Text.breakOn "<head" lower
+    in
+        if Text.null rest
+            then LBS.fromStrict (TextEncoding.encodeUtf8 (metaText <> htmlText))
+            else
+                let
+                    afterHeadTag = Text.dropWhile (/= '>') rest
+                in
+                    if Text.null afterHeadTag
+                        then LBS.fromStrict (TextEncoding.encodeUtf8 (metaText <> htmlText))
+                        else
+                            let
+                                headOpenLen = Text.length rest - Text.length afterHeadTag
+                                insertionIndex = Text.length beforeHead + headOpenLen + 1
+                                updated =
+                                    Text.take insertionIndex htmlText
+                                        <> metaText
+                                        <> Text.drop insertionIndex htmlText
+                            in
+                                LBS.fromStrict (TextEncoding.encodeUtf8 updated)
+
+isHtmlResponse :: ResponseHeaders -> Bool
+isHtmlResponse headers = case lookup hContentType headers of
+    Just value -> "text/html" `BS.isPrefixOf` value
+    Nothing -> False
+
+decodeUtf8Lenient :: LBS.ByteString -> Text
+decodeUtf8Lenient = TextEncoding.decodeUtf8With TextEncodingError.lenientDecode . LBS.toStrict
 
 autoRefreshVaultKey :: Vault.Key (IORef AutoRefreshServer)
 autoRefreshVaultKey = unsafePerformIO Vault.newKey

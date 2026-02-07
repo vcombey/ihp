@@ -48,6 +48,7 @@ generateGenericApplication applicationName =
                 <> "    initContext = do\n"
                 <> "        setLayout defaultLayout\n"
                 <> "        initAutoRefresh\n"
+                <> "        initLocalFirst\n"
             controllerPreludeHs =
                 "module " <> applicationName <> ".Controller.Prelude\n"
                 <> "( module " <> applicationName <> ".Types\n"
@@ -117,6 +118,8 @@ generateGenericApplication applicationName =
                 <> "        <script src={assetPath \"/vendor/turbolinksInstantClick.js\"}></script>\n"
                 <> "        <script src={assetPath \"/vendor/turbolinksMorphdom.js\"}></script>\n"
                 <> "        <script src={assetPath \"/helpers.js\"}></script>\n"
+                <> "        <script src={assetPath \"/ihp-local-runtime.js\"}></script>\n"
+                <> "        <script src={assetPath \"/ihp-local-routes.js\"}></script>\n"
                 <> "        <script src={assetPath \"/ihp-auto-refresh.js\"}></script>\n"
                 <> "        <script src={assetPath \"/app.js\"}></script>\n"
                 <> "    |]\n"

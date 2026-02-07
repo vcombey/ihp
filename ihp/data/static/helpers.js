@@ -253,7 +253,17 @@ window.submitForm = function (form, possibleClickedButton) {
     }
 
     var formData = new FormData(form);
-    console.log(form, formData, submit);
+
+    if (window.IHPLocalRuntime && typeof window.IHPLocalRuntime.shouldHandleFormLocally === "function") {
+        var localRoutePath = (new URL(formAction, document.baseURI)).pathname;
+        var localMethod = String(formMethod || "GET").toUpperCase();
+        if (window.IHPLocalRuntime.shouldHandleFormLocally(localRoutePath, localMethod)) {
+            window.IHPLocalRuntime.handleOfflineFormSubmission(form, submit).catch(function (error) {
+                console.error("Local form submission failed", error);
+            });
+            return;
+        }
+    }
 
     if (
         (submit instanceof HTMLInputElement ||
