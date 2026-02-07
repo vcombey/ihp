@@ -1,5 +1,29 @@
 import { recordMatchesQuery } from './ihp-querybuilder.js';
 
+class RemoteTransport {
+    constructor(controller) {
+        this.controller = controller;
+    }
+
+    send(payload) {
+        return this.controller.sendMessageRemote(payload);
+    }
+}
+
+class LocalTransport {
+    async send(payload) {
+        const localRuntime = getLocalRuntime();
+        if (!localRuntime || !localRuntime.dispatchDataSync) {
+            throw new Error('IHPLocalRuntime is not available');
+        }
+        return await localRuntime.dispatchDataSync(payload);
+    }
+}
+
+function getLocalRuntime() {
+    return window['IHPLocalRuntime'];
+}
+
 class DataSyncController {
     static instance = null;
     static ihpBackendHost = null;
@@ -41,6 +65,7 @@ class DataSyncController {
         // We store messages here that cannot be send because the connection is not available
         this.outbox = [];
         this.reconnectTimeout = null;
+        this.pendingConnection = null;
     
         // Every message from the client expects a reply from the server
         // If that doesn't arrive in time, we can expect the connection to be broken
@@ -57,6 +82,25 @@ class DataSyncController {
 
         // The websocket times out after not receiving a reply for 5 seconds
         this.messageTimeout = 5000;
+
+        this.remoteTransport = new RemoteTransport(this);
+        this.localTransport = new LocalTransport();
+
+        const localRuntime = getLocalRuntime();
+        if (localRuntime && localRuntime.registerRemoteDispatcher) {
+            localRuntime.registerRemoteDispatcher(async (payload) => {
+                const replayPayload = { ...payload, requestId: this.requestIdCounter++ };
+                try {
+                    return await this.sendMessageRemote(replayPayload);
+                } catch (error) {
+                    return {
+                        tag: 'DataSyncError',
+                        requestId: replayPayload.requestId,
+                        errorMessage: error.message,
+                    };
+                }
+            });
+        }
     }
 
     async startConnection() {
@@ -80,6 +124,13 @@ class DataSyncController {
 
                 for (const listener of this.eventListeners.open) {
                     listener(event);
+                }
+
+                const localRuntime = getLocalRuntime();
+                if (localRuntime && localRuntime.replayQueuedMutations) {
+                    localRuntime.replayQueuedMutations().catch((error) => {
+                        console.error('Failed to replay local queue:', error);
+                    });
                 }
             }
 
@@ -161,16 +212,43 @@ class DataSyncController {
         this.retryToReconnect();
     }
 
+    shouldUseLocalTransport(payload) {
+        const localRuntime = getLocalRuntime();
+        if (!localRuntime || !localRuntime.shouldHandleLocally) {
+            return false;
+        }
+
+        return localRuntime.shouldHandleLocally(payload);
+    }
+
+    dispatchLocalResponse(payload) {
+        this.eventListeners.message.slice(0).forEach(callback => callback(payload));
+    }
+
     async sendMessage(payload) {
+        payload.requestId = this.requestIdCounter++;
+
+        if (this.shouldUseLocalTransport(payload)) {
+            const localResponse = await this.localTransport.send(payload);
+            this.dispatchLocalResponse(localResponse);
+
+            if (localResponse.tag === 'DataSyncError') {
+                throw new Error(localResponse.errorMessage);
+            }
+
+            return localResponse;
+        }
+
+        return this.remoteTransport.send(payload);
+    }
+
+    async sendMessageRemote(payload) {
         return new Promise((resolve, reject) => {
-            payload.requestId = this.requestIdCounter++;
             this.pendingRequests.push({ requestId: payload.requestId, resolve, reject });
 
             if (this.connection === null) {
                 this.outbox.push(JSON.stringify(payload));
-
-                let isFirstMessage = this.requestIdCounter === 1;
-                if (isFirstMessage) {
+                if (!this.pendingConnection) {
                     this.startConnection();
                 }
             } else {
