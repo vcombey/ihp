@@ -96,6 +96,11 @@ function autoRefreshView() {
             socket = null;
         }
         installLocalRefreshListener();
+        if (window.IHPLocalRuntime && typeof window.IHPLocalRuntime.refreshActiveLocalRoute === "function") {
+            window.IHPLocalRuntime.refreshActiveLocalRoute().catch(function (error) {
+                console.error("[ihp-auto-refresh] local refresh failed", error);
+            });
+        }
         return;
     }
 
