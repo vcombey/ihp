@@ -287,6 +287,118 @@
         return JSON.parse(JSON.stringify(value));
     }
 
+    function readJwtToken() {
+        try {
+            return localStorage.getItem('ihp_jwt');
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function dataSyncWebSocketUrl() {
+        var socketProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
+        var url = socketProtocol + '://' + window.location.host + '/DataSyncController';
+        var jwt = readJwtToken();
+        if (jwt) {
+            url += '?access_token=' + encodeURIComponent(jwt);
+        }
+        return url;
+    }
+
+    function sendDataSyncMessageOverWebSocket(payload) {
+        return new Promise(function (resolve, reject) {
+            var socket;
+            var settled = false;
+            var timeout = setTimeout(function () {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                try {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.close();
+                    }
+                } catch (_error) {}
+                reject(new Error('Timed out while replaying local mutation'));
+            }, 5000);
+
+            function finishWithError(error) {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                clearTimeout(timeout);
+                try {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.close();
+                    }
+                } catch (_error) {}
+                reject(error);
+            }
+
+            try {
+                socket = new WebSocket(dataSyncWebSocketUrl());
+            } catch (error) {
+                finishWithError(error);
+                return;
+            }
+
+            socket.onopen = function () {
+                try {
+                    socket.send(JSON.stringify(payload));
+                } catch (error) {
+                    finishWithError(error);
+                }
+            };
+
+            socket.onmessage = function (event) {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                clearTimeout(timeout);
+                try {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.close();
+                    }
+                } catch (_error) {}
+                try {
+                    resolve(JSON.parse(event.data));
+                } catch (error) {
+                    reject(error);
+                }
+            };
+
+            socket.onerror = function () {
+                finishWithError(new Error('Failed to connect to DataSync websocket'));
+            };
+
+            socket.onclose = function () {
+                if (!settled) {
+                    finishWithError(new Error('DataSync websocket closed before replay finished'));
+                }
+            };
+        });
+    }
+
+    function rewriteQueuedTransactionIds(queue, localTransactionId, remoteTransactionId) {
+        if (!localTransactionId || !remoteTransactionId || !Array.isArray(queue)) {
+            return;
+        }
+        for (var i = 0; i < queue.length; i += 1) {
+            var payload = queue[i] && queue[i].payload;
+            if (!payload) {
+                continue;
+            }
+            if (payload.transactionId === localTransactionId) {
+                payload.transactionId = remoteTransactionId;
+            }
+            if ((payload.tag === 'CommitTransaction' || payload.tag === 'RollbackTransaction') && payload.id === localTransactionId) {
+                payload.id = remoteTransactionId;
+            }
+        }
+    }
+
     function normalizeRoutePath(routePath) {
         if (!routePath) {
             return '/';
@@ -503,6 +615,11 @@
 
         registerRemoteDispatcher: function (remoteDispatcher) {
             this.remoteDispatcher = remoteDispatcher;
+            if (this.isOnline()) {
+                this.replayQueuedMutations().catch(function (error) {
+                    console.error('[ihp-local-runtime] replay failed', error);
+                });
+            }
         },
 
         setCurrentUser: function (userId) {
@@ -802,33 +919,33 @@
         },
 
         replayQueuedMutations: async function () {
-            if (!this.remoteDispatcher || !this.isOnline()) {
+            if (!this.isOnline()) {
                 return;
             }
-            var queued = drainQueuedMutations();
+            var replayDispatcher = this.remoteDispatcher || sendDataSyncMessageOverWebSocket;
+            var queued = readQueue();
+            if (!Array.isArray(queued) || queued.length === 0) {
+                return;
+            }
+            var remaining = deepClone(queued);
             var transactionIdMap = {};
             for (var i = 0; i < queued.length; i += 1) {
-                var item = queued[i];
+                var item = remaining[0];
                 try {
                     var replayPayload = deepClone(item.payload);
                     if (replayPayload.transactionId) {
-                        var mappedTransactionId = transactionIdMap[replayPayload.transactionId];
-                        if (!mappedTransactionId) {
-                            throw new Error('Missing replay transaction mapping for transactionId=' + replayPayload.transactionId);
-                        }
+                        var mappedTransactionId = transactionIdMap[replayPayload.transactionId] || replayPayload.transactionId;
                         replayPayload.transactionId = mappedTransactionId;
                     }
                     if ((replayPayload.tag === 'CommitTransaction' || replayPayload.tag === 'RollbackTransaction') && replayPayload.id) {
-                        var mappedId = transactionIdMap[replayPayload.id];
-                        if (!mappedId) {
-                            throw new Error('Missing replay transaction mapping for transaction id=' + replayPayload.id);
-                        }
+                        var mappedId = transactionIdMap[replayPayload.id] || replayPayload.id;
                         replayPayload.id = mappedId;
                     }
 
-                    var response = await this.remoteDispatcher(replayPayload);
+                    var response = await replayDispatcher(replayPayload);
                     if (replayPayload.tag === 'StartTransaction' && item.localTransactionId && response && response.transactionId) {
                         transactionIdMap[item.localTransactionId] = response.transactionId;
+                        rewriteQueuedTransactionIds(remaining, item.localTransactionId, response.transactionId);
                     }
                     if (response && response.tag === 'DataSyncError') {
                         appendFailedMutation({
@@ -836,15 +953,19 @@
                             response: response,
                             failedAt: new Date().toISOString(),
                         });
+                        break;
                     }
+                    remaining.shift();
                 } catch (error) {
                     appendFailedMutation({
                         payload: item.payload,
                         response: makeErrorResponse(item.payload, error),
                         failedAt: new Date().toISOString(),
                     });
+                    break;
                 }
             }
+            writeQueue(remaining);
         },
 
         getFailedMutations: function () {
@@ -862,6 +983,11 @@
                     console.error('[ihp-local-runtime] replay failed', error);
                 });
             });
+            if (self.isOnline()) {
+                self.replayQueuedMutations().catch(function (error) {
+                    console.error('[ihp-local-runtime] replay failed', error);
+                });
+            }
         },
     };
 
