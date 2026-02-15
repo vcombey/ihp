@@ -77,6 +77,8 @@ function applyAutoRefreshHtml(html) {
 }
 
 function autoRefreshView() {
+    installLocalRefreshListener();
+
     var metaTag = document.querySelector('meta[property="ihp-auto-refresh-id"]');
     if (!metaTag) {
         metaTag = document.querySelector('meta[property="ihp-local-route"]');
@@ -138,4 +140,3 @@ if (window.Turbolinks) {
 } else {
     autoRefreshView();
 }
-

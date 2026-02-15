@@ -126,12 +126,50 @@
         return record;
     }
 
-    function pickFilesystem() {
+    function supportsOpfsAccessHandles() {
+        return typeof FileSystemFileHandle !== 'undefined'
+            && FileSystemFileHandle
+            && FileSystemFileHandle.prototype
+            && typeof FileSystemFileHandle.prototype.createSyncAccessHandle === 'function';
+    }
+
+    function pickFilesystemCandidates() {
         var scopedUser = sanitizeDbKey(getCurrentUserId());
-        if (typeof navigator !== 'undefined' && 'storage' in navigator && navigator.storage && navigator.storage.getDirectory) {
-            return 'opfs-ahp://ihp-local-' + scopedUser;
+        var filesystems = [];
+        if (typeof navigator !== 'undefined'
+            && 'storage' in navigator
+            && navigator.storage
+            && navigator.storage.getDirectory
+            && supportsOpfsAccessHandles()) {
+            filesystems.push('opfs-ahp://ihp-local-' + scopedUser);
         }
-        return userScopedDbPath();
+        filesystems.push(userScopedDbPath());
+        return filesystems;
+    }
+
+    async function openPGlite(dataDir) {
+        var db = null;
+        if (window.PGlite && typeof window.PGlite.create === 'function') {
+            try {
+                db = await window.PGlite.create({ dataDir: dataDir });
+            } catch (_error) {
+                // Fall back to constructor-based initialization for compatibility.
+            }
+        }
+
+        if (!db) {
+            db = await new window.PGlite(dataDir);
+        }
+
+        // Probe the DB early so we can fall back to a different filesystem backend
+        // before returning a runtime that will fail on first real query.
+        if (db && typeof db.query === 'function') {
+            await db.query('SELECT 1');
+        } else if (db && typeof db.exec === 'function') {
+            await db.exec('SELECT 1');
+        }
+
+        return db;
     }
 
     function quoteIdentifier(identifier) {
@@ -571,6 +609,12 @@
         };
     }
 
+    function throwIfDataSyncError(response, fallbackMessage) {
+        if (response && response.tag === 'DataSyncError') {
+            throw new Error(response.errorMessage || fallbackMessage || 'Local DataSync operation failed');
+        }
+    }
+
     var LocalRuntime = {
         db: null,
         dbInitPromise: null,
@@ -659,11 +703,18 @@
                 if (!window.PGlite) {
                     throw new Error('PGlite is required for local-first runtime but window.PGlite is not available');
                 }
-                var filesystem = pickFilesystem();
-                try {
-                    self.db = await window.PGlite.create({ dataDir: filesystem });
-                } catch (_error) {
-                    self.db = await new window.PGlite(filesystem);
+                var filesystems = pickFilesystemCandidates();
+                var lastError = null;
+                for (var index = 0; index < filesystems.length; index += 1) {
+                    try {
+                        self.db = await openPGlite(filesystems[index]);
+                        break;
+                    } catch (error) {
+                        lastError = error;
+                    }
+                }
+                if (!self.db) {
+                    throw (lastError || new Error('Unable to initialize local PGlite database'));
                 }
                 if (self.db && !self.db.__ihpPlaceholderCompat && typeof self.db.query === "function") {
                     var originalQuery = self.db.query.bind(self.db);
@@ -889,33 +940,39 @@
         createRecord: async function (table, record, options) {
             record = ensureRecordId(record);
             var transactionId = options && options.transactionId ? options.transactionId : null;
-            return await this.dispatchDataSync({
+            var response = await this.dispatchDataSync({
                 tag: 'CreateRecordMessage',
                 table: table,
                 record: record,
                 transactionId: transactionId,
             });
+            throwIfDataSyncError(response, 'Failed to create local record');
+            return response;
         },
 
         updateRecord: async function (table, id, patch, options) {
             var transactionId = options && options.transactionId ? options.transactionId : null;
-            return await this.dispatchDataSync({
+            var response = await this.dispatchDataSync({
                 tag: 'UpdateRecordMessage',
                 table: table,
                 id: id,
                 patch: patch,
                 transactionId: transactionId,
             });
+            throwIfDataSyncError(response, 'Failed to update local record');
+            return response;
         },
 
         deleteRecord: async function (table, id, options) {
             var transactionId = options && options.transactionId ? options.transactionId : null;
-            return await this.dispatchDataSync({
+            var response = await this.dispatchDataSync({
                 tag: 'DeleteRecordMessage',
                 table: table,
                 id: id,
                 transactionId: transactionId,
             });
+            throwIfDataSyncError(response, 'Failed to delete local record');
+            return response;
         },
 
         replayQueuedMutations: async function () {
