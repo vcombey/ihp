@@ -6,6 +6,7 @@ with a bare WebSocket request (no query params).
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Test.AutoRefreshSpec where
+import qualified Data.Aeson as Aeson
 import Test.Hspec
 import IHP.Prelude
 import IHP.Environment
@@ -13,7 +14,7 @@ import IHP.FrameworkConfig
 import IHP.ControllerPrelude hiding (get, request)
 import Network.Wai
 import Network.HTTP.Types
-import IHP.AutoRefresh (globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession)
+import IHP.AutoRefresh (getSessionById, globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession)
 import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified Control.Concurrent.MVar as MVar
@@ -169,6 +170,7 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                             { subscriptions = []
                             , sessions = [session]
                             , subscribedTables = mempty
+                            , subscribedRowTables = mempty
                             , pgListener = error "pgListener unused in session state test"
                             }
 
@@ -176,3 +178,61 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
 
                 sessionResponseHasChanged serverRef UUID.nil "resolved" `shouldReturn` True
                 sessionResponseHasChanged serverRef UUID.nil "unresolved" `shouldReturn` False
+
+            it "finds fine-grained sessions by id" $ withContext do
+                event <- MVar.newEmptyMVar
+                pendingChanges <- newIORef (Just mempty)
+                now <- getCurrentTime
+                let session =
+                        AutoRefreshSessionWithChanges
+                            { id = UUID.nil
+                            , renderView = \_ respond -> respond (Wai.responseLBS status200 [] "")
+                            , event
+                            , tables = mempty
+                            , lastResponse = ""
+                            , lastPing = now
+                            , pendingChanges
+                            , shouldRefresh = \_ -> pure True
+                            }
+                serverRef <-
+                    newIORef
+                        AutoRefreshServer
+                            { subscriptions = []
+                            , sessions = [session]
+                            , subscribedTables = mempty
+                            , subscribedRowTables = mempty
+                            , pgListener = error "pgListener unused in fine-grained session test"
+                            }
+
+                found <- getSessionById serverRef UUID.nil
+                found.id `shouldBe` UUID.nil
+
+        describe "fine-grained change sets" do
+            it "exposes new and old row fields using model field names" $ withContext do
+                let oldRow = Aeson.object ["project_id" Aeson..= ("before" :: Text)]
+                    newRow = Aeson.object ["project_id" Aeson..= ("after" :: Text)]
+                    payload =
+                        AutoRefreshRowChangePayload
+                            { payloadOperation = AutoRefreshUpdate
+                            , payloadOldRow = Just oldRow
+                            , payloadNewRow = Just newRow
+                            , payloadLargePayloadId = Nothing
+                            }
+                    changeSet = insertRowChangeFromPayload "tasks" payload mempty
+                    [change] = changesForTable "tasks" changeSet
+
+                rowFieldNew @"projectId" change `shouldBe` Just ("after" :: Text)
+                rowFieldOld @"projectId" change `shouldBe` Just ("before" :: Text)
+
+            it "keeps changes scoped to their table" $ withContext do
+                let payload =
+                        AutoRefreshRowChangePayload
+                            { payloadOperation = AutoRefreshInsert
+                            , payloadOldRow = Nothing
+                            , payloadNewRow = Just (Aeson.object ["id" Aeson..= (1 :: Int)])
+                            , payloadLargePayloadId = Nothing
+                            }
+                    changeSet = insertRowChangeFromPayload "tasks" payload mempty
+
+                anyChangeOnTable "tasks" changeSet `shouldBe` True
+                anyChangeOnTable "projects" changeSet `shouldBe` False
