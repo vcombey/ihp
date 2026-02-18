@@ -236,3 +236,39 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
 
                 anyChangeOnTable "tasks" changeSet `shouldBe` True
                 anyChangeOnTable "projects" changeSet `shouldBe` False
+
+            it "checks fields across all tables with predicates" $ withContext do
+                let userId :: UUID = "d3f0e0f8-6a4a-4b0a-9ac2-7c29f9c0a004"
+                    userPayload =
+                        AutoRefreshRowChangePayload
+                            { payloadOperation = AutoRefreshInsert
+                            , payloadOldRow = Nothing
+                            , payloadNewRow = Just (Aeson.object ["id" Aeson..= userId, "user_id" Aeson..= userId])
+                            , payloadLargePayloadId = Nothing
+                            }
+                    projectPayload =
+                        AutoRefreshRowChangePayload
+                            { payloadOperation = AutoRefreshUpdate
+                            , payloadOldRow = Nothing
+                            , payloadNewRow = Just (Aeson.object ["id" Aeson..= ("p-1" :: Text), "user_id" Aeson..= userId])
+                            , payloadLargePayloadId = Nothing
+                            }
+                    changeSet =
+                        mempty
+                            |> insertRowChangeFromPayload "projects" projectPayload
+                            |> insertRowChangeFromPayload "users" userPayload
+
+                anyChangeWithField @"userId" (== userId) changeSet `shouldBe` True
+
+            it "supports custom field predicates" $ withContext do
+                let payload =
+                        AutoRefreshRowChangePayload
+                            { payloadOperation = AutoRefreshUpdate
+                            , payloadOldRow = Nothing
+                            , payloadNewRow = Just (Aeson.object ["id" Aeson..= ("u-1" :: Text), "status" Aeson..= ("archived" :: Text)])
+                            , payloadLargePayloadId = Nothing
+                            }
+                    changeSet = insertRowChangeFromPayload "users" payload mempty
+
+                anyChangeWithField @"status" (`elem` ["active" :: Text, "archived"]) changeSet `shouldBe` True
+                anyChangeWithField @"status" (== ("active" :: Text)) changeSet `shouldBe` False

@@ -132,6 +132,16 @@ resolution fails, the session re-renders rather than risking stale HTML.
 Keep `shouldRefresh` fast and avoid database queries in it. The change data is
 used only on the server and is never sent to the browser.
 
+```haskell
+action MyAction { userId } =
+    autoRefreshWith AutoRefreshOptions { shouldRefresh } do
+        -- ...
+        render MyView { .. }
+  where
+    shouldRefresh changes =
+        pure (anyChangeWithField @"userId" (== userId) changes)
+```
+
 
 Auto Refresh automatically tracks all tables your action is using by hooking itself into the Query Builder and `fetch` functions.
 
