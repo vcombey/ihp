@@ -50,6 +50,7 @@ getOrCreateAutoRefreshServer =
             server <- newIORef (newAutoRefreshServer pgListener)
             pure (Just server, server)
 
+
 -- | Options for fine-grained auto refresh via 'autoRefreshWith'.
 --
 -- The callback should be fast and ideally avoid additional SQL queries. It runs on the server and decides whether a
@@ -106,8 +107,9 @@ autoRefreshInternal config runAction = do
 
             id <- UUID.nextRandom
 
-            -- Update the vault with AutoRefreshEnabled so that autoRefreshMeta can read it
-            let newRequest = ?request { vault = Vault.insert autoRefreshStateVaultKey (AutoRefreshEnabled id) ?request.vault }
+            -- Update the request stored in the controller context so existing vault entries are preserved.
+            let currentRequest = ?context.request
+            let newRequest = currentRequest { vault = Vault.insert autoRefreshStateVaultKey (AutoRefreshEnabled id) currentRequest.vault }
             let ?request = newRequest
             -- Update request in controller context so freeze captures the updated state
             let ControllerContext { customFieldsRef } = ?context
