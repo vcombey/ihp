@@ -53,7 +53,6 @@ data Node = Node !Text ![Attribute] ![Node] !Bool
     | TextNode !Text
     | PreEscapedTextNode !Text -- ^ Used in @script@ or @style@ bodies
     | SplicedNode !Haskell.Exp -- ^ Inline haskell expressions like @{myVar}@ or @{f "hello"}@
-    | FragmentNode ![Node] -- ^ Fragment syntax like @<> ... </>@
     | Children ![Node]
     | CommentNode !Text -- ^ A Comment that is rendered in the final HTML
     | NoRenderCommentNode -- ^ A comment that is not rendered in the final HTML
@@ -139,23 +138,14 @@ hsxNoRenderComment = do
 -- in a single pass, avoiding backtracking over the tag name and attributes.
 hsxTagContent :: Parser Node
 hsxTagContent = do
-    -- React-like fragment syntax: <> ... </>
-    (char '>' >> hsxFragmentChildren)
-        <|> do
-            name <- hsxElementName
-            let isLeaf = (Text.toCaseFold name) `Set.member` leafsCI
-            attributes <- hsxAttributes
-            -- Determine self-closing vs opening tag from the closing delimiter
-            (string "/>" >> space >> pure (Node name attributes [] isLeaf))
-                <|> (char '>' >> if isLeaf
-                        then space >> pure (Node name attributes [] True)
-                        else hsxTagChildren name attributes)
-
-hsxFragmentChildren :: Parser Node
-hsxFragmentChildren = do
-    space
-    children <- collectFragmentChildren []
-    pure (FragmentNode children)
+    name <- hsxElementName
+    let isLeaf = (Text.toCaseFold name) `Set.member` leafsCI
+    attributes <- hsxAttributes
+    -- Determine self-closing vs opening tag from the closing delimiter
+    (string "/>" >> space >> pure (Node name attributes [] isLeaf))
+        <|> (char '>' >> if isLeaf
+                then space >> pure (Node name attributes [] True)
+                else hsxTagChildren name attributes)
 
 -- | Parses the children and closing tag of a normal (non-self-closing) element.
 hsxTagChildren :: Text -> [Attribute] -> Parser Node
@@ -189,18 +179,6 @@ collectChildren name !acc = do
         else do
             child <- hsxChild
             collectChildren name (child : acc)
-
-collectFragmentChildren :: [Node] -> Parser [Node]
-collectFragmentChildren !acc = do
-    input <- getInput
-    if Text.isPrefixOf "</>" (Text.dropWhile Char.isSpace input)
-        then do
-            space
-            hsxClosingFragment
-            pure (stripTextNodeWhitespaces (reverse acc))
-        else do
-            child <- hsxChild
-            collectFragmentChildren (child : acc)
 
 -- | Parses pre-escaped text (for script/style bodies) by scanning for the closing tag.
 -- Produces Text directly without an intermediate String allocation.
@@ -343,9 +321,6 @@ hsxClosingElement name = (hsxClosingElement' name) <?> friendlyErrorMessage
             space
             char ('>')
             pure ()
-
-hsxClosingFragment :: Parser ()
-hsxClosingFragment = (string "</>" >> space >> pure ()) <?> "closing fragment </> (to match opening <> fragment)"
 
 -- | Dispatch on first character to avoid sequential backtracking.
 hsxChild :: Parser Node
@@ -941,7 +916,6 @@ renderStaticNode (TextNode value) = Right value
 renderStaticNode (PreEscapedTextNode value) = Right value
 renderStaticNode (CommentNode value) = Right ("<!-- " <> value <> " -->")
 renderStaticNode NoRenderCommentNode = Right ""
-renderStaticNode (FragmentNode children) = Text.concat <$> mapM renderStaticNode children
 renderStaticNode (Children children) = Text.concat <$> mapM renderStaticNode children
 renderStaticNode (SplicedNode _) = Left "Dynamic splice nodes are not supported here"
 

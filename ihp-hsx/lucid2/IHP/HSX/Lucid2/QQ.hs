@@ -136,10 +136,6 @@ compileToHaskell (Children children) =
     let
         renderedChildren = TH.listE $ map compileToHaskell children
     in [| (sequence_ @[] $(renderedChildren)) |]
-compileToHaskell (FragmentNode children) =
-    let
-        renderedChildren = TH.listE $ map compileToHaskell children
-    in [| (sequence_ @[] $(renderedChildren)) |]
 
 compileToHaskell (TextNode value) = [| toHtmlRaw value |]
 compileToHaskell (PreEscapedTextNode value) = [| toHtmlRaw value |]
@@ -315,10 +311,6 @@ compileToHaskellM (Node name attributes children isLeaf) =
                     element = nodeToLucidElementM name
                 in [| $element $listAttributes (M.sequenceChildren $renderedChildren) |]
 compileToHaskellM (Children children) =
-    let
-        renderedChildren = TH.listE $ map compileToHaskellM children
-    in [| (M.sequenceChildren $(renderedChildren)) |]
-compileToHaskellM (FragmentNode children) =
     let
         renderedChildren = TH.listE $ map compileToHaskellM children
     in [| (M.sequenceChildren $(renderedChildren)) |]

@@ -121,15 +121,29 @@ tests = describe "ihp-hsx-pp preprocessor" do
         output `shouldContain` "$(quoteExp hsx \\\"<span>Admin</span>\\\")"
         output `shouldContain` "$(quoteExp hsx \\\"<span>User</span>\\\")"
 
-    it "rewrites configured custom quasiquoters while preserving nested aliases" do
-        output <- runPreprocessorOnWithOptions ["--hsx-target=myHsx"] "View.hs" (unlines
-            [ "module View where"
-            , "view = [myHsx|<div>{if True then [myHsx|<span>Admin</span>|] else [myHsx|<span>User</span>|]}</div>|]"
+    it "rewrites sibling root tags as a single file-level expression" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "stylesheets ="
+            , "    <link rel=\"stylesheet\" href=\"/a.css\"/>"
+            , "    <link rel=\"stylesheet\" href=\"/b.css\"/>"
             ])
 
-        output `shouldContain` "view = $(quoteExp myHsx"
-        output `shouldContain` "[myHsx|<span>Admin</span>|]"
-        output `shouldContain` "[myHsx|<span>User</span>|]"
+        countOccurrences "$(quoteExp hsx" output `shouldBe` 1
+        output `shouldContain` "<link rel=\\\"stylesheet\\\" href=\\\"/a.css\\\"/>"
+        output `shouldContain` "<link rel=\\\"stylesheet\\\" href=\\\"/b.css\\\"/>"
+
+    it "does not rewrite hsx quasiquotes in normal files" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "module View where"
+            , "view = [hsx|<div>Hello</div>|]"
+            ])
+
+        output `shouldContain` "view = [hsx|<div>Hello</div>|]"
+        output `shouldNotContain` "$(quoteExp hsx \"<div>Hello</div>\")"
+        output `shouldNotContain` "{-# LANGUAGE TemplateHaskell #-}"
+        output `shouldNotContain` "import Language.Haskell.TH.Quote (quoteExp)"
 
     it "does not rewrite plain haskell operators as tags" do
         output <- runPreprocessorOn "View.hs" (unlines
@@ -226,13 +240,6 @@ tests = describe "ihp-hsx-pp preprocessor" do
             , "    </div>"
             ])
         stdErr `shouldContain` "unterminated { } splice"
-
-    it "fails with a clear error on unterminated hsx quasiquotes" do
-        stdErr <- runPreprocessorFailureOn "Bad.hs" (unlines
-            [ "module Bad where"
-            , "view = [hsx|<div>"
-            ])
-        stdErr `shouldContain` "unterminated hsx quasiquote"
 
 runPreprocessorOn :: FilePath -> String -> IO String
 runPreprocessorOn fileName inputContent =

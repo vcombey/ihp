@@ -2,7 +2,7 @@ module Main where
 
 import Prelude
 import Data.Char (isAlpha, isAlphaNum, isSpace, toLower)
-import Data.List (elemIndex, isPrefixOf, isSuffixOf, foldl', nub)
+import Data.List (elemIndex, isPrefixOf, isSuffixOf, foldl')
 import Data.Maybe (fromMaybe, isJust)
 import System.Directory (canonicalizePath, getSymbolicLinkTarget, pathIsSymbolicLink)
 import System.Environment (getArgs)
@@ -12,18 +12,13 @@ import System.IO (hPutStrLn, stderr)
 
 data PreprocessorOptions = PreprocessorOptions
     { defaultFileLevelQQ :: String
-    , targetQQNames :: [String]
     }
 
 defaultPreprocessorOptions :: PreprocessorOptions
 defaultPreprocessorOptions =
     PreprocessorOptions
         { defaultFileLevelQQ = "hsx"
-        , targetQQNames = defaultTargetNames
         }
-
-defaultTargetNames :: [String]
-defaultTargetNames = ["hsx", "uncheckedHsx", "customHsx"]
 
 main :: IO ()
 main = do
@@ -57,48 +52,29 @@ parseInvocationArgs args =
 
 parsePreprocessorOptions :: [String] -> Either String PreprocessorOptions
 parsePreprocessorOptions args = do
-    (customQQ, extraTargets) <- foldl' step (Right (Nothing, [])) args
+    customQQ <- foldl' step (Right Nothing) args
     let fileLevelQQ = fromMaybe (defaultFileLevelQQ defaultPreprocessorOptions) customQQ
-        allTargets = nub (map baseName (defaultTargetNames <> extraTargets <> [fileLevelQQ]))
     pure PreprocessorOptions
         { defaultFileLevelQQ = fileLevelQQ
-        , targetQQNames = allTargets
         }
   where
-    step :: Either String (Maybe String, [String]) -> String -> Either String (Maybe String, [String])
+    step :: Either String (Maybe String) -> String -> Either String (Maybe String)
     step state option = do
-        (customQQ, extraTargets) <- state
+        customQQ <- state
         case () of
             _ | Just qq <- stripPrefixOption "--hsx-qq=" option ->
                     if null qq
                         then Left "--hsx-qq expects a non-empty quasiquoter name"
-                        else Right (Just qq, extraTargets)
-              | Just qq <- stripPrefixOption "--hsx-target=" option ->
-                    if null qq
-                        then Left "--hsx-target expects a non-empty quasiquoter name"
-                        else Right (customQQ, extraTargets <> [qq])
-              | Just qqs <- stripPrefixOption "--hsx-targets=" option ->
-                    let parsed = filter (not . null) (map trim (splitComma qqs))
-                    in if null parsed
-                        then Left "--hsx-targets expects at least one quasiquoter name"
-                        else Right (customQQ, extraTargets <> parsed)
+                        else Right (Just qq)
               | "--hsx-" `isPrefixOf` option ->
                     Left ("unknown option: " <> option)
               | otherwise ->
-                    Right (customQQ, extraTargets)
+                    Right customQQ
 
     stripPrefixOption prefix option =
         if prefix `isPrefixOf` option
             then Just (drop (length prefix) option)
             else Nothing
-
-    splitComma [] = [""]
-    splitComma value =
-        case break (== ',') value of
-            (segment, []) -> [segment]
-            (segment, _:rest) -> segment : splitComma rest
-
-    trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
 
 preprocessInput :: PreprocessorOptions -> FilePath -> IO String
 preprocessInput options input = do
@@ -111,9 +87,9 @@ renderProcessedInput options input resolvedInput content =
     let
         (shebang, rest) = splitShebang content
         fileLevelQQ = resolveFileLevelQQ options resolvedInput rest
-        effectiveTargetQQNames =
-            nub (targetQQNames options <> maybe [] (\qq -> [baseName qq]) fileLevelQQ)
-        needsTemplateHaskell = not (hasLanguagePragma "TemplateHaskell" rest)
+        rewrittenBody = rewriteContent fileLevelQQ rest
+        needsQuoteExp = "$(quoteExp " `isInfixOf` rewrittenBody
+        needsTemplateHaskell = needsQuoteExp && not (hasLanguagePragma "TemplateHaskell" rest)
         needsQuasiQuotes = isJust fileLevelQQ && not (hasLanguagePragma "QuasiQuotes" rest)
         lineStart = if null shebang then 1 else 2
         headerPragmas =
@@ -124,7 +100,10 @@ renderProcessedInput options input resolvedInput content =
         header =
             shebang
             ++ (if null headerPragmas then "" else unlines headerPragmas ++ "{-# LINE " ++ show lineStart ++ " " ++ show input ++ " #-}\n")
-        rewritten = ensureQuoteExpImport (rewriteContent fileLevelQQ effectiveTargetQQNames rest)
+        rewritten =
+            if needsQuoteExp
+                then ensureQuoteExpImport rewrittenBody
+                else rewrittenBody
     in
         header ++ rewritten
 
@@ -214,8 +193,8 @@ isHsxFile :: FilePath -> Bool
 isHsxFile path =
     ".hsx" `isSuffixOf` map toLower path
 
-rewriteContent :: Maybe String -> [String] -> String -> String
-rewriteContent fileLevelQQ targetQQNames = go Normal ""
+rewriteContent :: Maybe String -> String -> String
+rewriteContent fileLevelQQ = go Normal ""
   where
     go _ _ [] = []
     go Normal lineBuf s@(c:cs)
@@ -230,18 +209,6 @@ rewriteContent fileLevelQQ targetQQNames = go Normal ""
             let (body, rest) = consumeHsxBlock qqName s
                 replacement = "$(quoteExp " ++ qqName ++ " " ++ show body ++ ")"
             in replacement ++ go Normal (lineBuf ++ qqName) rest
-        | c == '[' =
-            case parseQQStart cs of
-                Just (qqName, restAfterBar) | isTargetQQ targetQQNames qqName ->
-                    let (body, rest) = consumeQQ targetQQNames 1 restAfterBar
-                        replacement = "$(quoteExp " ++ qqName ++ " " ++ show body ++ ")"
-                    in replacement ++ go Normal (lineBuf ++ qqName) rest
-                Just (qqName, restAfterBar) ->
-                    let (body, rest) = consumeQQRaw restAfterBar
-                        raw = "[" ++ qqName ++ "|" ++ body ++ "|]"
-                        lineBuf' = updateLineBuf lineBuf raw
-                    in raw ++ go Normal lineBuf' rest
-                _ -> '[' : go Normal (lineBuf ++ "[") cs
         | c == '\n' = '\n' : go Normal "" cs
         | otherwise = c : go Normal (lineBuf ++ [c]) cs
     go LineComment lineBuf s@(c:cs)
@@ -280,26 +247,6 @@ advanceLineStart lineStart c
     | c == '\n' = True
     | lineStart && (c == ' ' || c == '\t') = True
     | otherwise = False
-
-consumeQQ :: [String] -> Int -> String -> (String, String)
-consumeQQ targetNames depth = go depth []
-  where
-    go _ _ [] = error "ihp-hsx-pp: unterminated hsx quasiquote"
-    go d acc s
-        | isPrefixOf "|]" s =
-            if d == 1
-                then (reverse acc, drop 2 s)
-                else go (d - 1) (pushString "|]" acc) (drop 2 s)
-        | isPrefixOf "[" s =
-            case parseQQStart (drop 1 s) of
-                Just (qqName, restAfterBar) | isTargetQQ targetNames qqName ->
-                    let acc' = pushString ("[" ++ qqName ++ "|") acc
-                    in go (d + 1) acc' restAfterBar
-                _ -> case s of
-                    (c:cs) -> go d (c:acc) cs
-        | otherwise =
-            case s of
-                (c:cs) -> go d (c:acc) cs
 
 consumeQQRaw :: String -> (String, String)
 consumeQQRaw = go []
@@ -360,17 +307,10 @@ isIdentStart c = isAlpha c || c == '_'
 isIdentChar :: Char -> Bool
 isIdentChar c = isAlphaNum c || c == '_' || c == '\''
 
-isTargetQQ :: [String] -> String -> Bool
-isTargetQQ targetNames name = baseName name `elem` targetNames
-
-baseName :: String -> String
-baseName = reverse . takeWhile (/= '.') . reverse
-
 looksLikeTagStart :: String -> Bool
 looksLikeTagStart [] = False
 looksLikeTagStart (c:_)
     | c == '/' = False
-    | c == '>' = True
     | c == '!' = True
     | c == '?' = True
     | isTagNameStart c = True
@@ -391,6 +331,20 @@ data TagInfo
 
 consumeHsxBlock :: String -> String -> (String, String)
 consumeHsxBlock fileLevelQQ s =
+    let (firstRoot, rest) = consumeSingleHsxBlock fileLevelQQ s
+    in consumeSiblingRoots firstRoot rest
+  where
+    consumeSiblingRoots acc rest =
+        let (spaces, rest') = span isSpace rest
+        in case rest' of
+            ('<':tagTail)
+                | looksLikeTagStart tagTail ->
+                    let (nextRoot, rest'') = consumeSingleHsxBlock fileLevelQQ rest'
+                    in consumeSiblingRoots (acc ++ spaces ++ nextRoot) rest''
+            _ -> (acc, rest)
+
+consumeSingleHsxBlock :: String -> String -> (String, String)
+consumeSingleHsxBlock fileLevelQQ s =
     let (tagText, info, rest) = consumeTagText fileLevelQQ s
         (stack, rawTag) = updateStack [] Nothing info
     in if null stack
@@ -495,8 +449,6 @@ consumeTagBody fileLevelQQ = go Nothing []
 
 classifyTag :: String -> TagInfo
 classifyTag tagText
-    | tagText == "<>" = TagOpen fragmentTagName
-    | tagText == "</>" = TagClose fragmentTagName
     | isPrefixOf "<!--" tagText = TagSpecial
     | isPrefixOf "<?" tagText = TagSpecial
     | isPrefixOf "<!" tagText = TagSpecial
@@ -511,9 +463,6 @@ classifyTag tagText
                     then TagSelf name
                     else TagOpen name
             Nothing -> TagSpecial
-
-fragmentTagName :: String
-fragmentTagName = "#hsx-fragment#"
 
 parseTagNameFrom :: String -> Maybe String
 parseTagNameFrom s =

@@ -56,57 +56,19 @@ in
 
 As the HSX expressions are compiled to Haskell code at compile-time, type errors inside these `{}` expressions will be reported to you by the compiler.
 
-#### Nested HSX inside `{...}` conditionals
+Nested `[hsx|...|]` inside another `[hsx|...|]` is not supported because quasiquotes close on the first `|]`.
 
-Haskell quasiquotes always close on the first `|]`. Because of that, writing `[hsx|...|]` directly inside another `[hsx|...|]` body will close the outer quote too early.
+#### File-level HSX mode (experimental)
 
-Use `hsxExpression` for static branch fragments instead:
-
-```haskell
-[hsx|
-    <div>
-        {if isAdmin
-            then hsxExpression "<span>Admin</span>"
-            else hsxExpression "<span>User</span>"
-        }
-    </div>
-|]
-```
-
-This keeps the conditional inline and still validates the inner snippet as HSX.
-
-#### Nested HSX with the same `[hsx|...|]` syntax (optional preprocessor)
-
-If you want to keep the exact `[hsx|...|]` syntax inside `{...}` splices, you can enable the `ihp-hsx-pp` preprocessor. It rewrites HSX quasiquotes to Template Haskell splices before GHC parses the file, which avoids the `|]` nesting limitation. This is heavier than the default approach.
-
+If you want to drop the outer `[hsx|...|]` completely, you can enable a file-level mode via the preprocessor.
 Add this to the `ghc-options` of the component that contains HSX:
 
 ```haskell
 ghc-options: -F -pgmF ihp-hsx-pp
 ```
 
-Then you can write nested HSX directly:
+When using Cabal, also add `build-tool-depends: ihp-hsx:ihp-hsx-pp`.
 
-```haskell
-[hsx|
-    <div>
-        {if isAdmin
-            then [hsx|<span>Admin</span>|]
-            else [hsx|<span>User</span>|]
-        }
-    </div>
-|]
-```
-
-Notes:
-`ihp-hsx-pp` requires `TemplateHaskell` (it injects the pragma if missing).
-When using Cabal, add `build-tool-depends: ihp-hsx:ihp-hsx-pp` so the preprocessor is available.
-By default it rewrites `hsx`, `uncheckedHsx`, `customHsx` (including qualified names like `IHP.HSX.QQ.hsx`).
-Add `-optF --hsx-target=myHsx` (or `-optF --hsx-targets=myHsx,anotherHsx`) to rewrite custom aliases too.
-
-#### File-level HSX mode (experimental)
-
-If you want to drop the outer `[hsx|...|]` completely, you can enable a file-level mode via the preprocessor.
 Use either:
 
 1. A header marker near the top of the module (before the `module` line is recommended):
@@ -133,6 +95,7 @@ Notes:
 `ihp-hsx-pp` injects `TemplateHaskell`, and in file-level mode it also injects `QuasiQuotes` so the nested expansion can be parsed.
 This is heuristic: tags are rewritten when they start a line (ignoring whitespace), after common expression introducers like `then`, `else`, `=`, or `->`, and after common operators such as `$` and `<$>` when followed by a complete tag.
 Nested HSX inside `{...}` works under the same heuristic.
+`ihp-hsx-pp` only rewrites file-level tags in this mode. It does not rewrite regular `[hsx|...|]` syntax.
 By default file-level mode emits `$(quoteExp hsx "...")`.
 To use a different quasiquoter, set it in the header marker (`-- hsx myHsx`) or via `-optF --hsx-qq=myHsx`.
 Make sure the selected quasiquoter is in scope.
@@ -144,21 +107,28 @@ Known limitations of `ihp-hsx-pp` (current implementation):
 - Splice scanning in `{...}` is lexical and does not fully understand arbitrary non-HSX quasiquotes; constructs like `{[r|{|]}` can currently fail with `unterminated { } splice`.
 - LANGUAGE pragma detection is text-based; a pragma-looking line inside a block comment can be treated as active.
 
-#### Fragments (`<>...</>`)
+#### Multiple Root Nodes
 
-HSX supports React-like fragments. This is useful when a binding should return multiple sibling nodes without wrapping them in an extra tag:
+HSX supports multiple sibling root nodes directly, without wrapper tags:
 
 ```haskell
 stylesheets :: Html
 stylesheets =
-    <>
+    [hsx|
         <link rel="stylesheet" href="/vendor/bootstrap.min.css"/>
         <link rel="stylesheet" href="/vendor/flatpickr.min.css"/>
         <link rel="stylesheet" href="/app.css"/>
-    </>
+    |]
 ```
 
-This works in normal `[hsx|...|]` blocks and in file-level mode.
+In file-level mode, the same shape works directly:
+
+```haskell
+stylesheets =
+    <link rel="stylesheet" href="/vendor/bootstrap.min.css"/>
+    <link rel="stylesheet" href="/vendor/flatpickr.min.css"/>
+    <link rel="stylesheet" href="/app.css"/>
+```
 
 ### Dynamic Attributes
 

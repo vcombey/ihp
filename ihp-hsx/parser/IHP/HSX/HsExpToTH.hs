@@ -165,10 +165,12 @@ toExp (Expr.HsLam _ (Expr.MG _ (unLoc -> (map unLoc -> [Expr.Match _ _ (map unLo
 toExp (Expr.HsIf _ a b c)                   = TH.CondE (toExp (unLoc a)) (toExp (unLoc b)) (toExp (unLoc c))
 
 -- toExp (Expr.MultiIf _ ifs)                    = TH.MultiIfE (map toGuard ifs)
-#if __GLASGOW_HASKELL__ >= 906
+#if __GLASGOW_HASKELL__ >= 910
+toExp (Expr.HsLet _ binds (unLoc -> e))      = TH.LetE (toDecs binds) (toExp e)
+#elif __GLASGOW_HASKELL__ >= 906
 toExp (Expr.HsLet _ binds (unLoc -> e))      = TH.LetE (toDecs binds) (toExp e)
 #else
-toExp (Expr.HsLet _ _ binds _ (unLoc -> e))  = TH.LetE (toDecs binds) (toExp e)
+toExp (Expr.HsLet _ binds (unLoc -> e))      = TH.LetE (toDecs binds) (toExp e)
 #endif
 toExp (Expr.HsCase _ (unLoc -> e) mg)        = TH.CaseE (toExp e) (map toCaseMatch (matchGroupToList mg))
 -- toExp (Expr.Do _ ss)                          = TH.DoE (map toStmt ss)

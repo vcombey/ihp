@@ -80,9 +80,11 @@ tests = do
             let p = parseHsx settings position extensions "<div> <span> </span> </div>"
             p `shouldBe` (Right (Children [Node "div" [] [Node "span" [] [] False] False]))
 
-        it "should parse fragments" do
+        it "should reject fragment syntax" do
             let p = parseHsx settings position extensions "<><link rel=\"stylesheet\" href=\"/a.css\"/><link rel=\"stylesheet\" href=\"/b.css\"/></>"
-            p `shouldBe` (Right (Children [FragmentNode [Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/a.css")] [] True, Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/b.css")] [] True]]))
+            p `shouldSatisfy` \result -> case result of
+                Left _ -> True
+                Right _ -> False
 
         it "should strip spaces after self closing tags" do
             let p = parseHsx settings position extensions "<head>{\"meta\"}\n\n                        <link rel=\"stylesheet\" href=\"/vendor/bootstrap.min.css\"></head>"
@@ -175,9 +177,11 @@ tests = do
             let p = parseHsx settings position extensions "<div> <span> </span> </div>"
             p `shouldBe` (Right (Children [Node "div" [] [Node "span" [] [] False] False]))
 
-        it "should parse fragments" do
+        it "should reject fragment syntax" do
             let p = parseHsx settings position extensions "<><link rel=\"stylesheet\" href=\"/a.css\"/><link rel=\"stylesheet\" href=\"/b.css\"/></>"
-            p `shouldBe` (Right (Children [FragmentNode [Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/a.css")] [] True, Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/b.css")] [] True]]))
+            p `shouldSatisfy` \result -> case result of
+                Left _ -> True
+                Right _ -> False
 
         it "should strip spaces after self closing tags" do
             let p = parseHsx settings position extensions "<head>{\"meta\"}\n\n                        <link rel=\"stylesheet\" href=\"/vendor/bootstrap.min.css\"></head>"

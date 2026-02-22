@@ -176,7 +176,6 @@ compileToHaskell (Node name attributes children isLeaf)
             then applyDynAttrs element attributes
             else applyDynAttrs [| $element $(compileChildList children) |] attributes
 compileToHaskell (Children children) = compileChildList children
-compileToHaskell (FragmentNode children) = compileChildList children
 compileToHaskell (TextNode value) =
     let bs = Text.encodeUtf8 value
     in [| unsafeByteString $(TH.lift bs) |]
@@ -206,7 +205,6 @@ flattenChild (SplicedNode expression) = [D [| toHtml $(pure expression) |]]
 flattenChild (CommentNode value) = [D [| textComment value |]]
 flattenChild (NoRenderCommentNode) = []
 flattenChild (Children children) = concatMap flattenChild children
-flattenChild (FragmentNode children) = concatMap flattenChild children
 flattenChild (Node name attributes children isLeaf)
     | all isStaticAttribute attributes = flattenNode name attributes children isLeaf
     | otherwise = [D (compileToHaskell (Node name attributes children isLeaf))]
@@ -246,7 +244,6 @@ isStaticTree (TextNode _)          = True
 isStaticTree (PreEscapedTextNode _) = True
 isStaticTree (SplicedNode _)       = False
 isStaticTree (Children children)   = all isStaticTree children
-isStaticTree (FragmentNode children) = all isStaticTree children
 isStaticTree (CommentNode _)       = True
 isStaticTree (NoRenderCommentNode) = True
 
@@ -275,7 +272,6 @@ renderStaticHtml (TextNode value)          = value
 renderStaticHtml (PreEscapedTextNode value) = value
 renderStaticHtml (SplicedNode _)           = error "renderStaticHtml: unexpected SplicedNode"
 renderStaticHtml (Children children)       = foldMap renderStaticHtml children
-renderStaticHtml (FragmentNode children)   = foldMap renderStaticHtml children
 renderStaticHtml (CommentNode value)       = "<!-- " <> value <> " -->"
 renderStaticHtml (NoRenderCommentNode)     = ""
 

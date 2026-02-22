@@ -32,10 +32,6 @@ tests = do
         it "should support multiple root nodes" do
             [hsx|<u>underlined</u><i>italic</i>|] `shouldBeSameHtml` "<u>underlined</u><i>italic</i>"
 
-        it "should support fragment syntax" do
-            [hsx|<><link rel="stylesheet" href="/a.css"/><link rel="stylesheet" href="/b.css"/></>|]
-                `shouldBeSameHtml` "<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/b.css\">"
-
         it "should work with text variables" do
             let myString :: Text = "World!"
             [hsx|Hello {myString}|] `shouldBeSameHtml` "Hello World!"
@@ -305,11 +301,6 @@ tests = do
             let cond = True
             [Lucid2.hsx|<div>{if cond then Lucid2.hsxExpression "<span>A</span>" else Lucid2.hsxExpression "<span>B</span>"}</div>|]
                 `shouldBeLucid2Html` "<div><span>A</span></div>"
-
-        it "should support nested HSX when preprocessed" do
-            let cond = True
-            [Blaze.hsx|<div>{if cond then [Blaze.hsx|<span>A</span>|] else [Blaze.hsx|<span>B</span>|]}</div>|]
-                `shouldBeBlazeHtml` "<div><span>A</span></div>"
 
         -- Note: Using HSX in both branches works at expression level
         -- (outside of HSX splices) as well

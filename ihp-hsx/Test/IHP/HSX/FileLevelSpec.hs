@@ -25,12 +25,10 @@ tests = describe "HSX file-level mode" do
                 </div>
         Blaze.renderHtml view `shouldBe` TL.pack "<div id=\"root\"><br><input disabled=\"disabled\"></div>"
 
-    it "should allow fragment roots for sibling nodes" do
+    it "should allow sibling root nodes without fragments" do
         let stylesheets =
-                <>
-                    <link rel="stylesheet" href="/a.css"/>
-                    <link rel="stylesheet" href="/b.css"/>
-                </>
+                <link rel="stylesheet" href="/a.css"/>
+                <link rel="stylesheet" href="/b.css"/>
         Blaze.renderHtml stylesheets `shouldBe` TL.pack "<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/b.css\">"
 
     it "should allow nested HSX inside splices" do
