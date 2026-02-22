@@ -209,6 +209,8 @@ tests = do
                     ]
             script `shouldSatisfy` Text.isInfixOf "registerAction('/UpdateTodo'"
             script `shouldSatisfy` Text.isInfixOf "updateRecord('todos'"
+            script `shouldSatisfy` Text.isInfixOf "registerDomSnapshot('/UpdateTodo'"
+            script `shouldSatisfy` Text.isInfixOf "fieldType: 'bool'"
             script `shouldSatisfy` Text.isInfixOf "is_completed"
             script `shouldSatisfy` Text.isInfixOf "registerAction('/CreateTodo'"
             script `shouldSatisfy` Text.isInfixOf "createRecord('todos'"

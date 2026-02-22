@@ -180,6 +180,7 @@ Key capabilities:
 4. Automatic local action registration from generated `ihp-local-routes.js`
 5. Local auto-refresh event dispatch via `ihp:local-refresh`
 6. Conflict-aware merge hooks and events
+7. DOM snapshot hydration for generated local update forms
 
 ### Runtime Events
 
@@ -219,6 +220,19 @@ Unregister with:
 ```js
 IHPLocalRuntime.unregisterConflictResolver('todos');
 ```
+
+### DOM Snapshot Hydration (Auto-Refresh Routes)
+
+When local update actions are transpiled, generated code can register DOM snapshot descriptors.
+On online `turbolinks:load` (including AutoRefresh rerenders), `IHPLocalRuntime` can parse matching update forms and mirror those records into the local DB.
+
+This is useful when your page uses server HTML auto-refresh instead of a DataSync subscription stream:
+
+1. Server renders rows in forms (`/UpdateTodo?...` with hidden `todoId`)
+2. Runtime extracts row fields from the DOM
+3. Runtime syncs extracted rows into local DB using the configured conflict policy
+
+This keeps local cache warm before network drops and improves offline fallback continuity.
 
 ## Safety Checks
 

@@ -410,6 +410,16 @@ renderGeneratedLocalRoutesScript actions =
             <> (fields |> map renderField)
             <> [ "        });"
                , "    }, { methods: ['POST'] });"
+               , "    if (window.IHPLocalRuntime.registerDomSnapshot) {"
+               , "        window.IHPLocalRuntime.registerDomSnapshot(" <> renderJsString routePath <> ", {"
+               , "            table: " <> renderJsString tableName <> ","
+               , "            idField: " <> renderJsString idField <> ","
+               , "            fields: ["
+               ]
+            <> (fields |> map renderDomSnapshotField)
+            <> [ "            ],"
+               , "        });"
+               , "    }"
                ]
         renderAction LocalGeneratedCreateAction { routePath, tableName, fields } =
             [ ""
@@ -424,6 +434,21 @@ renderGeneratedLocalRoutesScript actions =
         renderField :: (Text, Text, LocalFieldType) -> Text
         renderField (fieldName, formFieldName, localFieldType) =
             "            " <> renderJsString (fieldNameToColumnName fieldName) <> ": " <> renderFormValueExpression formFieldName localFieldType <> ","
+
+        renderDomSnapshotField :: (Text, Text, LocalFieldType) -> Text
+        renderDomSnapshotField (fieldName, formFieldName, localFieldType) =
+            "                { column: "
+                <> renderJsString (fieldNameToColumnName fieldName)
+                <> ", formField: "
+                <> renderJsString formFieldName
+                <> ", fieldType: "
+                <> renderJsString (renderLocalFieldType localFieldType)
+                <> " },"
+
+        renderLocalFieldType :: LocalFieldType -> Text
+        renderLocalFieldType localFieldType = case localFieldType of
+            LocalFieldText -> "text"
+            LocalFieldBool -> "bool"
 
         renderFormFieldValue :: Text -> Text
         renderFormFieldValue formFieldName = "formFields[" <> renderJsString formFieldName <> "]"

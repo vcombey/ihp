@@ -6,6 +6,7 @@
     var LOCAL_DB_PREFIX = 'idb://ihp-local-db:';
     var LOCAL_RENDERERS = {};
     var LOCAL_ACTIONS = {};
+    var LOCAL_DOM_SNAPSHOTS = {};
     var LOCAL_CONFLICT_RESOLVERS = {};
     var localActionFormInterceptorInstalled = false;
 
@@ -552,6 +553,100 @@
         } catch (_error) {
             return String(action);
         }
+    }
+
+    function normalizeDomSnapshotFieldType(fieldType) {
+        if (fieldType === 'bool' || fieldType === 'boolean') {
+            return 'bool';
+        }
+        return 'text';
+    }
+
+    function formMatchesActionPath(form, actionPath) {
+        if (!form || typeof form.getAttribute !== 'function') {
+            return false;
+        }
+        var actionAttribute = form.getAttribute('action');
+        var action = (actionAttribute && actionAttribute.length > 0) ? actionAttribute : window.location.pathname;
+        return normalizeRoutePath(action) === actionPath;
+    }
+
+    function readSnapshotFieldValue(form, formData, fieldName, fieldType) {
+        var normalizedFieldType = normalizeDomSnapshotFieldType(fieldType);
+        if (normalizedFieldType === 'bool') {
+            var rawBool = formData.get(fieldName);
+            if (rawBool === true || rawBool === 'true' || rawBool === 'on' || rawBool === '1') {
+                return true;
+            }
+            if (rawBool === false || rawBool === 'false' || rawBool === '0') {
+                return false;
+            }
+
+            if (form && form.elements) {
+                var element = null;
+                if (typeof form.elements.namedItem === 'function') {
+                    element = form.elements.namedItem(fieldName);
+                } else {
+                    element = form.elements[fieldName];
+                }
+                if (element && typeof element.checked === 'boolean') {
+                    return element.checked;
+                }
+                if (element && typeof element.length === 'number' && element.length > 0) {
+                    for (var index = 0; index < element.length; index += 1) {
+                        if (element[index] && typeof element[index].checked === 'boolean' && element[index].checked) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        var rawText = formData.get(fieldName);
+        if (rawText === null || rawText === undefined) {
+            return '';
+        }
+        return String(rawText);
+    }
+
+    function collectDomSnapshotRecords(actionPath, descriptor) {
+        var forms = Array.prototype.slice.call(document.querySelectorAll('form'))
+            .filter(function (form) {
+                return formMatchesActionPath(form, actionPath);
+            });
+        var fields = withArray(descriptor && descriptor.fields);
+        var idField = descriptor && descriptor.idField ? String(descriptor.idField) : null;
+        if (!idField) {
+            return { hasMatchingForms: forms.length > 0, records: [] };
+        }
+
+        var records = forms
+            .map(function (form) {
+                var formData = createFormData(form, null);
+                var id = formData.get(idField);
+                if (id === null || id === undefined || String(id).length === 0) {
+                    return null;
+                }
+                var record = { id: String(id) };
+                fields.forEach(function (field) {
+                    if (!field || !field.column || !field.formField) {
+                        return;
+                    }
+                    record[String(field.column)] = readSnapshotFieldValue(
+                        form,
+                        formData,
+                        String(field.formField),
+                        field.fieldType
+                    );
+                });
+                return record;
+            })
+            .filter(function (record) {
+                return !!record;
+            });
+
+        return { hasMatchingForms: forms.length > 0, records: records };
     }
 
     function normalizeActionMethods(methods) {
@@ -1124,6 +1219,60 @@
                 handler: actionHandler,
                 methods: normalizeActionMethods(options && options.methods),
             };
+        },
+
+        registerDomSnapshot: function (actionPath, descriptor) {
+            if (!actionPath) {
+                throw new Error('actionPath is required when registering a DOM snapshot');
+            }
+            if (!descriptor || typeof descriptor !== 'object' || !descriptor.table || !descriptor.idField) {
+                throw new Error('registerDomSnapshot expects { table, idField, fields } descriptor');
+            }
+            var normalizedActionPath = normalizeRoutePath(actionPath);
+            LOCAL_DOM_SNAPSHOTS[normalizedActionPath] = {
+                table: String(descriptor.table),
+                idField: String(descriptor.idField),
+                fields: withArray(descriptor.fields).map(function (field) {
+                    return {
+                        column: field && field.column ? String(field.column) : '',
+                        formField: field && field.formField ? String(field.formField) : '',
+                        fieldType: normalizeDomSnapshotFieldType(field && field.fieldType),
+                    };
+                }),
+            };
+        },
+
+        unregisterDomSnapshot: function (actionPath) {
+            if (!actionPath) {
+                return;
+            }
+            delete LOCAL_DOM_SNAPSHOTS[normalizeRoutePath(actionPath)];
+        },
+
+        syncDomSnapshots: async function () {
+            if (!isLocalRouteActive() || !this.isBrowserOnline()) {
+                return;
+            }
+            var actionPaths = Object.keys(LOCAL_DOM_SNAPSHOTS);
+            if (actionPaths.length === 0) {
+                return;
+            }
+
+            for (var index = 0; index < actionPaths.length; index += 1) {
+                var actionPath = actionPaths[index];
+                var descriptor = LOCAL_DOM_SNAPSHOTS[actionPath];
+                if (!descriptor || !descriptor.table) {
+                    continue;
+                }
+                var snapshot = collectDomSnapshotRecords(actionPath, descriptor);
+                if (!snapshot.hasMatchingForms) {
+                    continue;
+                }
+                await this.syncDataSubscriptionSnapshot(
+                    { table: descriptor.table },
+                    snapshot.records
+                );
+            }
         },
 
         registerConflictResolver: function (table, resolver) {
@@ -1783,6 +1932,11 @@
                 if (remaining.length === 0 && readActionQueue().length === 0) {
                     self.setSyncState('online');
                 }
+                try {
+                    await self.syncDomSnapshots();
+                } catch (error) {
+                    console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                }
             })();
 
             try {
@@ -1813,6 +1967,9 @@
             });
             window.addEventListener('turbolinks:load', function () {
                 self.restartConnectivityProbes();
+                self.syncDomSnapshots().catch(function (error) {
+                    console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                });
             });
             self.restartConnectivityProbes();
             if (self.isBrowserOnline()) {
