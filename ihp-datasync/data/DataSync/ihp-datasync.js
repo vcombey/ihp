@@ -24,6 +24,26 @@ function getLocalRuntime() {
     return window['IHPLocalRuntime'];
 }
 
+function syncSubscriptionSnapshotToLocal(query, records) {
+    const localRuntime = getLocalRuntime();
+    if (!localRuntime || !localRuntime.syncDataSubscriptionSnapshot) {
+        return;
+    }
+    localRuntime.syncDataSubscriptionSnapshot(query, records).catch((error) => {
+        console.error('Failed to sync local subscription snapshot:', error);
+    });
+}
+
+function applySubscriptionMessageToLocal(query, message) {
+    const localRuntime = getLocalRuntime();
+    if (!localRuntime || !localRuntime.applyServerSubscriptionMessage) {
+        return;
+    }
+    localRuntime.applyServerSubscriptionMessage(query, message).catch((error) => {
+        console.error('Failed to mirror subscription update to local runtime:', error);
+    });
+}
+
 class DataSyncController {
     static instance = null;
     static ihpBackendHost = null;
@@ -70,6 +90,7 @@ class DataSyncController {
         // Every message from the client expects a reply from the server
         // If that doesn't arrive in time, we can expect the connection to be broken
         this.pendingRequestTimeout = null;
+        this.postConnectReplayPromise = Promise.resolve();
 
         this.dataSubscriptions = [];
 
@@ -126,12 +147,9 @@ class DataSyncController {
                     listener(event);
                 }
 
-                const localRuntime = getLocalRuntime();
-                if (localRuntime && localRuntime.replayQueuedMutations) {
-                    localRuntime.replayQueuedMutations().catch((error) => {
-                        console.error('Failed to replay local queue:', error);
-                    });
-                }
+                this.postConnectReplayPromise = this.replayLocalQueue().catch((error) => {
+                    console.error('Failed to replay local queue:', error);
+                });
             }
 
             socket.onerror = (event) => reject(event);
@@ -284,6 +302,7 @@ class DataSyncController {
             try {
                 console.log('Trying to reconnect DataSync ...');
                 await this.startConnection();
+                await this.postConnectReplayPromise;
 
                 for (const listener of this.eventListeners.reconnect) {
                     listener();
@@ -311,6 +330,14 @@ class DataSyncController {
             this.connection.close();
             this.onClose(null);
         }
+    }
+
+    async replayLocalQueue() {
+        const localRuntime = getLocalRuntime();
+        if (!localRuntime || !localRuntime.replayQueuedMutations) {
+            return;
+        }
+        await localRuntime.replayQueuedMutations();
     }
 }
 
@@ -391,6 +418,7 @@ class DataSubscription {
             this.isConnected = true;
             this.isClosed = false;
             this.records = result;
+            syncSubscriptionSnapshotToLocal(this.query, result);
 
             this.resolveCreateOnServer(result);
             this.updateSubscribers();
@@ -421,6 +449,7 @@ class DataSubscription {
         } else if (tag === 'DidDelete') {
             this.onDelete(message.id);
         }
+        applySubscriptionMessageToLocal(this.query, message);
     }
 
     async close() {

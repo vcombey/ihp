@@ -2,6 +2,7 @@
     var LOCAL_USER_KEY = 'ihp_local_user_id';
     var LOCAL_QUEUE_KEY_PREFIX = 'ihp_local_queue:';
     var LOCAL_FAILED_QUEUE_KEY_PREFIX = 'ihp_local_failed_queue:';
+    var LOCAL_ACTION_QUEUE_KEY_PREFIX = 'ihp_local_action_queue:';
     var LOCAL_DB_PREFIX = 'idb://ihp-local-db:';
     var LOCAL_RENDERERS = {};
     var LOCAL_ACTIONS = {};
@@ -35,6 +36,10 @@
         return LOCAL_FAILED_QUEUE_KEY_PREFIX + getCurrentUserId();
     }
 
+    function actionQueueKey() {
+        return LOCAL_ACTION_QUEUE_KEY_PREFIX + getCurrentUserId();
+    }
+
     function readQueue() {
         return parseJson(localStorage.getItem(queueKey()) || '[]', []);
     }
@@ -51,6 +56,14 @@
         localStorage.setItem(failedQueueKey(), JSON.stringify(queue));
     }
 
+    function readActionQueue() {
+        return parseJson(localStorage.getItem(actionQueueKey()) || '[]', []);
+    }
+
+    function writeActionQueue(queue) {
+        localStorage.setItem(actionQueueKey(), JSON.stringify(queue));
+    }
+
     function appendFailedMutation(item) {
         var queue = readFailedQueue();
         queue.push(item);
@@ -61,6 +74,12 @@
         var queue = readQueue();
         queue.push(item);
         writeQueue(queue);
+    }
+
+    function appendQueuedAction(item) {
+        var queue = readActionQueue();
+        queue.push(item);
+        writeActionQueue(queue);
     }
 
     function drainQueuedMutations() {
@@ -493,12 +512,69 @@
         return normalizeRoutePath(action);
     }
 
+    function readSubmissionReplayPath(form) {
+        var actionAttribute = form.getAttribute('action');
+        var action = (actionAttribute && actionAttribute.length > 0)
+            ? actionAttribute
+            : (window.location.pathname + window.location.search);
+        try {
+            var parsed = new URL(String(action), window.location.origin);
+            return parsed.pathname + parsed.search;
+        } catch (_error) {
+            return String(action);
+        }
+    }
+
     function normalizeActionMethods(methods) {
         var defaultMethods = ['POST', 'PUT', 'PATCH', 'DELETE'];
         var source = Array.isArray(methods) && methods.length > 0 ? methods : defaultMethods;
         return source.map(function (method) {
             return String(method).toUpperCase();
         });
+    }
+
+    function appendFormValue(urlParams, key, value) {
+        if (value === null || value === undefined) {
+            return;
+        }
+        if (Array.isArray(value)) {
+            value.forEach(function (entry) {
+                appendFormValue(urlParams, key, entry);
+            });
+            return;
+        }
+        urlParams.append(key, String(value));
+    }
+
+    async function replayQueuedAction(item) {
+        if (!item || !item.routePath) {
+            return;
+        }
+        var originalMethod = String(item.method || 'POST').toUpperCase();
+        var requestMethod = originalMethod;
+        var urlParams = new URLSearchParams();
+        var formFields = item.formFields || {};
+        Object.keys(formFields).forEach(function (key) {
+            appendFormValue(urlParams, key, formFields[key]);
+        });
+
+        if (requestMethod !== 'GET' && requestMethod !== 'POST') {
+            urlParams.append('_method', requestMethod);
+            requestMethod = 'POST';
+        }
+
+        var response = await fetch(item.routePath, {
+            method: requestMethod,
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: requestMethod === 'GET' ? undefined : urlParams.toString(),
+            credentials: 'same-origin',
+        });
+        if (!response.ok) {
+            throw new Error('Replay action request failed with status ' + String(response.status));
+        }
     }
 
     async function executeInsert(db, payload) {
@@ -601,6 +677,102 @@
         return { tag: 'DidDeleteRecords', requestId: payload.requestId };
     }
 
+    function collectRecordColumns(records) {
+        var columnsMap = {};
+        records.forEach(function (record) {
+            Object.keys(record || {}).forEach(function (column) {
+                columnsMap[column] = true;
+            });
+        });
+        return Object.keys(columnsMap);
+    }
+
+    async function executeUpsertMany(db, table, records) {
+        var normalizedRecords = withArray(records)
+            .map(decodeDataSyncRecord)
+            .filter(function (record) {
+                return record && typeof record === 'object';
+            });
+        if (normalizedRecords.length === 0) {
+            return;
+        }
+
+        var columns = collectRecordColumns(normalizedRecords);
+        if (columns.length === 0) {
+            return;
+        }
+
+        var valuesClause = [];
+        var params = [];
+        normalizedRecords.forEach(function (record) {
+            valuesClause.push('(' + columns.map(function () { return '?'; }).join(', ') + ')');
+            columns.forEach(function (column) {
+                if (Object.prototype.hasOwnProperty.call(record, column)) {
+                    params.push(record[column]);
+                } else {
+                    params.push(null);
+                }
+            });
+        });
+
+        var sql = 'INSERT INTO ' + quoteIdentifier(table)
+            + ' (' + columns.map(quoteIdentifier).join(', ') + ') VALUES '
+            + valuesClause.join(', ');
+        if (columns.indexOf('id') !== -1) {
+            var updatableColumns = columns.filter(function (column) { return column !== 'id'; });
+            if (updatableColumns.length === 0) {
+                sql += ' ON CONFLICT (' + quoteIdentifier('id') + ') DO NOTHING';
+            } else {
+                sql += ' ON CONFLICT (' + quoteIdentifier('id') + ') DO UPDATE SET '
+                    + updatableColumns
+                        .map(function (column) {
+                            return quoteIdentifier(column) + ' = EXCLUDED.' + quoteIdentifier(column);
+                        })
+                        .join(', ');
+            }
+        }
+        await db.query(sql, params);
+    }
+
+    function queryHasResultWindow(query) {
+        return !!query && (typeof query.limit === 'number' || typeof query.offset === 'number');
+    }
+
+    async function pruneQuerySnapshot(db, query, records) {
+        if (!query || !query.table) {
+            return;
+        }
+        if (queryHasResultWindow(query)) {
+            return;
+        }
+
+        var whereParameters = [];
+        var whereClause = compileCondition(query.whereCondition, whereParameters);
+        var ids = withArray(records)
+            .map(function (record) {
+                if (!record || typeof record !== 'object') {
+                    return null;
+                }
+                return record.id;
+            })
+            .filter(function (id) {
+                return id !== null && id !== undefined;
+            });
+
+        if (ids.length === 0) {
+            await db.query(
+                'DELETE FROM ' + quoteIdentifier(query.table) + ' WHERE ' + whereClause,
+                whereParameters
+            );
+            return;
+        }
+
+        var sql = 'DELETE FROM ' + quoteIdentifier(query.table)
+            + ' WHERE (' + whereClause + ')'
+            + ' AND ' + quoteIdentifier('id') + ' NOT IN (' + ids.map(function () { return '?'; }).join(', ') + ')';
+        await db.query(sql, whereParameters.concat(ids));
+    }
+
     function makeErrorResponse(payload, error) {
         return {
             tag: 'DataSyncError',
@@ -622,6 +794,9 @@
         bootstrappedSchemaSql: null,
         activeTransactions: {},
         remoteDispatcher: null,
+        replayInFlight: null,
+        replayRequestIdCounter: 1,
+        suppressMutationQueue: false,
         initialized: false,
 
         isOnline: function () {
@@ -674,6 +849,7 @@
             var userId = getCurrentUserId();
             localStorage.removeItem(LOCAL_QUEUE_KEY_PREFIX + userId);
             localStorage.removeItem(LOCAL_FAILED_QUEUE_KEY_PREFIX + userId);
+            localStorage.removeItem(LOCAL_ACTION_QUEUE_KEY_PREFIX + userId);
             localStorage.removeItem(LOCAL_USER_KEY);
             if (this.db && this.db.close) {
                 await this.db.close();
@@ -784,18 +960,32 @@
             var formData = createFormData(form, submitter);
             var method = readSubmissionMethod(form, formData);
             var routePath = readSubmissionPath(form);
+            var replayPath = readSubmissionReplayPath(form);
             if (!this.shouldHandleFormLocally(routePath, method)) {
                 return false;
             }
             var formFields = formDataToObject(formData);
             try {
-                var result = await this.executeRegisteredAction(routePath, {
-                    routePath: routePath,
+                var previousSuppressMutationQueue = this.suppressMutationQueue;
+                this.suppressMutationQueue = true;
+                var result = null;
+                try {
+                    result = await this.executeRegisteredAction(routePath, {
+                        routePath: routePath,
+                        method: method,
+                        form: form,
+                        submitter: submitter || null,
+                        formData: formData,
+                        formFields: formFields,
+                    });
+                } finally {
+                    this.suppressMutationQueue = previousSuppressMutationQueue;
+                }
+                appendQueuedAction({
+                    routePath: replayPath,
                     method: method,
-                    form: form,
-                    submitter: submitter || null,
-                    formData: formData,
-                    formFields: formFields,
+                    formFields: deepClone(formFields),
+                    createdAt: new Date().toISOString(),
                 });
                 document.dispatchEvent(new CustomEvent('ihp:local-action:success', {
                     detail: { routePath: routePath, method: method, result: result },
@@ -921,14 +1111,16 @@
             try {
                 var response = await this.executeLocal(payload);
                 if (this.isMutationPayload(payload)) {
-                    var queueItem = {
-                        payload: deepClone(payload),
-                        createdAt: new Date().toISOString(),
-                    };
-                    if (payload.tag === 'StartTransaction' && response && response.transactionId) {
-                        queueItem.localTransactionId = response.transactionId;
+                    if (!this.suppressMutationQueue) {
+                        var queueItem = {
+                            payload: deepClone(payload),
+                            createdAt: new Date().toISOString(),
+                        };
+                        if (payload.tag === 'StartTransaction' && response && response.transactionId) {
+                            queueItem.localTransactionId = response.transactionId;
+                        }
+                        appendQueuedMutation(queueItem);
                     }
-                    appendQueuedMutation(queueItem);
                     await this.refreshActiveLocalRoute();
                 }
                 return response;
@@ -975,54 +1167,190 @@
             return response;
         },
 
-        replayQueuedMutations: async function () {
+        syncDataSubscriptionSnapshot: async function (query, records) {
+            if (!query || !query.table) {
+                return;
+            }
+            var normalizedRecords = withArray(records)
+                .map(decodeDataSyncRecord)
+                .filter(function (record) {
+                    return record && typeof record === 'object';
+                });
+            if (
+                normalizedRecords.length > 0
+                && !normalizedRecords.every(function (record) {
+                    return Object.prototype.hasOwnProperty.call(record, 'id');
+                })
+            ) {
+                console.warn(
+                    '[ihp-local-runtime] skipped snapshot sync for table "' + query.table + '" because records are missing ids'
+                );
+                return;
+            }
+
+            try {
+                var db = await this.ensureDb();
+                await executeUpsertMany(db, query.table, normalizedRecords);
+                await pruneQuerySnapshot(db, query, normalizedRecords);
+            } catch (error) {
+                console.error('[ihp-local-runtime] failed to sync subscription snapshot', error);
+            }
+        },
+
+        applyServerSubscriptionMessage: async function (query, message) {
+            if (!query || !query.table || !message || !message.tag) {
+                return;
+            }
+
+            try {
+                var db = await this.ensureDb();
+                switch (message.tag) {
+                    case 'DidInsert': {
+                        if (!message.record) {
+                            return;
+                        }
+                        await executeUpsertMany(db, query.table, [decodeDataSyncRecord(message.record)]);
+                        return;
+                    }
+                    case 'DidUpdate': {
+                        if (!message.id) {
+                            return;
+                        }
+                        var existingResult = await db.query(
+                            'SELECT * FROM ' + quoteIdentifier(query.table) + ' WHERE id = ?',
+                            [message.id]
+                        );
+                        var current = toRows(existingResult)[0] || { id: message.id };
+                        var merged = Object.assign({}, current, decodeDataSyncRecord(message.changeSet || {}));
+                        if (message.appendSet) {
+                            Object.keys(message.appendSet).forEach(function (key) {
+                                var value = decodeDynamicValue(message.appendSet[key]);
+                                var suffix = value === null || value === undefined ? '' : String(value);
+                                merged[key] = (typeof merged[key] === 'string' ? merged[key] : '') + suffix;
+                            });
+                        }
+                        await executeUpsertMany(db, query.table, [merged]);
+                        return;
+                    }
+                    case 'DidDelete': {
+                        if (!message.id) {
+                            return;
+                        }
+                        await db.query(
+                            'DELETE FROM ' + quoteIdentifier(query.table) + ' WHERE id = ?',
+                            [message.id]
+                        );
+                        return;
+                    }
+                    default:
+                        return;
+                }
+            } catch (error) {
+                console.error('[ihp-local-runtime] failed to apply server subscription message', error);
+            }
+        },
+
+        replayQueuedActions: async function () {
             if (!this.isOnline()) {
                 return;
             }
-            var replayDispatcher = this.remoteDispatcher || sendDataSyncMessageOverWebSocket;
-            var queued = readQueue();
-            if (!Array.isArray(queued) || queued.length === 0) {
+            var queuedActions = readActionQueue();
+            if (!Array.isArray(queuedActions) || queuedActions.length === 0) {
                 return;
             }
-            var remaining = deepClone(queued);
-            var transactionIdMap = {};
-            for (var i = 0; i < queued.length; i += 1) {
+
+            var remaining = deepClone(queuedActions);
+            for (var index = 0; index < queuedActions.length; index += 1) {
                 var item = remaining[0];
                 try {
-                    var replayPayload = deepClone(item.payload);
-                    if (replayPayload.transactionId) {
-                        var mappedTransactionId = transactionIdMap[replayPayload.transactionId] || replayPayload.transactionId;
-                        replayPayload.transactionId = mappedTransactionId;
-                    }
-                    if ((replayPayload.tag === 'CommitTransaction' || replayPayload.tag === 'RollbackTransaction') && replayPayload.id) {
-                        var mappedId = transactionIdMap[replayPayload.id] || replayPayload.id;
-                        replayPayload.id = mappedId;
-                    }
-
-                    var response = await replayDispatcher(replayPayload);
-                    if (replayPayload.tag === 'StartTransaction' && item.localTransactionId && response && response.transactionId) {
-                        transactionIdMap[item.localTransactionId] = response.transactionId;
-                        rewriteQueuedTransactionIds(remaining, item.localTransactionId, response.transactionId);
-                    }
-                    if (response && response.tag === 'DataSyncError') {
-                        appendFailedMutation({
-                            payload: item.payload,
-                            response: response,
-                            failedAt: new Date().toISOString(),
-                        });
-                        break;
-                    }
+                    await replayQueuedAction(item);
                     remaining.shift();
                 } catch (error) {
+                    var replayError = makeErrorResponse(
+                        { requestId: item && item.routePath ? item.routePath : 'action-replay' },
+                        error
+                    );
                     appendFailedMutation({
-                        payload: item.payload,
-                        response: makeErrorResponse(item.payload, error),
+                        payload: item,
+                        response: replayError,
                         failedAt: new Date().toISOString(),
                     });
+                    console.error('[ihp-local-runtime] replay action failed', replayError);
                     break;
                 }
             }
-            writeQueue(remaining);
+            writeActionQueue(remaining);
+        },
+
+        replayQueuedMutations: async function () {
+            if (this.replayInFlight) {
+                return await this.replayInFlight;
+            }
+
+            var self = this;
+            this.replayInFlight = (async function () {
+                if (!self.isOnline()) {
+                    return;
+                }
+                await self.replayQueuedActions();
+                var replayDispatcher = self.remoteDispatcher || sendDataSyncMessageOverWebSocket;
+                var queued = readQueue();
+                if (!Array.isArray(queued) || queued.length === 0) {
+                    return;
+                }
+                var remaining = deepClone(queued);
+                var transactionIdMap = {};
+                for (var i = 0; i < queued.length; i += 1) {
+                    var item = remaining[0];
+                    try {
+                        var replayPayload = deepClone(item.payload);
+                        if (typeof replayPayload.requestId !== 'number') {
+                            replayPayload.requestId = self.replayRequestIdCounter;
+                            self.replayRequestIdCounter += 1;
+                        }
+                        if (replayPayload.transactionId) {
+                            var mappedTransactionId = transactionIdMap[replayPayload.transactionId] || replayPayload.transactionId;
+                            replayPayload.transactionId = mappedTransactionId;
+                        }
+                        if ((replayPayload.tag === 'CommitTransaction' || replayPayload.tag === 'RollbackTransaction') && replayPayload.id) {
+                            var mappedId = transactionIdMap[replayPayload.id] || replayPayload.id;
+                            replayPayload.id = mappedId;
+                        }
+
+                        var response = await replayDispatcher(replayPayload);
+                        if (replayPayload.tag === 'StartTransaction' && item.localTransactionId && response && response.transactionId) {
+                            transactionIdMap[item.localTransactionId] = response.transactionId;
+                            rewriteQueuedTransactionIds(remaining, item.localTransactionId, response.transactionId);
+                        }
+                        if (response && response.tag === 'DataSyncError') {
+                            appendFailedMutation({
+                                payload: item.payload,
+                                response: response,
+                                failedAt: new Date().toISOString(),
+                            });
+                            console.error('[ihp-local-runtime] replay mutation failed', response);
+                            break;
+                        }
+                        remaining.shift();
+                    } catch (error) {
+                        var replayErrorResponse = makeErrorResponse(item.payload, error);
+                        appendFailedMutation({
+                            payload: item.payload,
+                            response: replayErrorResponse,
+                            failedAt: new Date().toISOString(),
+                        });
+                        console.error('[ihp-local-runtime] replay mutation failed', replayErrorResponse);
+                        break;
+                    }
+                }
+                writeQueue(remaining);
+            })();
+
+            try {
+                return await this.replayInFlight;
+            } finally {
+                self.replayInFlight = null;
+            }
         },
 
         getFailedMutations: function () {
