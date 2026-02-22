@@ -80,6 +80,79 @@ localWith localOptions runAction = do
 
             runAction
 
+type LocalOptionModifier = LocalOptions -> LocalOptions
+
+-- | Same as 'local', but allows configuring options via small composable modifiers.
+--
+-- Example:
+--
+-- > -- inside your action body:
+-- > localWithOptions
+-- >     [ withSyncTables ["todos"]
+-- >     , withConflictPolicy (LocalConflictLastWriteWinsBy "updatedAt")
+-- >     , withReconnectProbePath "/healthz"
+-- >     ]
+-- >     do
+-- >         todos <- query @Todo |> fetch
+-- >         render TodosView { .. }
+localWithOptions ::
+    ( ?theAction :: action
+    , HasPath action
+    , Controller action
+    , ?modelContext :: ModelContext
+    , ?context :: ControllerContext
+    , ?request :: Request
+    ) => [LocalOptionModifier] -> ((?modelContext :: ModelContext) => IO ()) -> IO ()
+localWithOptions modifiers = localWith (applyLocalOptionModifiers modifiers)
+
+-- | Applies option modifiers to 'defaultLocalOptions'.
+applyLocalOptionModifiers :: [LocalOptionModifier] -> LocalOptions
+applyLocalOptionModifiers modifiers = foldl' (|>) defaultLocalOptions modifiers
+
+-- | Configures conflict resolution policy for server-to-local merges.
+withConflictPolicy :: LocalConflictPolicy -> LocalOptionModifier
+withConflictPolicy conflictPolicy localOptions = localOptions { conflictPolicy }
+
+-- | Restricts which tables are mirrored from server subscriptions to local DB.
+--
+-- Empty list means all tables.
+withSyncTables :: [Text] -> LocalOptionModifier
+withSyncTables syncTables localOptions = localOptions { syncTables }
+
+-- | Replaces the reconnect probe policy.
+withReconnectPolicy :: LocalReconnectPolicy -> LocalOptionModifier
+withReconnectPolicy reconnectPolicy localOptions = localOptions { reconnectPolicy }
+
+-- | Sets the reconnect probe request path.
+withReconnectProbePath :: Text -> LocalOptionModifier
+withReconnectProbePath probePath localOptions =
+    localOptions
+        { reconnectPolicy =
+            (reconnectPolicy localOptions)
+                { probePath = Just probePath
+                }
+        }
+
+-- | Sets reconnect probe timeout in milliseconds.
+withReconnectProbeTimeoutMs :: Int -> LocalOptionModifier
+withReconnectProbeTimeoutMs probeTimeoutMs localOptions =
+    localOptions
+        { reconnectPolicy =
+            (reconnectPolicy localOptions)
+                { probeTimeoutMs
+                }
+        }
+
+-- | Sets reconnect probe interval in milliseconds.
+withReconnectProbeIntervalMs :: Int -> LocalOptionModifier
+withReconnectProbeIntervalMs probeIntervalMs localOptions =
+    localOptions
+        { reconnectPolicy =
+            (reconnectPolicy localOptions)
+                { probeIntervalMs
+                }
+        }
+
 isLocalFirstEnabled :: (?context :: ControllerContext) => Bool
 isLocalFirstEnabled = case Vault.lookup localFirstStateVaultKey ?context.request.vault of
     Just LocalFirstEnabled {} -> True

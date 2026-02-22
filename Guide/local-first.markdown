@@ -44,6 +44,63 @@ action TodosAction = localWith defaultLocalOptions do
     render TodosView { .. }
 ```
 
+Or with composable modifiers:
+
+```haskell
+action TodosAction = localWithOptions
+    [ withSyncTables ["todos"]
+    , withConflictPolicy (LocalConflictLastWriteWinsBy "updatedAt")
+    , withReconnectProbePath "/healthz"
+    , withReconnectProbeTimeoutMs 3000
+    , withReconnectProbeIntervalMs 10000
+    ]
+    do
+        todos <- query @Todo |> fetch
+        render TodosView { .. }
+```
+
+## Local Options Interface
+
+`LocalOptions` currently supports:
+
+1. `syncTables :: [Text]`
+2. `conflictPolicy :: LocalConflictPolicy`
+3. `reconnectPolicy :: LocalReconnectPolicy`
+4. Existing `syncPolicy`, `authPolicy`, `schemaPolicy` defaults
+
+Use either:
+
+1. Record updates on `defaultLocalOptions`
+2. `localWithOptions` + modifiers (`withSyncTables`, `withConflictPolicy`, `withReconnectProbePath`, `withReconnectProbeTimeoutMs`, `withReconnectProbeIntervalMs`)
+
+### Sync Table Scope
+
+`withSyncTables [...]` controls which server subscription tables are mirrored into the local DB cache.
+
+1. Empty list means "mirror all tables"
+2. Non-empty list mirrors only listed tables
+
+This lets you keep local cache small and focused on critical offline paths.
+
+### Conflict Policies
+
+`LocalConflictPolicy` controls how incoming server records merge with local records during subscription sync:
+
+1. `LocalConflictServerWins`: incoming server row replaces local row
+2. `LocalConflictClientWins`: keep local row when both exist
+3. `LocalConflictLastWriteWinsBy "updatedAt"`: compare timestamps on the given field
+
+When policy keeps local state, runtime emits a conflict event so app code can observe this decision.
+
+### Reconnect Detection
+
+Reconnect now requires both:
+
+1. Browser reports online
+2. Probe request succeeds (`withReconnectProbePath`, timeout/interval options)
+
+This avoids replaying queues while network is still flaky.
+
 ## Offline Todo Update Example
 
 The following example shows an update action that can run offline, update the local browser DB, and trigger local AutoRefresh rerendering.
@@ -122,6 +179,46 @@ Key capabilities:
 3. User-scoped local storage namespace
 4. Automatic local action registration from generated `ihp-local-routes.js`
 5. Local auto-refresh event dispatch via `ihp:local-refresh`
+6. Conflict-aware merge hooks and events
+
+### Runtime Events
+
+`IHPLocalRuntime` emits:
+
+1. `ihp:sync:state` with `{ state: "offline" | "syncing" | "online" | "error", ... }`
+2. `ihp:sync:conflict` with `{ table, id, policy, field, resolution }`
+
+You can listen from app code:
+
+```js
+document.addEventListener('ihp:sync:state', (event) => {
+    console.log('sync state', event.detail);
+});
+
+document.addEventListener('ihp:sync:conflict', (event) => {
+    console.log('conflict', event.detail);
+});
+```
+
+### Custom Conflict Resolver Hooks
+
+For table-specific conflict logic:
+
+```js
+IHPLocalRuntime.registerConflictResolver('todos', ({ localRecord, incomingRecord }) => {
+    if (!localRecord) return incomingRecord;
+    if (!incomingRecord) return localRecord;
+    return localRecord.updated_at > incomingRecord.updated_at ? localRecord : incomingRecord;
+});
+```
+
+Returning `null` from a resolver accepts a remote delete.
+
+Unregister with:
+
+```js
+IHPLocalRuntime.unregisterConflictResolver('todos');
+```
 
 ## Safety Checks
 

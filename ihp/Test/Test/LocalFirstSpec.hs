@@ -76,6 +76,32 @@ tests = do
             rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-policy=\"last-write-wins\""
             rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-field=\"updatedAt\""
 
+        it "supports localWithOptions helper modifiers" do
+            let ?request = Wai.defaultRequest
+            context <- newControllerContext
+            let ?context = context
+            let ?modelContext = error "not needed in this test"
+            let ?theAction = DemoAction
+            initAutoRefresh
+            initLocalFirst
+            localWithOptions
+                [ withSyncTables ["todos", "projects"]
+                , withConflictPolicy (LocalConflictLastWriteWinsBy "updatedAt")
+                , withReconnectProbePath "/healthz"
+                , withReconnectProbeTimeoutMs 4500
+                , withReconnectProbeIntervalMs 9000
+                ]
+                (pure ())
+            frozen <- freeze ?context
+            let ?context = frozen
+            let rendered = cs (Blaze.renderHtml autoRefreshMeta) :: Text
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-sync-tables=\"todos,projects\""
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-policy=\"last-write-wins\""
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-field=\"updatedAt\""
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-reconnect-probe-path=\"/healthz\""
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-reconnect-probe-timeout-ms=\"4500\""
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-reconnect-probe-interval-ms=\"9000\""
+
     describe "LocalSafety" do
         it "finds unsafe API usage inside local blocks" do
             let source = Text.unlines
