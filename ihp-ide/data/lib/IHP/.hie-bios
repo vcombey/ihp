@@ -1,4 +1,41 @@
 #!/bin/sh
+set -e
+
+mkdir -p build/hsx-shims
+find . -name '*.hsx' -type f | while read -r file; do
+    shim="build/hsx-shims/${file#./}"
+    shim="${shim%.hsx}.hs"
+    mkdir -p "$(dirname "$shim")"
+    abs="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
+    ln -sfn "$abs" "$shim"
+done
+
+map_hie_bios_arg() {
+    arg="$1"
+    case "$arg" in
+        "$PWD"/*) arg="./${arg#$PWD/}" ;;
+    esac
+
+    case "$arg" in
+        *.hsx)
+            shim="build/hsx-shims/${arg#./}"
+            shim="${shim%.hsx}.hs"
+            mkdir -p "$(dirname "$shim")"
+            abs="$(cd "$(dirname "$arg")" && pwd)/$(basename "$arg")"
+            ln -sfn "$abs" "$shim"
+            printf '%s\n' "$shim"
+            ;;
+        *)
+            printf '%s\n' "$arg"
+            ;;
+    esac
+}
+
+mapped_arg="$(map_hie_bios_arg "$HIE_BIOS_ARG")"
+
 make print-ghc-options GHC_RTS_FLAGS='' | tr ' ' '\n' > "$HIE_BIOS_OUTPUT"
-echo "$HIE_BIOS_ARG" >> "$HIE_BIOS_OUTPUT"
+echo "$mapped_arg" >> "$HIE_BIOS_OUTPUT"
 find . -name '*.hs' >> "$HIE_BIOS_OUTPUT"
+if [ -d build/hsx-shims ]; then
+    find build/hsx-shims -name '*.hs' >> "$HIE_BIOS_OUTPUT"
+fi

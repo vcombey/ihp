@@ -10,7 +10,7 @@ maintainer:          support@digitallyinduced.com
 bug-reports:         https://github.com/digitallyinduced/ihp/issues
 category:            HTML
 build-type:          Simple
-extra-source-files: README.md, changelog.md
+extra-source-files: README.md, changelog.md, pp/Main.hs
 
 source-repository head
     type:     git
@@ -86,7 +86,8 @@ library ihp-hsx-parser
     import: common-extensions, common-flags, common-depends
     default-language: GHC2021
     build-depends:
-        ghc >= 9.4.4 && < 9.13
+        ghc >= 9.4.4 && < 9.13,
+        ghc-boot-th
     hs-source-dirs: parser
     exposed-modules:
         IHP.HSX.Parser
@@ -136,8 +137,13 @@ test-suite ihp-hsx-tests
     other-modules:
         IHP.HSX.ParserSpec
         IHP.HSX.QQSpec
+        IHP.HSX.FileLevelSpec
+        IHP.HSX.HaskellParserSpec
+        IHP.HSX.PreprocessorSpec
         IHP.HSX.CustomHsxCases
     default-language:    GHC2021
+    ghc-options:         -F -pgmF ihp-hsx-pp
+    build-tool-depends:  ihp-hsx:ihp-hsx-pp
     build-depends:
         , ihp-hsx
         , ihp-hsx-lucid2
@@ -147,6 +153,10 @@ test-suite ihp-hsx-tests
         , template-haskell
         , lucid2
         , mtl
+        , process
+        , temporary
+        , directory
+        , filepath
 
 benchmark ihp-hsx-parser-bench
     import: common-extensions, common-flags, common-depends
@@ -161,3 +171,13 @@ benchmark ihp-hsx-parser-bench
         , ihp-hsx
         , tasty-bench
         , deepseq
+
+executable ihp-hsx-pp
+    default-language: GHC2021
+    hs-source-dirs: pp
+    main-is: Main.hs
+    ghc-options: -rtsopts -threaded
+    build-depends:
+        , base
+        , directory
+        , filepath

@@ -32,6 +32,10 @@ tests = do
         it "should support multiple root nodes" do
             [hsx|<u>underlined</u><i>italic</i>|] `shouldBeSameHtml` "<u>underlined</u><i>italic</i>"
 
+        it "should support fragment syntax" do
+            [hsx|<><link rel="stylesheet" href="/a.css"/><link rel="stylesheet" href="/b.css"/></>|]
+                `shouldBeSameHtml` "<link rel=\"stylesheet\" href=\"/a.css\"><link rel=\"stylesheet\" href=\"/b.css\">"
+
         it "should work with text variables" do
             let myString :: Text = "World!"
             [hsx|Hello {myString}|] `shouldBeSameHtml` "Hello World!"
@@ -282,6 +286,43 @@ tests = do
                     <text x="100" y="105" text-anchor="middle" fill="white">IHP</text>
                 </svg>
             |] `shouldBeSameHtml` "<svg viewBox=\"0 0 200 200\"><defs><linearGradient id=\"grad\"><stop offset=\"0%\" stop-color=\"red\"></stop><stop offset=\"100%\" stop-color=\"blue\"></stop></linearGradient></defs><circle cx=\"100\" cy=\"100\" r=\"80\" fill=\"url(#grad)\"></circle><text x=\"100\" y=\"105\" text-anchor=\"middle\" fill=\"white\">IHP</text></svg>"
+        it "should support conditionals inside splices" do
+            let cond = True
+            [hsx|<div>{if cond then ("A" :: Text) else ("B" :: Text)}</div>|] `shouldBeSameHtml` "<div>A</div>"
+
+        it "should support HSX in conditional splices" do
+            let cond = True
+                branch = if cond then [hsx|<span>A</span>|] else [hsx|<span>B</span>|]
+            [hsx|<div>{branch}</div>|]
+                `shouldBeSameHtml` "<div><span>A</span></div>"
+
+        it "should support inline conditional branches via hsxExpression helper (Blaze)" do
+            let cond = True
+            [Blaze.hsx|<div>{if cond then Blaze.hsxExpression "<span>A</span>" else Blaze.hsxExpression "<span>B</span>"}</div>|]
+                `shouldBeBlazeHtml` "<div><span>A</span></div>"
+
+        it "should support inline conditional branches via hsxExpression helper (Lucid2)" do
+            let cond = True
+            [Lucid2.hsx|<div>{if cond then Lucid2.hsxExpression "<span>A</span>" else Lucid2.hsxExpression "<span>B</span>"}</div>|]
+                `shouldBeLucid2Html` "<div><span>A</span></div>"
+
+        it "should support nested HSX when preprocessed" do
+            let cond = True
+            [Blaze.hsx|<div>{if cond then [Blaze.hsx|<span>A</span>|] else [Blaze.hsx|<span>B</span>|]}</div>|]
+                `shouldBeBlazeHtml` "<div><span>A</span></div>"
+
+        -- Note: Using HSX in both branches works at expression level
+        -- (outside of HSX splices) as well
+
+        it "should support conditionals returning HSX" do
+            let cond = True
+            (if cond then [hsx|<div>A</div>|] else [hsx|<div>B</div>|])
+                `shouldBeSameHtml` "<div>A</div>"
+
+        it "should support nested braces in attribute expressions" do
+            -- This exercises parsing a Haskell expression with nested braces inside an attribute splice
+            let r = R 1 2
+            [hsx|<div data={show (r { a = 3 })}></div>|] `shouldBeSameHtml` "<div data=\"R {a = 3, b = 2}\"></div>"
 
     describe "customHsx" do
         it "should allow specified custom tags" do
@@ -306,6 +347,8 @@ newtype NewPlaceId = NewPlaceId Text
 
 newPlaceData = NewPlaceId "New Punches Cross"
 locationId = LocationId 17 (PlaceId "Punches Cross")
+
+data R = R { a :: Int, b :: Int } deriving Show
 
 shouldBeSameHtml :: HasCallStack => AllBackends -> TL.Text -> Expectation
 shouldBeSameHtml MkAllBackends {..} expectedHtml = do

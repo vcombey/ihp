@@ -13,14 +13,16 @@ import qualified "template-haskell" Language.Haskell.TH as TH
 import qualified "template-haskell" Language.Haskell.TH.Syntax as TH
 import qualified Data.Set as Set
 import qualified Data.List as List
+import qualified Data.Text as Text
 
 
 tests = do
     let position = Megaparsec.SourcePos "" (Megaparsec.mkPos 1) (Megaparsec.mkPos 1)
     let extensions = []
+    let noExpandQuasiQuote _ _ = Nothing
     
     describe "HSX Parser" do
-        let settings = HsxSettings True Set.empty Set.empty
+        let settings = HsxSettings True Set.empty Set.empty noExpandQuasiQuote
         it "should fail on invalid html tags" do
             case parseHsx settings position extensions "<myinvalidel>" of
                 Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
@@ -38,6 +40,38 @@ tests = do
             let (Left error) = parseHsx settings position extensions "<div></span>"
             (Megaparsec.errorBundlePretty error) `shouldBe` errorText
 
+        it "should fail on unterminated { } splices" do
+            case parseHsx settings position extensions "<div>{if True then \"A\"</div>" of
+                Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
+                    "unterminated { } splice" `List.isInfixOf` e
+                Right _ -> fail "Expected parser to fail with unterminated splice"
+
+        it "should fail on unterminated string literals in splices" do
+            let input = Text.snoc "<div>{\"abc" '\\'
+            case parseHsx settings position extensions input of
+                Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
+                    "unterminated string literal in splice" `List.isInfixOf` e
+                Right _ -> fail "Expected parser to fail with unterminated string literal"
+
+        it "should fail on unterminated char literals in splices" do
+            let input = Text.snoc "<div>{'" '\\'
+            case parseHsx settings position extensions input of
+                Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
+                    "unterminated char literal in splice" `List.isInfixOf` e
+                Right _ -> fail "Expected parser to fail with unterminated char literal"
+
+        it "should fail when spread attributes are missing an expression" do
+            case parseHsx settings position extensions "<div {... }></div>" of
+                Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
+                    "Expected expression after `...` in spread attributes" `List.isInfixOf` e
+                Right _ -> fail "Expected parser to fail on empty spread attributes expression"
+
+        it "should fail on duplicate attributes" do
+            case parseHsx settings position extensions "<div class=\"a\" class=\"b\"></div>" of
+                Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
+                    "Duplicate attribute found in tag: \"class\"" `List.isInfixOf` e
+                Right _ -> fail "Expected parser to fail on duplicate attributes"
+
         it "should parse a closing tag with spaces" do
             let p = parseHsx settings position extensions "<div></div >"
             p `shouldBe` (Right (Children [Node "div" [] [] False]))
@@ -45,6 +79,10 @@ tests = do
         it "should strip spaces around nodes" do
             let p = parseHsx settings position extensions "<div> <span> </span> </div>"
             p `shouldBe` (Right (Children [Node "div" [] [Node "span" [] [] False] False]))
+
+        it "should parse fragments" do
+            let p = parseHsx settings position extensions "<><link rel=\"stylesheet\" href=\"/a.css\"/><link rel=\"stylesheet\" href=\"/b.css\"/></>"
+            p `shouldBe` (Right (Children [FragmentNode [Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/a.css")] [] True, Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/b.css")] [] True]]))
 
         it "should strip spaces after self closing tags" do
             let p = parseHsx settings position extensions "<head>{\"meta\"}\n\n                        <link rel=\"stylesheet\" href=\"/vendor/bootstrap.min.css\"></head>"
@@ -92,6 +130,10 @@ tests = do
             let p = parseHsx settings position extensions "<!DOCTYPE html><html lang=\"en\"><body>hello</body></html>"
             p `shouldBe` (Right (Children [Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
 
+        it "should accept lowercase doctype" do
+            let p = parseHsx settings position extensions "<!doctype html><html lang=\"en\"><body>hello</body></html>"
+            p `shouldBe` (Right (Children [Node "!doctype" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
+
         it "should suggest similar tag names for typos" do
             case parseHsx settings position extensions "<dvi>" of
                 Left error -> (Megaparsec.errorBundlePretty error) `shouldSatisfy` \e ->
@@ -111,7 +153,7 @@ tests = do
                 Right _ -> fail "Expected parser to fail with invalid tag name"
 
     describe "uncheckedHsx" do
-        let settings = HsxSettings False Set.empty Set.empty
+        let settings = HsxSettings False Set.empty Set.empty noExpandQuasiQuote
         it "should not check markup" do
             let p = parseHsx settings position extensions "<invalid-tag invalid-attribute=\"invalid\"/>"
             p `shouldBe` (Right (Children [Node "invalid-tag" [StaticAttribute "invalid-attribute" (TextValue "invalid")] [] False]))
@@ -132,6 +174,10 @@ tests = do
         it "should strip spaces around nodes" do
             let p = parseHsx settings position extensions "<div> <span> </span> </div>"
             p `shouldBe` (Right (Children [Node "div" [] [Node "span" [] [] False] False]))
+
+        it "should parse fragments" do
+            let p = parseHsx settings position extensions "<><link rel=\"stylesheet\" href=\"/a.css\"/><link rel=\"stylesheet\" href=\"/b.css\"/></>"
+            p `shouldBe` (Right (Children [FragmentNode [Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/a.css")] [] True, Node "link" [StaticAttribute "rel" (TextValue "stylesheet"), StaticAttribute "href" (TextValue "/b.css")] [] True]]))
 
         it "should strip spaces after self closing tags" do
             let p = parseHsx settings position extensions "<head>{\"meta\"}\n\n                        <link rel=\"stylesheet\" href=\"/vendor/bootstrap.min.css\"></head>"
@@ -171,10 +217,15 @@ tests = do
             let p = parseHsx settings position extensions "<!DOCTYPE html><html lang=\"en\"><body>hello</body></html>"
             p `shouldBe` (Right (Children [Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
 
+        it "should accept lowercase doctype" do
+            let p = parseHsx settings position extensions "<!doctype html><html lang=\"en\"><body>hello</body></html>"
+            p `shouldBe` (Right (Children [Node "!doctype" [StaticAttribute "html" (TextValue "html")] [] True, Node "html" [StaticAttribute "lang" (TextValue "en")] [Node "body" [] [TextNode "hello"] False] False]))
+
     describe "customHsx" do
         let customSettings = HsxSettings True 
                 (Set.fromList ["mycustomtag"])
                 (Set.fromList ["my-custom-attr"])
+                noExpandQuasiQuote
 
         it "should allow specified custom tags" do
             let p = parseHsx customSettings position extensions "<mycustomtag>hello</mycustomtag>"
@@ -201,7 +252,7 @@ tests = do
             p `shouldBe` (Right (Children [Node "mycustomtag" [StaticAttribute "class" (TextValue "hello"), StaticAttribute "my-custom-attr" (TextValue "world")] [TextNode "test"] False]))
 
     describe "SVG" do
-        let settings = HsxSettings True Set.empty Set.empty
+        let settings = HsxSettings True Set.empty Set.empty noExpandQuasiQuote
 
         it "should parse a basic svg element" do
             let p = parseHsx settings position extensions "<svg viewBox=\"0 0 100 100\"></svg>"
@@ -260,7 +311,7 @@ tests = do
             p `shouldBe` (Right (Children [Node "radialGradient" [StaticAttribute "fr" (TextValue "20%")] [] False]))
 
     describe "Hyperscript" do
-        let settings = HsxSettings True Set.empty Set.empty
+        let settings = HsxSettings True Set.empty Set.empty noExpandQuasiQuote
 
         it "should parse the _ attribute (hyperscript)" do
             let p = parseHsx settings position extensions "<button _=\"on click toggle .red on me\">Click Me</button>"
@@ -271,7 +322,7 @@ tests = do
             p `shouldBe` (Right (Children [Node "div" [StaticAttribute "_" (TextValue "_")] [] False]))
 
     describe "htmx hx-on" do
-        let settings = HsxSettings True Set.empty Set.empty
+        let settings = HsxSettings True Set.empty Set.empty noExpandQuasiQuote
 
         it "should parse hx-on:click attribute" do
             let p = parseHsx settings position extensions "<button hx-on:click=\"alert('hello')\">Click</button>"

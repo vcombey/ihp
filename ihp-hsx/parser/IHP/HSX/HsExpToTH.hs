@@ -1,4 +1,4 @@
-{-# LANGUAGE ViewPatterns, CPP #-}
+{-# LANGUAGE ViewPatterns, CPP, ImplicitParams #-}
 {-|
 Module: IHP.HSX.HsExpToTH
 Copyright: (c) digitally induced GmbH, 2022
@@ -21,6 +21,9 @@ import GHC.Types.Name
 import GHC.Types.Name.Reader
 import GHC.Data.FastString
 import GHC.Utils.Outputable (Outputable, ppr, showSDocUnsafe)
+#if __GLASGOW_HASKELL__ >= 910
+import GHC.Data.Bag (bagToList)
+#endif
 #if __GLASGOW_HASKELL__ < 912
 import GHC.Types.Basic (Boxity(..))
 #endif
@@ -29,6 +32,9 @@ import qualified GHC.Unit.Module as Module
 import GHC.Stack
 import qualified Data.List.NonEmpty as NonEmpty
 import Language.Haskell.Syntax.Type
+#if __GLASGOW_HASKELL__ >= 910
+import Language.Haskell.Syntax.Binds as Binds
+#endif
 #if __GLASGOW_HASKELL__ >= 906
 import Language.Haskell.Syntax.Basic
 #endif
@@ -97,11 +103,12 @@ toPat (ParPat xP _ lP _) = (toPat . unLoc) lP
 toPat (ConPat pat_con_ext ((unLoc -> name)) pat_args) = TH.ConP (toName name) (map toType []) (map (toPat . unLoc) (Pat.hsConPatArgs pat_args))
 toPat (ViewPat pat_con pat_args pat_con_ext) = error "TH.ViewPattern not implemented"
 toPat (SumPat _ _ _ _) = error "TH.SumPat not implemented"
-toPat (WildPat _ ) = error "TH.WildPat not implemented"
-toPat (NPat _ _ _ _ ) = error "TH.NPat not implemented"
+toPat (WildPat _ ) = TH.WildP
+toPat (LitPat _ lit) = TH.LitP (toLit lit)
+toPat (NPat _ (unLoc -> OverLit { ol_val }) _ _ ) = TH.LitP (toLit' ol_val)
 toPat p = todo "toPat" p
 
-toExp :: Expr.HsExpr GhcPs -> TH.Exp
+toExp :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Expr.HsExpr GhcPs -> TH.Exp
 toExp (Expr.HsVar _ n) =
   let n' = unLoc n
    in if isRdrDataCon n'
@@ -158,7 +165,8 @@ toExp (Expr.HsLam _ (Expr.MG _ (unLoc -> (map unLoc -> [Expr.Match _ _ (map unLo
 toExp (Expr.HsIf _ a b c)                   = TH.CondE (toExp (unLoc a)) (toExp (unLoc b)) (toExp (unLoc c))
 
 -- toExp (Expr.MultiIf _ ifs)                    = TH.MultiIfE (map toGuard ifs)
--- toExp (Expr.Case _ e alts)                    = TH.CaseE (toExp e) (map toMatch alts)
+toExp (Expr.HsLet _ binds (unLoc -> e))      = TH.LetE (toDecs binds) (toExp e)
+toExp (Expr.HsCase _ (unLoc -> e) mg)        = TH.CaseE (toExp e) (map toCaseMatch (matchGroupToList mg))
 -- toExp (Expr.Do _ ss)                          = TH.DoE (map toStmt ss)
 -- toExp e@Expr.MDo{}                            = noTH "toExp" e
 --
@@ -229,6 +237,29 @@ toExp (Expr.ArithSeq _ _ e)
     (FromTo a b) -> TH.FromToR (toExp $ unLoc a) (toExp $ unLoc b)
     (FromThenTo a b c) -> TH.FromThenToR (toExp $ unLoc a) (toExp $ unLoc b) (toExp $ unLoc c)
 
+toExp (Expr.HsUntypedSplice _ splice) =
+  case splice of
+    Expr.HsQuasiQuote _ quoteName quoted ->
+      let
+        name = rdrNameToString quoteName
+        body = unpackFS (unLoc quoted)
+      in
+        case ?expandQuasiQuote name body of
+          Just expanded -> expanded
+          Nothing -> error (moduleName <> ".toExp: unsupported quasiquote: " <> name)
+    Expr.HsUntypedSpliceExpr _ (unLoc -> spliceExpr) ->
+      fromQuoteExpCall spliceExpr (noTH "toExp" "HsUntypedSpliceExpr")
+    _ -> noTH "toExp" "HsUntypedSplice"
+
+toExp (Expr.HsTypedSplice _ (unLoc -> spliceExpr)) =
+  fromQuoteExpCall spliceExpr (todo "toExp" spliceExpr)
+
+#if __GLASGOW_HASKELL__ >= 906
+toExp (Expr.HsPragE _ _ (unLoc -> e)) = toExp e
+#else
+toExp (Expr.HsPragE _ _ (unLoc -> e)) = toExp e
+#endif
+
 
 toExp (Expr.HsProjection _ locatedFields) =
   let
@@ -264,6 +295,89 @@ toExp (Expr.HsOverLabel _ fastString) = TH.LabelE (unpackFS fastString)
 
 toExp e = todo "toExp" e
 
+parseQuoteExpCall :: Expr.HsExpr GhcPs -> Maybe (String, String)
+parseQuoteExpCall expr =
+    case (fun, args) of
+        (quoteExpRef, [qqRef, bodyExpr])
+            | Just qqName <- parseQQRef qqRef
+            , isQuoteExpRef quoteExpRef
+            , Just body <- parseStringLiteral bodyExpr
+            -> Just (qqName, body)
+        _ -> Nothing
+  where
+    (fun, args) = collectApps (stripParens expr)
+
+    stripParens e = case e of
+#if __GLASGOW_HASKELL__ >= 910
+        Expr.HsPar _ inner -> stripParens (unLoc inner)
+#else
+        Expr.HsPar _ _ inner _ -> stripParens (unLoc inner)
+#endif
+        _ -> e
+
+    collectApps e = case stripParens e of
+        Expr.HsApp _ f x ->
+            let (g, xs) = collectApps (unLoc f)
+            in (g, xs <> [stripParens (unLoc x)])
+        other -> (other, [])
+
+    parseQQRef (Expr.HsVar _ (unLoc -> name)) = Just (rdrNameToString name)
+    parseQQRef _ = Nothing
+
+    isQuoteExpRef (Expr.HsVar _ (unLoc -> name)) = baseName (rdrNameToString name) == "quoteExp"
+    isQuoteExpRef _ = False
+
+    parseStringLiteral (Expr.HsLit _ (HsString _ s)) = Just (unpackFS s)
+    parseStringLiteral (Expr.HsOverLit _ OverLit { ol_val = HsIsString _ s }) = Just (unpackFS s)
+    parseStringLiteral _ = Nothing
+
+fromQuoteExpCall :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Expr.HsExpr GhcPs -> TH.Exp -> TH.Exp
+fromQuoteExpCall spliceExpr fallback =
+    case parseQuoteExpCall spliceExpr of
+        Just (name, body) ->
+            case ?expandQuasiQuote name body of
+                Just expanded -> expanded
+                Nothing -> error (moduleName <> ".toExp: unsupported quoteExp target: " <> name)
+        Nothing -> fallback
+
+matchGroupToList :: Expr.MatchGroup GhcPs (LHsExpr GhcPs) -> [Expr.Match GhcPs (LHsExpr GhcPs)]
+matchGroupToList (Expr.MG _ (unLoc -> matches)) = map unLoc matches
+matchGroupToList _ = error (moduleName <> ".matchGroupToList: unsupported MatchGroup")
+
+toCaseMatch :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Expr.Match GhcPs (LHsExpr GhcPs) -> TH.Match
+toCaseMatch (Expr.Match _ _ (map unLoc -> pats) grhss) =
+    case pats of
+        [pat] -> TH.Match (toPat pat) (TH.NormalB (toGRHSs grhss)) []
+        _ -> todo "toCaseMatch" pats
+
+toClause :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Expr.Match GhcPs (LHsExpr GhcPs) -> TH.Clause
+toClause (Expr.Match _ _ (map unLoc -> pats) grhss) =
+    TH.Clause (map toPat pats) (TH.NormalB (toGRHSs grhss)) []
+
+toGRHSs :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Expr.GRHSs GhcPs (LHsExpr GhcPs) -> TH.Exp
+toGRHSs (Expr.GRHSs _ [unLoc -> Expr.GRHS _ guards (unLoc -> e)] localBinds)
+    | null guards && isEmptyLocalBinds localBinds = toExp e
+    | null guards = TH.LetE (toDecs localBinds) (toExp e)
+    | otherwise = todo "toGRHSs" guards
+toGRHSs _ = error (moduleName <> ".toGRHSs: not implemented")
+
+isEmptyLocalBinds :: Binds.HsLocalBinds GhcPs -> Bool
+isEmptyLocalBinds (Binds.HsValBinds _ (Binds.ValBinds _ binds _)) = null (bagToList binds)
+isEmptyLocalBinds _ = False
+
+toDecs :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Binds.HsLocalBinds GhcPs -> [TH.Dec]
+toDecs (Binds.HsValBinds _ (Binds.ValBinds _ binds _)) = map (toDec . unLoc) (bagToList binds)
+toDecs _ = []
+
+toDec :: (?expandQuasiQuote :: String -> String -> Maybe TH.Exp) => Binds.HsBind GhcPs -> TH.Dec
+toDec (Binds.FunBind { fun_id, fun_matches }) =
+    TH.FunD (toName (unLoc fun_id)) (map toClause (matchGroupToList fun_matches))
+toDec (Binds.PatBind { pat_lhs, pat_rhs }) =
+    TH.ValD (toPat (unLoc pat_lhs)) (TH.NormalB (toGRHSs pat_rhs)) []
+toDec (Binds.VarBind { var_id, var_rhs }) =
+    TH.ValD (TH.VarP (toName var_id)) (TH.NormalB (toExp (unLoc var_rhs))) []
+toDec other = todo "toDec" other
+
 
 todo :: Outputable e => String -> e -> a
 todo fun thing = error . concat $ [moduleName, ".", fun, ": not implemented: ", (showSDocUnsafe $ ppr thing)]
@@ -273,3 +387,15 @@ noTH fun thing = error . concat $ [moduleName, ".", fun, ": no TemplateHaskell f
 
 moduleName :: String
 moduleName = "IHP.HSX.HsExpToTH"
+
+rdrNameToString :: RdrName -> String
+rdrNameToString n =
+  let occ = occNameString (rdrNameOcc n)
+  in case n of
+      Unqual _ -> occ
+      Qual m _ -> Module.moduleNameString m <> "." <> occ
+      Orig m _ -> Module.moduleNameString (Module.moduleName m) <> "." <> occ
+      Exact _ -> occ
+
+baseName :: String -> String
+baseName = reverse . takeWhile (/= '.') . reverse

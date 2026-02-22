@@ -17,6 +17,9 @@ import qualified Data.Set as Set
 import qualified "lucid2" Lucid.Base as Lucid2 (Html, HtmlT, ToHtml(..))
 import Lucid.Base (generalizeHtmlT)
 
+noExpandQuasiQuote :: String -> String -> Maybe TH.Exp
+noExpandQuasiQuote _ _ = Nothing
+
 {- This allows us to share test cases between the blaze and lucid backends for
  - HSX. We build a QuasiQuoter that takes the same string splice as input, and
  - runs it through both backends. It also converts the results into lazy text
@@ -37,31 +40,38 @@ hsx = customHsx
             { checkMarkup = True
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = noExpandQuasiQuote
             }
         )
 
 myCustomHsx :: QuasiQuoter
 myCustomHsx = customHsx 
-    (HsxSettings { checkMarkup = True
-                 , additionalTagNames = Set.fromList ["mycustomtag", "anothercustomtag"]
-                 , additionalAttributeNames = Set.fromList ["my-custom-attr", "anothercustomattr"] 
-                 }
+    (HsxSettings
+        { checkMarkup = True
+        , additionalTagNames = Set.fromList ["mycustomtag", "anothercustomtag"]
+        , additionalAttributeNames = Set.fromList ["my-custom-attr", "anothercustomattr"]
+        , expandQuasiQuote = noExpandQuasiQuote
+        }
     )
 
 myTagsOnlyHsx :: QuasiQuoter
 myTagsOnlyHsx = customHsx
-    (HsxSettings { checkMarkup = True
-                 , additionalTagNames = Set.fromList ["mycustomtag", "anothercustomtag"]
-                 , additionalAttributeNames = Set.fromList []
-                 }
+    (HsxSettings
+        { checkMarkup = True
+        , additionalTagNames = Set.fromList ["mycustomtag", "anothercustomtag"]
+        , additionalAttributeNames = Set.fromList []
+        , expandQuasiQuote = noExpandQuasiQuote
+        }
     )
 
 myAttrsOnlyHsx :: QuasiQuoter
 myAttrsOnlyHsx = customHsx
-    (HsxSettings { checkMarkup = True
-                 , additionalTagNames = Set.fromList []
-                 , additionalAttributeNames = Set.fromList ["my-custom-attr", "anothercustomattr"]
-                 }
+    (HsxSettings
+        { checkMarkup = True
+        , additionalTagNames = Set.fromList []
+        , additionalAttributeNames = Set.fromList ["my-custom-attr", "anothercustomattr"]
+        , expandQuasiQuote = noExpandQuasiQuote
+        }
     )
 
 data AllBackends = MkAllBackends
@@ -86,8 +96,4 @@ quoteHsxExpressionShared settings spliceStr =
   let blazeExp = Blaze.quoteHsxExpression settings spliceStr
       lucidExp = Lucid2.quoteHsxExpression settings spliceStr
       lucidExpM = Lucid2.quoteHsxExpressionM settings spliceStr
-   in [| MkAllBackends
-       { blazeMarkup = $blazeExp
-       , lucid2Html = $lucidExp
-       , lucid2HtmlM = $lucidExpM
-       } |]
+   in [| MkAllBackends $blazeExp $lucidExp $lucidExpM |]

@@ -14,6 +14,7 @@ instance NFData Node where
     rnf (TextNode t) = rnf t
     rnf (PreEscapedTextNode t) = rnf t
     rnf (SplicedNode _) = () -- TH.Exp has no NFData
+    rnf (FragmentNode cs) = rnf cs
     rnf (Children cs) = rnf cs
     rnf (CommentNode t) = rnf t
     rnf NoRenderCommentNode = ()
@@ -30,7 +31,7 @@ position :: Megaparsec.SourcePos
 position = Megaparsec.SourcePos "" (Megaparsec.mkPos 1) (Megaparsec.mkPos 1)
 
 settings :: HsxSettings
-settings = HsxSettings True mempty mempty
+settings = HsxSettings True mempty mempty (\_ _ -> Nothing)
 
 -- Small template: single element with text
 small :: Text

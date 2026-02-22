@@ -235,6 +235,77 @@ cd "$PROJECT_NAME"
 rm -rf ".git"
 chmod go-w .ghci || true
 
+# Enable nested HSX by default via preprocessor in the app cabal file
+shopt -s nullglob
+cabal_files=( *.cabal )
+shopt -u nullglob
+if [ ${#cabal_files[@]} -gt 0 ]; then
+	CABAL_FILE="${cabal_files[0]}"
+	if [ -f "$PROJECT_NAME.cabal" ]; then
+		CABAL_FILE="$PROJECT_NAME.cabal"
+	fi
+
+	if ! grep -q "ihp-hsx-pp" "$CABAL_FILE"; then
+		awk '
+function flush() {
+	if (section_type != "") {
+		if (section_target) {
+			has_ghc = 0
+			has_tool = 0
+			has_tool_entry = 0
+			tool_idx = 0
+			for (i = 1; i <= n; i++) {
+				line = lines[i]
+				if (line ~ /^[ \t]*ghc-options:/) {
+					has_ghc = 1
+					if (line !~ /-pgmF[ \t]+ihp-hsx-pp/) {
+						lines[i] = line " -F -pgmF ihp-hsx-pp"
+					}
+				}
+				if (line ~ /^[ \t]*build-tool-depends:/) {
+					has_tool = 1
+					tool_idx = i
+					if (line ~ /ihp-hsx-pp/) {
+						has_tool_entry = 1
+					}
+				}
+				if (line ~ /ihp-hsx-pp/) {
+					has_tool_entry = 1
+				}
+			}
+			if (!has_ghc) {
+				lines[++n] = "    ghc-options: -F -pgmF ihp-hsx-pp"
+			}
+			if (!has_tool_entry) {
+				if (has_tool) {
+					for (j = n; j > tool_idx; j--) lines[j + 1] = lines[j]
+					lines[tool_idx + 1] = "        , ihp-hsx:ihp-hsx-pp"
+					n++
+				} else {
+					lines[++n] = "    build-tool-depends: ihp-hsx:ihp-hsx-pp"
+				}
+			}
+		}
+		for (i = 1; i <= n; i++) print lines[i]
+	}
+	n = 0
+	section_type = ""
+	section_target = 0
+}
+BEGIN { n = 0; section_type = ""; section_target = 0 }
+/^[a-zA-Z]/ {
+	flush()
+	section_type = $1
+	if (section_type == "library" || section_type == "executable" || section_type == "test-suite" || section_type == "benchmark") {
+		section_target = 1
+	}
+}
+{ lines[++n] = $0 }
+END { flush() }
+' "$CABAL_FILE" > "$CABAL_FILE.tmp" && mv "$CABAL_FILE.tmp" "$CABAL_FILE"
+	fi
+fi
+
 # Init git repo
 # When the IHP project is created inside a larger git repo, nix will not pick up file changes until they've been `git add`ed. We create our own git repo here to avoid any issues related to that.
 # See https://github.com/digitallyinduced/ihp/issues/1787

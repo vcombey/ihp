@@ -10,16 +10,24 @@ module IHP.HSX.Lucid2.QQ
   ( hsx
   , uncheckedHsx
   , customHsx
+  , hsxExpression
+  , uncheckedHsxExpression
+  , customHsxExpression
   , quoteHsxExpression
+  , expandHsxQuasiQuote
   , hsxM
   , uncheckedHsxM
   , customHsxM
+  , hsxExpressionM
+  , uncheckedHsxExpressionM
+  , customHsxExpressionM
   , quoteHsxExpressionM
   ) where
 
 import           Prelude
 import Data.Foldable (Foldable(..))
 import Data.Text (Text)
+import qualified Data.Text as Text
 import           IHP.HSX.Parser
 import           IHP.HSX.Lucid2.Attribute
 import qualified IHP.HSX.Lucid2.ToHtml as M
@@ -29,9 +37,12 @@ import           Language.Haskell.TH.Quote
 import Data.String.Conversions
 import qualified Text.Megaparsec as Megaparsec
 import qualified Data.Set as Set
+import System.IO.Unsafe (unsafePerformIO)
 import Lucid.Html5 (doctype_)
 import Lucid.Base
   ( Attributes
+  , Html
+  , HtmlT
   , ToHtml (..)
   , makeElement
   , makeElementNoEnd
@@ -43,6 +54,7 @@ hsx = customHsx
             { checkMarkup = True
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = expandHsxQuasiQuote
             }
         )
 
@@ -52,6 +64,7 @@ uncheckedHsx = customHsx
             { checkMarkup = False
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = expandHsxQuasiQuote
             }
         )
 
@@ -64,14 +77,27 @@ customHsx settings =
         , quoteType = error "quoteType: not defined"
         }
 
+-- | Parse a static HSX snippet from a string and return Lucid HTML.
+--
+-- This is useful inside @{...}@ expressions when nesting another @[hsx|...|]@
+-- is not possible because @|]@ would close the outer quasiquote.
+hsxExpression :: String -> Html ()
+hsxExpression = customHsxExpression defaultSettings
+
+uncheckedHsxExpression :: String -> Html ()
+uncheckedHsxExpression = customHsxExpression uncheckedSettings
+
+customHsxExpression :: HsxSettings -> String -> Html ()
+customHsxExpression settings code =
+    case renderStaticHsx settings code of
+        Left renderError -> error (cs renderError)
+        Right htmlCode -> toHtmlRaw htmlCode
+
 quoteHsxExpression :: HsxSettings -> String -> TH.ExpQ
 quoteHsxExpression settings code = do
         hsxPosition <- findHSXPosition
         extensions <- TH.extsEnabled
-        expression <- case parseHsx settings hsxPosition extensions (cs code) of
-                Left error   -> fail (Megaparsec.errorBundlePretty error)
-                Right result -> pure result
-        compileToHaskell expression
+        quoteHsxExpressionAtWithExtensions settings hsxPosition extensions code
     where
 
         findHSXPosition = do
@@ -79,8 +105,17 @@ quoteHsxExpression settings code = do
             let (line, col) = TH.loc_start loc
             pure $ Megaparsec.SourcePos (TH.loc_filename loc) (Megaparsec.mkPos line) (Megaparsec.mkPos col)
 
+quoteHsxExpressionAtWithExtensions :: HsxSettings -> Megaparsec.SourcePos -> [TH.Extension] -> String -> TH.ExpQ
+quoteHsxExpressionAtWithExtensions settings hsxPosition extensions code = do
+        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        expression <- case parseHsx settings' hsxPosition extensions (cs code) of
+                Left error   -> fail (Megaparsec.errorBundlePretty error)
+                Right result -> pure result
+        compileToHaskell expression
+
 compileToHaskell :: Node -> TH.ExpQ
-compileToHaskell (Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True) = [| doctype_ |]
+compileToHaskell (Node name [StaticAttribute "html" (TextValue "html")] [] True)
+  | Text.toCaseFold name == "!doctype" = [| doctype_ |]
 compileToHaskell (Node name attributes children isLeaf) =
     let
         renderedChildren = TH.listE $ map compileToHaskell children
@@ -97,6 +132,10 @@ compileToHaskell (Node name attributes children isLeaf) =
                     element = nodeToLucidElement name
                 in [| $element $listAttributes (sequence_ @[] $renderedChildren) |]
 compileToHaskell (Children children) =
+    let
+        renderedChildren = TH.listE $ map compileToHaskell children
+    in [| (sequence_ @[] $(renderedChildren)) |]
+compileToHaskell (FragmentNode children) =
     let
         renderedChildren = TH.listE $ map compileToHaskell children
     in [| (sequence_ @[] $(renderedChildren)) |]
@@ -135,6 +174,7 @@ hsxM = customHsxM
             { checkMarkup = True
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = expandHsxQuasiQuote
             }
         )
 
@@ -144,6 +184,7 @@ uncheckedHsxM = customHsxM
             { checkMarkup = False
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = expandHsxQuasiQuote
             }
         )
 
@@ -156,14 +197,23 @@ customHsxM settings =
         , quoteType = error "quoteType: not defined"
         }
 
+hsxExpressionM :: Monad m => String -> M.HtmlType (HtmlT m)
+hsxExpressionM = customHsxExpressionM defaultSettings
+
+uncheckedHsxExpressionM :: Monad m => String -> M.HtmlType (HtmlT m)
+uncheckedHsxExpressionM = customHsxExpressionM uncheckedSettings
+
+customHsxExpressionM :: Monad m => HsxSettings -> String -> M.HtmlType (HtmlT m)
+customHsxExpressionM settings code =
+    case renderStaticHsx settings code of
+        Left renderError -> error (cs renderError)
+        Right htmlCode -> M.Lucid2Html (toHtmlRaw htmlCode)
+
 quoteHsxExpressionM :: HsxSettings -> String -> TH.ExpQ
 quoteHsxExpressionM settings code = do
         hsxPosition <- findHSXPosition
         extensions <- TH.extsEnabled
-        expression <- case parseHsx settings hsxPosition extensions (cs code) of
-                Left error   -> fail (Megaparsec.errorBundlePretty error)
-                Right result -> pure result
-        [| M.unHtmlType $(compileToHaskellM expression) |]
+        quoteHsxExpressionMAtWithExtensions settings hsxPosition extensions code
     where
 
         findHSXPosition = do
@@ -171,8 +221,69 @@ quoteHsxExpressionM settings code = do
             let (line, col) = TH.loc_start loc
             pure $ Megaparsec.SourcePos (TH.loc_filename loc) (Megaparsec.mkPos line) (Megaparsec.mkPos col)
 
+quoteHsxExpressionMAtWithExtensions :: HsxSettings -> Megaparsec.SourcePos -> [TH.Extension] -> String -> TH.ExpQ
+quoteHsxExpressionMAtWithExtensions settings hsxPosition extensions code = do
+        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        expression <- case parseHsx settings' hsxPosition extensions (cs code) of
+                Left error   -> fail (Megaparsec.errorBundlePretty error)
+                Right result -> pure result
+        [| M.unHtmlType $(compileToHaskellM expression) |]
+
+defaultSettings :: HsxSettings
+defaultSettings =
+    HsxSettings
+        { checkMarkup = True
+        , additionalTagNames = Set.empty
+        , additionalAttributeNames = Set.empty
+        , expandQuasiQuote = expandHsxQuasiQuote
+        }
+
+uncheckedSettings :: HsxSettings
+uncheckedSettings =
+    HsxSettings
+        { checkMarkup = False
+        , additionalTagNames = Set.empty
+        , additionalAttributeNames = Set.empty
+        , expandQuasiQuote = expandHsxQuasiQuote
+        }
+
+expandHsxQuasiQuote :: String -> String -> Maybe TH.Exp
+expandHsxQuasiQuote = expandHsxQuasiQuoteWithExtensions []
+
+expandHsxQuasiQuoteWithExtensions :: [TH.Extension] -> String -> String -> Maybe TH.Exp
+expandHsxQuasiQuoteWithExtensions extensions name body =
+    case baseName name of
+        "hsx" -> Just (runQExp (quoteHsxExpressionAtWithExtensions defaultSettings helperSourcePos extensions body))
+        "uncheckedHsx" -> Just (runQExp (quoteHsxExpressionAtWithExtensions uncheckedSettings helperSourcePos extensions body))
+        "hsxM" -> Just (runQExp (quoteHsxExpressionMAtWithExtensions defaultSettings helperSourcePos extensions body))
+        "uncheckedHsxM" -> Just (runQExp (quoteHsxExpressionMAtWithExtensions uncheckedSettings helperSourcePos extensions body))
+        _ -> Nothing
+
+runQExp :: TH.ExpQ -> TH.Exp
+runQExp q = unsafePerformIO (TH.runQ q)
+{-# NOINLINE runQExp #-}
+
+baseName :: String -> String
+baseName = reverse . takeWhile (/= '.') . reverse
+
+helperSourcePos :: Megaparsec.SourcePos
+helperSourcePos = Megaparsec.SourcePos "<hsxExpression>" (Megaparsec.mkPos 1) (Megaparsec.mkPos 1)
+
+renderStaticHsx :: HsxSettings -> String -> Either String Text
+renderStaticHsx settings code =
+    case parseHsx settings helperSourcePos [] (cs code) of
+        Left parseError ->
+            Left ("hsxExpression parse error:\n" <> Megaparsec.errorBundlePretty parseError)
+        Right parsedNode ->
+            case renderStaticNode parsedNode of
+                Left renderError ->
+                    Left ("hsxExpression supports only static HSX (no {..} splices): " <> cs renderError)
+                Right htmlCode ->
+                    Right htmlCode
+
 compileToHaskellM :: Node -> TH.ExpQ
-compileToHaskellM (Node "!DOCTYPE" [StaticAttribute "html" (TextValue "html")] [] True) = [| M.Lucid2Html doctype_ |]
+compileToHaskellM (Node name [StaticAttribute "html" (TextValue "html")] [] True)
+  | Text.toCaseFold name == "!doctype" = [| M.Lucid2Html doctype_ |]
 compileToHaskellM (Node name attributes children isLeaf) =
     let
         renderedChildren = TH.listE $ map compileToHaskellM children
@@ -189,6 +300,10 @@ compileToHaskellM (Node name attributes children isLeaf) =
                     element = nodeToLucidElementM name
                 in [| $element $listAttributes (M.sequenceChildren $renderedChildren) |]
 compileToHaskellM (Children children) =
+    let
+        renderedChildren = TH.listE $ map compileToHaskellM children
+    in [| (M.sequenceChildren $(renderedChildren)) |]
+compileToHaskellM (FragmentNode children) =
     let
         renderedChildren = TH.listE $ map compileToHaskellM children
     in [| (M.sequenceChildren $(renderedChildren)) |]
