@@ -96,18 +96,42 @@
         return document.querySelector('meta[property="ihp-auto-refresh-id"][data-ihp-local-route]');
     }
 
+    function parseIntAttribute(value, fallback) {
+        var parsed = Number.parseInt(String(value || ''), 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            return fallback;
+        }
+        return parsed;
+    }
+
+    function parseCsvAttribute(value) {
+        if (!value || typeof value !== 'string') {
+            return [];
+        }
+        return value
+            .split(',')
+            .map(function (entry) { return entry.trim(); })
+            .filter(function (entry) { return entry.length > 0; });
+    }
+
     function readLocalRouteMetadata() {
         var meta = localMeta();
         if (!meta) {
             return null;
         }
+        var syncTables = parseCsvAttribute(meta.getAttribute('data-ihp-local-sync-tables'));
+        var reconnectProbePath = meta.getAttribute('data-ihp-local-reconnect-probe-path') || '';
         var explicitRoutePath = meta.getAttribute('data-ihp-local-route');
         return {
             routePath: explicitRoutePath || meta.getAttribute('content'),
             routeId: meta.getAttribute('data-ihp-local-route-id') || null,
             syncPolicy: meta.getAttribute('data-ihp-local-sync-policy') || 'server-wins',
+            syncTables: syncTables,
             authPolicy: meta.getAttribute('data-ihp-local-auth-policy') || 'last-authenticated-user',
             schemaPolicy: meta.getAttribute('data-ihp-local-schema-policy') || 'whole-app',
+            reconnectProbePath: reconnectProbePath.length > 0 ? reconnectProbePath : null,
+            reconnectProbeTimeoutMs: parseIntAttribute(meta.getAttribute('data-ihp-local-reconnect-probe-timeout-ms'), 2000),
+            reconnectProbeIntervalMs: parseIntAttribute(meta.getAttribute('data-ihp-local-reconnect-probe-interval-ms'), 15000),
         };
     }
 
@@ -577,6 +601,46 @@
         }
     }
 
+    function resolveConnectivityProbePath(metadata) {
+        if (metadata && metadata.reconnectProbePath) {
+            return metadata.reconnectProbePath;
+        }
+        if (typeof window !== 'undefined' && window.location) {
+            return window.location.pathname || '/';
+        }
+        return '/';
+    }
+
+    async function probeConnectivity(path, timeoutMs) {
+        var controller = null;
+        var timeoutId = null;
+        if (typeof AbortController !== 'undefined') {
+            controller = new AbortController();
+            timeoutId = setTimeout(function () {
+                try {
+                    controller.abort();
+                } catch (_error) {}
+            }, timeoutMs);
+        }
+
+        try {
+            var response = await fetch(path, {
+                method: 'GET',
+                cache: 'no-store',
+                credentials: 'same-origin',
+                headers: { 'X-IHP-Local-Probe': '1' },
+                signal: controller ? controller.signal : undefined,
+            });
+            return response.ok || (response.status >= 300 && response.status < 400);
+        } catch (_error) {
+            return false;
+        } finally {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+        }
+    }
+
     async function executeInsert(db, payload) {
         var record = decodeDataSyncRecord(payload.record);
         var columns = Object.keys(record || {});
@@ -797,14 +861,85 @@
         replayInFlight: null,
         replayRequestIdCounter: 1,
         suppressMutationQueue: false,
+        connectivityProbeTimer: null,
+        syncState: 'idle',
         initialized: false,
 
-        isOnline: function () {
+        isBrowserOnline: function () {
             return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
         },
 
+        isOnline: function () {
+            return this.isBrowserOnline();
+        },
+
+        setSyncState: function (state, detail) {
+            if (this.syncState === state) {
+                return;
+            }
+            this.syncState = state;
+            document.dispatchEvent(new CustomEvent('ihp:sync:state', {
+                detail: Object.assign({ state: state }, detail || {}),
+            }));
+        },
+
+        getConnectivityProbeConfig: function () {
+            var metadata = readLocalRouteMetadata();
+            return {
+                path: resolveConnectivityProbePath(metadata),
+                timeoutMs: metadata ? metadata.reconnectProbeTimeoutMs : 2000,
+                intervalMs: metadata ? metadata.reconnectProbeIntervalMs : 15000,
+            };
+        },
+
+        ensureOnlineWithProbe: async function () {
+            if (!this.isBrowserOnline()) {
+                this.setSyncState('offline', { reason: 'browser-offline' });
+                return false;
+            }
+            var config = this.getConnectivityProbeConfig();
+            if (!config.path) {
+                this.setSyncState('online', { reason: 'browser-online' });
+                return true;
+            }
+            this.setSyncState('probing', { path: config.path });
+            var isReachable = await probeConnectivity(config.path, config.timeoutMs);
+            if (isReachable) {
+                this.setSyncState('online', { path: config.path });
+                return true;
+            }
+            this.setSyncState('offline', { reason: 'probe-failed', path: config.path });
+            return false;
+        },
+
+        restartConnectivityProbes: function () {
+            if (this.connectivityProbeTimer) {
+                clearInterval(this.connectivityProbeTimer);
+                this.connectivityProbeTimer = null;
+            }
+            var self = this;
+            var config = this.getConnectivityProbeConfig();
+            if (!config.intervalMs || config.intervalMs <= 0) {
+                return;
+            }
+            this.connectivityProbeTimer = setInterval(function () {
+                self.ensureOnlineWithProbe().then(function (online) {
+                    if (!online) {
+                        return;
+                    }
+                    self.replayQueuedMutations().catch(function (error) {
+                        self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
+                        console.error('[ihp-local-runtime] replay failed', error);
+                    });
+                }).catch(function (error) {
+                    self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
+                    console.error('[ihp-local-runtime] connectivity probe failed', error);
+                });
+            }, config.intervalMs);
+        },
+
         isReadyForLocal: function () {
-            return isLocalRouteActive() && !this.isOnline();
+            return isLocalRouteActive() && !this.isBrowserOnline();
         },
 
         registerRenderer: function (routePath, renderFn) {
@@ -1167,8 +1302,22 @@
             return response;
         },
 
+        shouldMirrorTable: function (table) {
+            if (!table) {
+                return false;
+            }
+            var metadata = readLocalRouteMetadata();
+            if (!metadata || !Array.isArray(metadata.syncTables) || metadata.syncTables.length === 0) {
+                return true;
+            }
+            return metadata.syncTables.indexOf(table) !== -1;
+        },
+
         syncDataSubscriptionSnapshot: async function (query, records) {
             if (!query || !query.table) {
+                return;
+            }
+            if (!this.shouldMirrorTable(query.table)) {
                 return;
             }
             var normalizedRecords = withArray(records)
@@ -1199,6 +1348,9 @@
 
         applyServerSubscriptionMessage: async function (query, message) {
             if (!query || !query.table || !message || !message.tag) {
+                return;
+            }
+            if (!this.shouldMirrorTable(query.table)) {
                 return;
             }
 
@@ -1275,6 +1427,7 @@
                         response: replayError,
                         failedAt: new Date().toISOString(),
                     });
+                    this.setSyncState('error', { error: replayError.errorMessage || 'replay action failed' });
                     console.error('[ihp-local-runtime] replay action failed', replayError);
                     break;
                 }
@@ -1289,13 +1442,16 @@
 
             var self = this;
             this.replayInFlight = (async function () {
-                if (!self.isOnline()) {
+                var isReachable = await self.ensureOnlineWithProbe();
+                if (!isReachable) {
                     return;
                 }
+                self.setSyncState('syncing');
                 await self.replayQueuedActions();
                 var replayDispatcher = self.remoteDispatcher || sendDataSyncMessageOverWebSocket;
                 var queued = readQueue();
                 if (!Array.isArray(queued) || queued.length === 0) {
+                    self.setSyncState('online');
                     return;
                 }
                 var remaining = deepClone(queued);
@@ -1328,6 +1484,7 @@
                                 response: response,
                                 failedAt: new Date().toISOString(),
                             });
+                            self.setSyncState('error', { error: response.errorMessage || 'replay mutation failed' });
                             console.error('[ihp-local-runtime] replay mutation failed', response);
                             break;
                         }
@@ -1339,11 +1496,15 @@
                             response: replayErrorResponse,
                             failedAt: new Date().toISOString(),
                         });
+                        self.setSyncState('error', { error: replayErrorResponse.errorMessage || 'replay mutation failed' });
                         console.error('[ihp-local-runtime] replay mutation failed', replayErrorResponse);
                         break;
                     }
                 }
                 writeQueue(remaining);
+                if (remaining.length === 0 && readActionQueue().length === 0) {
+                    self.setSyncState('online');
+                }
             })();
 
             try {
@@ -1363,15 +1524,26 @@
             }
             this.initialized = true;
             var self = this;
+            window.addEventListener('offline', function () {
+                self.setSyncState('offline', { reason: 'browser-offline' });
+            });
             window.addEventListener('online', function () {
                 self.replayQueuedMutations().catch(function (error) {
+                    self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
                     console.error('[ihp-local-runtime] replay failed', error);
                 });
             });
-            if (self.isOnline()) {
+            window.addEventListener('turbolinks:load', function () {
+                self.restartConnectivityProbes();
+            });
+            self.restartConnectivityProbes();
+            if (self.isBrowserOnline()) {
                 self.replayQueuedMutations().catch(function (error) {
+                    self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
                     console.error('[ihp-local-runtime] replay failed', error);
                 });
+            } else {
+                self.setSyncState('offline', { reason: 'browser-offline' });
             }
         },
     };

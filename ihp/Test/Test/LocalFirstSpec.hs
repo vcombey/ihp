@@ -56,6 +56,8 @@ tests = do
             let ?context = frozen
             let rendered = cs (Blaze.renderHtml autoRefreshMeta) :: Text
             rendered `shouldSatisfy` Text.isInfixOf "ihp-local-route"
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-sync-tables"
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-reconnect-probe-timeout-ms"
 
     describe "LocalSafety" do
         it "finds unsafe API usage inside local blocks" do

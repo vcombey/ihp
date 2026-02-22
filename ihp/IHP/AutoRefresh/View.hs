@@ -9,6 +9,7 @@ import IHP.Controller.Context
 import IHP.AutoRefresh (autoRefreshStateVaultKey)
 import IHP.LocalFirst (localFirstStateVaultKey)
 import qualified Data.Vault.Lazy as Vault
+import qualified Data.Text as Text
 
 autoRefreshMeta :: (?context :: ControllerContext) => Html5.Html
 autoRefreshMeta = case (autoRefreshState, localFirstState) of
@@ -20,8 +21,12 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
                 data-ihp-local-route-id={localRouteIdText localState}
                 data-ihp-local-route={localRoutePathText localState}
                 data-ihp-local-sync-policy={localSyncPolicyText localState}
+                data-ihp-local-sync-tables={localSyncTablesText localState}
                 data-ihp-local-auth-policy={localAuthPolicyText localState}
                 data-ihp-local-schema-policy={localSchemaPolicyText localState}
+                data-ihp-local-reconnect-probe-path={localReconnectProbePathText localState}
+                data-ihp-local-reconnect-probe-timeout-ms={localReconnectProbeTimeoutText localState}
+                data-ihp-local-reconnect-probe-interval-ms={localReconnectProbeIntervalText localState}
             />
         |]
     (Just AutoRefreshEnabled { sessionId }, _) ->
@@ -33,8 +38,12 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
                 content={localRoutePathText localState}
                 data-ihp-local-route-id={localRouteIdText localState}
                 data-ihp-local-sync-policy={localSyncPolicyText localState}
+                data-ihp-local-sync-tables={localSyncTablesText localState}
                 data-ihp-local-auth-policy={localAuthPolicyText localState}
                 data-ihp-local-schema-policy={localSchemaPolicyText localState}
+                data-ihp-local-reconnect-probe-path={localReconnectProbePathText localState}
+                data-ihp-local-reconnect-probe-timeout-ms={localReconnectProbeTimeoutText localState}
+                data-ihp-local-reconnect-probe-interval-ms={localReconnectProbeIntervalText localState}
             />
         |]
     _ -> mempty
@@ -67,3 +76,23 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
         localSchemaPolicyText LocalFirstEnabled { options = LocalOptions { schemaPolicy } } = case schemaPolicy of
             LocalSchemaWholeApp -> "whole-app"
         localSchemaPolicyText LocalFirstDisabled = ""
+
+        localSyncTablesText :: LocalFirstState -> Text
+        localSyncTablesText LocalFirstEnabled { options = LocalOptions { syncTables } } =
+            syncTables |> Text.intercalate ","
+        localSyncTablesText LocalFirstDisabled = ""
+
+        localReconnectProbePathText :: LocalFirstState -> Text
+        localReconnectProbePathText LocalFirstEnabled { options = LocalOptions { reconnectPolicy = LocalReconnectPolicy { probePath } } } =
+            fromMaybe "" probePath
+        localReconnectProbePathText LocalFirstDisabled = ""
+
+        localReconnectProbeTimeoutText :: LocalFirstState -> Text
+        localReconnectProbeTimeoutText LocalFirstEnabled { options = LocalOptions { reconnectPolicy = LocalReconnectPolicy { probeTimeoutMs } } } =
+            tshow probeTimeoutMs
+        localReconnectProbeTimeoutText LocalFirstDisabled = ""
+
+        localReconnectProbeIntervalText :: LocalFirstState -> Text
+        localReconnectProbeIntervalText LocalFirstEnabled { options = LocalOptions { reconnectPolicy = LocalReconnectPolicy { probeIntervalMs } } } =
+            tshow probeIntervalMs
+        localReconnectProbeIntervalText LocalFirstDisabled = ""

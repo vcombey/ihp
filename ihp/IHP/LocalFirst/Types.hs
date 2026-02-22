@@ -19,10 +19,25 @@ data LocalSchemaPolicy
     = LocalSchemaWholeApp
     deriving (Eq, Show)
 
+data LocalReconnectPolicy = LocalReconnectPolicy
+    { probePath :: !(Maybe Text)
+    , probeTimeoutMs :: !Int
+    , probeIntervalMs :: !Int
+    } deriving (Eq, Show)
+
+defaultLocalReconnectPolicy :: LocalReconnectPolicy
+defaultLocalReconnectPolicy = LocalReconnectPolicy
+    { probePath = Nothing
+    , probeTimeoutMs = 2000
+    , probeIntervalMs = 15000
+    }
+
 data LocalOptions = LocalOptions
     { syncPolicy :: !LocalSyncPolicy
     , authPolicy :: !LocalAuthPolicy
     , schemaPolicy :: !LocalSchemaPolicy
+    , syncTables :: ![Text]
+    , reconnectPolicy :: !LocalReconnectPolicy
     } deriving (Eq, Show)
 
 defaultLocalOptions :: LocalOptions
@@ -30,6 +45,8 @@ defaultLocalOptions = LocalOptions
     { syncPolicy = LocalSyncServerWins
     , authPolicy = LocalAuthLastAuthenticatedUser
     , schemaPolicy = LocalSchemaWholeApp
+    , syncTables = []
+    , reconnectPolicy = defaultLocalReconnectPolicy
     }
 
 newtype LocalRoutePath = LocalRoutePath Text
@@ -46,4 +63,3 @@ data LocalFirstState
 
 localMetaProperty :: ByteString
 localMetaProperty = "ihp-local-route"
-
