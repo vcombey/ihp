@@ -67,7 +67,6 @@ tests = do
             let ?context = context
             let ?modelContext = error "not needed in this test"
             let ?theAction = DemoAction
-            initAutoRefresh
             initLocalFirst
             localWith (defaultLocalOptions { conflictPolicy = LocalConflictLastWriteWinsBy "updatedAt" }) (pure ())
             frozen <- freeze ?context
@@ -82,7 +81,6 @@ tests = do
             let ?context = context
             let ?modelContext = error "not needed in this test"
             let ?theAction = DemoAction
-            initAutoRefresh
             initLocalFirst
             localWithOptions
                 [ withSyncTables ["todos", "projects"]
