@@ -42,7 +42,7 @@ data HsxSettings = HsxSettings
     { checkMarkup :: Bool
     , additionalTagNames :: Set Text
     , additionalAttributeNames :: Set Text
-    , expandQuasiQuote :: String -> String -> Maybe Haskell.Exp
+    , expandQuasiQuote :: SourcePos -> String -> String -> Maybe Haskell.Exp
     }
 
 data AttributeValue = TextValue !Text | ExpressionValue !Haskell.Exp deriving (Eq, Show)

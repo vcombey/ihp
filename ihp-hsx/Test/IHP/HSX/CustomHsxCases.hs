@@ -14,11 +14,12 @@ import Language.Haskell.TH.Quote
 import qualified "template-haskell" Language.Haskell.TH           as TH
 import IHP.HSX.Parser
 import qualified Data.Set as Set
+import qualified Text.Megaparsec as Megaparsec
 import qualified "lucid2" Lucid.Base as Lucid2 (Html, HtmlT, ToHtml(..))
 import Lucid.Base (generalizeHtmlT)
 
-noExpandQuasiQuote :: String -> String -> Maybe TH.Exp
-noExpandQuasiQuote _ _ = Nothing
+noExpandQuasiQuote :: Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+noExpandQuasiQuote _ _ _ = Nothing
 
 {- This allows us to share test cases between the blaze and lucid backends for
  - HSX. We build a QuasiQuoter that takes the same string splice as input, and
@@ -73,6 +74,25 @@ myAttrsOnlyHsx = customHsx
         , expandQuasiQuote = noExpandQuasiQuote
         }
     )
+
+myExpandableHsx :: QuasiQuoter
+myExpandableHsx = customHsx
+    (HsxSettings
+        { checkMarkup = True
+        , additionalTagNames = Set.empty
+        , additionalAttributeNames = Set.empty
+        , expandQuasiQuote = customExpandQuasiQuote
+        }
+    )
+
+customExpandQuasiQuote :: Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+customExpandQuasiQuote _ name _ =
+    case baseName name of
+        "myHsx" -> Just (TH.LitE (TH.StringL "from-custom-expand"))
+        _ -> Nothing
+
+baseName :: String -> String
+baseName = reverse . takeWhile (/= '.') . reverse
 
 data AllBackends = MkAllBackends
   { blazeMarkup :: !Blaze.Markup

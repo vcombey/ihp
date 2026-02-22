@@ -27,12 +27,12 @@ import GHC.Unit.Module.Warnings
 -- | Cached GHC parser options, constructed once per HSX quasi-quote splice.
 data HaskellExprParser = HaskellExprParser
     { parserOpts :: Lexer.ParserOpts
-    , expandQuasiQuote :: String -> String -> Maybe TH.Exp
+    , expandQuasiQuote :: SourcePos -> String -> String -> Maybe TH.Exp
     }
 
 -- | Build a 'HaskellExprParser' from the given extensions.
 -- Call this once and reuse for every @{expr}@ splice in the template.
-mkHaskellExprParser :: [TH.Extension] -> (String -> String -> Maybe TH.Exp) -> HaskellExprParser
+mkHaskellExprParser :: [TH.Extension] -> (SourcePos -> String -> String -> Maybe TH.Exp) -> HaskellExprParser
 mkHaskellExprParser extensions expandQuasiQuote = HaskellExprParser
     { parserOpts = Lexer.mkParserOpts (EnumSet.fromList (requiredExtensions <> extensions)) diagOpts [] False False False False
     , expandQuasiQuote
@@ -51,7 +51,7 @@ parseHaskellExpression :: HaskellExprParser -> SourcePos -> String -> Either (In
 parseHaskellExpression HaskellExprParser { parserOpts, expandQuasiQuote } sourcePos input =
         case expr of
             POk parserState result ->
-                let ?expandQuasiQuote = expandQuasiQuote
+                let ?expandQuasiQuote = expandQuasiQuote sourcePos
                 in Right (toExp (unLoc result))
             PFailed parserState ->
                 let

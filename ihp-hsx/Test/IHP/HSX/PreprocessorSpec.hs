@@ -24,6 +24,15 @@ tests = describe "ihp-hsx-pp preprocessor" do
         output `shouldContain` "view = $(quoteExp hsx \"<div>Hello</div>\")"
         output `shouldContain` "{-# LANGUAGE QuasiQuotes #-}"
 
+    it "allows selecting a custom file-level quasiquoter in the marker" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx myHsx"
+            , "module View where"
+            , "view = <div>Hello</div>"
+            ])
+
+        output `shouldContain` "view = $(quoteExp myHsx \"<div>Hello</div>\")"
+
     it "accepts -- hsx-file as header marker" do
         output <- runPreprocessorOn "View.hs" (unlines
             [ "-- hsx-file"
@@ -75,6 +84,15 @@ tests = describe "ihp-hsx-pp preprocessor" do
         output `shouldContain` "view = $(quoteExp hsx \"<div>Hello</div>\")"
         output `shouldContain` "{-# LANGUAGE QuasiQuotes #-}"
 
+    it "allows selecting a custom file-level quasiquoter via options" do
+        output <- runPreprocessorOnWithOptions ["--hsx-qq=myHsx"] "View.hsx" (unlines
+            [ "module View where"
+            , "view = <div>Hello</div>"
+            ])
+
+        output `shouldContain` "view = $(quoteExp myHsx \"<div>Hello</div>\")"
+        output `shouldContain` "{-# LANGUAGE QuasiQuotes #-}"
+
     it "enables .hsx mode for .hs symlinks pointing to .hsx targets" do
         withSystemTempDirectory "ihp-hsx-pp-symlink" \dir -> do
             let targetPath = dir </> "View.hsx"
@@ -103,6 +121,16 @@ tests = describe "ihp-hsx-pp preprocessor" do
         output `shouldContain` "$(quoteExp hsx \\\"<span>Admin</span>\\\")"
         output `shouldContain` "$(quoteExp hsx \\\"<span>User</span>\\\")"
 
+    it "rewrites configured custom quasiquoters while preserving nested aliases" do
+        output <- runPreprocessorOnWithOptions ["--hsx-target=myHsx"] "View.hs" (unlines
+            [ "module View where"
+            , "view = [myHsx|<div>{if True then [myHsx|<span>Admin</span>|] else [myHsx|<span>User</span>|]}</div>|]"
+            ])
+
+        output `shouldContain` "view = $(quoteExp myHsx"
+        output `shouldContain` "[myHsx|<span>Admin</span>|]"
+        output `shouldContain` "[myHsx|<span>User</span>|]"
+
     it "does not rewrite plain haskell operators as tags" do
         output <- runPreprocessorOn "View.hs" (unlines
             [ "-- hsx"
@@ -112,6 +140,52 @@ tests = describe "ihp-hsx-pp preprocessor" do
 
         output `shouldContain` "isSmall x = x < 10"
         output `shouldNotContain` "$(quoteExp hsx \"< 10\")"
+
+    it "rewrites file-level HSX in function application position" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "view = pure <div>Hello</div>"
+            ])
+
+        output `shouldContain` "view = pure $(quoteExp hsx \"<div>Hello</div>\")"
+
+    it "rewrites file-level HSX after a dollar operator" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "view = pure $ <div>Hello</div>"
+            ])
+
+        output `shouldContain` "view = pure $ $(quoteExp hsx \"<div>Hello</div>\")"
+
+    it "rewrites file-level HSX after infix operators" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "view = render <$> <div>Hello</div>"
+            ])
+
+        output `shouldContain` "view = render <$> $(quoteExp hsx \"<div>Hello</div>\")"
+
+    it "rewrites nested file-level HSX in function application position inside splices" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "view = <div>{pure <span>Nested</span>}</div>"
+            ])
+
+        output `shouldContain` "{pure $(quoteExp hsx \\\"<span>Nested</span>\\\")}"
+
+    it "does not mis-detect compact comparisons as hsx tags" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "isLess x y = x <y"
+            ])
+
+        output `shouldContain` "isLess x y = x <y"
+        output `shouldNotContain` "$(quoteExp hsx \"<y\")"
 
     it "respects header pragmas/comments before module and still detects marker" do
         output <- runPreprocessorOn "View.hs" (unlines
@@ -162,39 +236,56 @@ tests = describe "ihp-hsx-pp preprocessor" do
 
 runPreprocessorOn :: FilePath -> String -> IO String
 runPreprocessorOn fileName inputContent =
+    runPreprocessorOnWithOptions [] fileName inputContent
+
+runPreprocessorOnWithOptions :: [String] -> FilePath -> String -> IO String
+runPreprocessorOnWithOptions options fileName inputContent =
     withSystemTempDirectory "ihp-hsx-pp-spec" \dir -> do
         let inputPath = dir </> fileName
         writeFile inputPath inputContent
-        runPreprocessor inputPath
+        runPreprocessorWithOptions options inputPath
 
 runPreprocessorFailureOn :: FilePath -> String -> IO String
 runPreprocessorFailureOn fileName inputContent =
+    runPreprocessorFailureOnWithOptions [] fileName inputContent
+
+runPreprocessorFailureOnWithOptions :: [String] -> FilePath -> String -> IO String
+runPreprocessorFailureOnWithOptions options fileName inputContent =
     withSystemTempDirectory "ihp-hsx-pp-spec" \dir -> do
         let inputPath = dir </> fileName
         writeFile inputPath inputContent
-        runPreprocessorFailure inputPath
+        runPreprocessorFailureWithOptions options inputPath
 
 runPreprocessor :: FilePath -> IO String
-runPreprocessor inputPath = do
-    (exitCode, _, stdErr, output) <- runPreprocessorRaw inputPath
+runPreprocessor = runPreprocessorWithOptions []
+
+runPreprocessorWithOptions :: [String] -> FilePath -> IO String
+runPreprocessorWithOptions options inputPath = do
+    (exitCode, _, stdErr, output) <- runPreprocessorRawWithOptions options inputPath
     case (exitCode, output) of
         (ExitSuccess, Just result) -> pure result
         (ExitSuccess, Nothing) -> fail "ihp-hsx-pp succeeded without writing an output file"
         (ExitFailure code, _) -> fail ("ihp-hsx-pp failed with exit code " <> show code <> ":\n" <> stdErr)
 
 runPreprocessorFailure :: FilePath -> IO String
-runPreprocessorFailure inputPath = do
-    (exitCode, _, stdErr, _) <- runPreprocessorRaw inputPath
+runPreprocessorFailure = runPreprocessorFailureWithOptions []
+
+runPreprocessorFailureWithOptions :: [String] -> FilePath -> IO String
+runPreprocessorFailureWithOptions options inputPath = do
+    (exitCode, _, stdErr, _) <- runPreprocessorRawWithOptions options inputPath
     case exitCode of
         ExitFailure _ -> pure stdErr
         ExitSuccess -> fail "ihp-hsx-pp succeeded, but a failure was expected"
 
 runPreprocessorRaw :: FilePath -> IO (ExitCode, String, String, Maybe String)
-runPreprocessorRaw inputPath =
+runPreprocessorRaw = runPreprocessorRawWithOptions []
+
+runPreprocessorRawWithOptions :: [String] -> FilePath -> IO (ExitCode, String, String, Maybe String)
+runPreprocessorRawWithOptions options inputPath =
     withSystemTempFile "ihp-hsx-pp-output.hs" \outputPath handle -> do
         hClose handle
         executable <- resolvePreprocessorExecutable
-        (exitCode, stdOut, stdErr) <- readProcessWithExitCode executable [inputPath, outputPath] ""
+        (exitCode, stdOut, stdErr) <- readProcessWithExitCode executable (options <> [inputPath, outputPath]) ""
         output <- case exitCode of
             ExitSuccess -> Just <$> readFile outputPath
             ExitFailure _ -> pure Nothing

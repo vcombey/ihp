@@ -25,6 +25,7 @@ module IHP.HSX.Lucid2.QQ
   ) where
 
 import           Prelude
+import Control.Applicative ((<|>))
 import Data.Foldable (Foldable(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -107,7 +108,7 @@ quoteHsxExpression settings code = do
 
 quoteHsxExpressionAtWithExtensions :: HsxSettings -> Megaparsec.SourcePos -> [TH.Extension] -> String -> TH.ExpQ
 quoteHsxExpressionAtWithExtensions settings hsxPosition extensions code = do
-        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        let settings' = settings { expandQuasiQuote = composeExpandQuasiQuote extensions settings }
         expression <- case parseHsx settings' hsxPosition extensions (cs code) of
                 Left error   -> fail (Megaparsec.errorBundlePretty error)
                 Right result -> pure result
@@ -223,11 +224,16 @@ quoteHsxExpressionM settings code = do
 
 quoteHsxExpressionMAtWithExtensions :: HsxSettings -> Megaparsec.SourcePos -> [TH.Extension] -> String -> TH.ExpQ
 quoteHsxExpressionMAtWithExtensions settings hsxPosition extensions code = do
-        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        let settings' = settings { expandQuasiQuote = composeExpandQuasiQuote extensions settings }
         expression <- case parseHsx settings' hsxPosition extensions (cs code) of
                 Left error   -> fail (Megaparsec.errorBundlePretty error)
                 Right result -> pure result
         [| M.unHtmlType $(compileToHaskellM expression) |]
+
+composeExpandQuasiQuote :: [TH.Extension] -> HsxSettings -> Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+composeExpandQuasiQuote extensions settings sourcePos name body =
+    expandHsxQuasiQuoteWithExtensions extensions sourcePos name body
+        <|> expandQuasiQuote settings sourcePos name body
 
 defaultSettings :: HsxSettings
 defaultSettings =
@@ -247,17 +253,26 @@ uncheckedSettings =
         , expandQuasiQuote = expandHsxQuasiQuote
         }
 
-expandHsxQuasiQuote :: String -> String -> Maybe TH.Exp
+expandHsxQuasiQuote :: Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
 expandHsxQuasiQuote = expandHsxQuasiQuoteWithExtensions []
 
-expandHsxQuasiQuoteWithExtensions :: [TH.Extension] -> String -> String -> Maybe TH.Exp
-expandHsxQuasiQuoteWithExtensions extensions name body =
+expandHsxQuasiQuoteWithExtensions :: [TH.Extension] -> Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+expandHsxQuasiQuoteWithExtensions extensions sourcePos name body =
     case baseName name of
-        "hsx" -> Just (runQExp (quoteHsxExpressionAtWithExtensions defaultSettings helperSourcePos extensions body))
-        "uncheckedHsx" -> Just (runQExp (quoteHsxExpressionAtWithExtensions uncheckedSettings helperSourcePos extensions body))
-        "hsxM" -> Just (runQExp (quoteHsxExpressionMAtWithExtensions defaultSettings helperSourcePos extensions body))
-        "uncheckedHsxM" -> Just (runQExp (quoteHsxExpressionMAtWithExtensions uncheckedSettings helperSourcePos extensions body))
+        "hsx" -> Just (runQExp (expandWithSettings defaultSettings compileToHaskell))
+        "uncheckedHsx" -> Just (runQExp (expandWithSettings uncheckedSettings compileToHaskell))
+        "hsxM" -> Just (runQExp (expandWithSettings defaultSettings compileToHaskellMExp))
+        "uncheckedHsxM" -> Just (runQExp (expandWithSettings uncheckedSettings compileToHaskellMExp))
         _ -> Nothing
+  where
+    expandWithSettings settings compileNode = do
+        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        expression <- case parseHsx settings' sourcePos extensions (cs body) of
+            Left parseError -> error (Megaparsec.errorBundlePretty parseError)
+            Right result -> pure result
+        compileNode expression
+
+    compileToHaskellMExp expression = [| M.unHtmlType $(compileToHaskellM expression) |]
 
 runQExp :: TH.ExpQ -> TH.Exp
 runQExp q = unsafePerformIO (TH.runQ q)

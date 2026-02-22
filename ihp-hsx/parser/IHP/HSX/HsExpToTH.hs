@@ -21,7 +21,7 @@ import GHC.Types.Name
 import GHC.Types.Name.Reader
 import GHC.Data.FastString
 import GHC.Utils.Outputable (Outputable, ppr, showSDocUnsafe)
-#if __GLASGOW_HASKELL__ >= 910
+#if __GLASGOW_HASKELL__ >= 906
 import GHC.Data.Bag (bagToList)
 #endif
 #if __GLASGOW_HASKELL__ < 912
@@ -32,7 +32,7 @@ import qualified GHC.Unit.Module as Module
 import GHC.Stack
 import qualified Data.List.NonEmpty as NonEmpty
 import Language.Haskell.Syntax.Type
-#if __GLASGOW_HASKELL__ >= 910
+#if __GLASGOW_HASKELL__ >= 906
 import Language.Haskell.Syntax.Binds as Binds
 #endif
 #if __GLASGOW_HASKELL__ >= 906
@@ -165,7 +165,11 @@ toExp (Expr.HsLam _ (Expr.MG _ (unLoc -> (map unLoc -> [Expr.Match _ _ (map unLo
 toExp (Expr.HsIf _ a b c)                   = TH.CondE (toExp (unLoc a)) (toExp (unLoc b)) (toExp (unLoc c))
 
 -- toExp (Expr.MultiIf _ ifs)                    = TH.MultiIfE (map toGuard ifs)
+#if __GLASGOW_HASKELL__ >= 906
 toExp (Expr.HsLet _ binds (unLoc -> e))      = TH.LetE (toDecs binds) (toExp e)
+#else
+toExp (Expr.HsLet _ _ binds _ (unLoc -> e))  = TH.LetE (toDecs binds) (toExp e)
+#endif
 toExp (Expr.HsCase _ (unLoc -> e) mg)        = TH.CaseE (toExp e) (map toCaseMatch (matchGroupToList mg))
 -- toExp (Expr.Do _ ss)                          = TH.DoE (map toStmt ss)
 -- toExp e@Expr.MDo{}                            = noTH "toExp" e

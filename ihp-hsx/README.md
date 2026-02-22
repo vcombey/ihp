@@ -101,8 +101,8 @@ Then you can write nested HSX directly:
 Notes:
 `ihp-hsx-pp` requires `TemplateHaskell` (it injects the pragma if missing).
 When using Cabal, add `build-tool-depends: ihp-hsx:ihp-hsx-pp` so the preprocessor is available.
-It currently rewrites only `hsx`, `uncheckedHsx`, `customHsx` (including qualified names like `IHP.HSX.QQ.hsx`).
-Custom aliases like `myHsx` are not recognized.
+By default it rewrites `hsx`, `uncheckedHsx`, `customHsx` (including qualified names like `IHP.HSX.QQ.hsx`).
+Add `-optF --hsx-target=myHsx` (or `-optF --hsx-targets=myHsx,anotherHsx`) to rewrite custom aliases too.
 
 #### File-level HSX mode (experimental)
 
@@ -131,9 +131,18 @@ myComponent =
 
 Notes:
 `ihp-hsx-pp` injects `TemplateHaskell`, and in file-level mode it also injects `QuasiQuotes` so the nested expansion can be parsed.
-This is heuristic: tags are rewritten when they start a line (ignoring whitespace) or appear after common expression introducers like `then`, `else`, `=`, or `->`.
+This is heuristic: tags are rewritten when they start a line (ignoring whitespace), after common expression introducers like `then`, `else`, `=`, or `->`, and after common operators such as `$` and `<$>` when followed by a complete tag.
 Nested HSX inside `{...}` works under the same heuristic.
-File-level mode still requires `hsx` to be in scope (e.g. via `import IHP.ViewPrelude` or `import IHP.HSX.QQ (hsx)`), because the preprocessor emits `$(quoteExp hsx "...")`.
+By default file-level mode emits `$(quoteExp hsx "...")`.
+To use a different quasiquoter, set it in the header marker (`-- hsx myHsx`) or via `-optF --hsx-qq=myHsx`.
+Make sure the selected quasiquoter is in scope.
+
+Known limitations of `ihp-hsx-pp` (current implementation):
+- File-level rewriting is still heuristic (not a full Haskell parser). It handles common starts (`=`, `then`, `else`, `in`, `->`) and common function-application forms, but exotic expression contexts can still be missed.
+- `quoteExp` import injection is text-based. If `Language.Haskell.TH.Quote` appears only in a comment/string, import insertion can be skipped even though `quoteExp` is needed.
+- Module-header import insertion is text-based (`where` substring search). If `where` appears in comments inside a multi-line export list, the generated import can be inserted in the wrong place.
+- Splice scanning in `{...}` is lexical and does not fully understand arbitrary non-HSX quasiquotes; constructs like `{[r|{|]}` can currently fail with `unterminated { } splice`.
+- LANGUAGE pragma detection is text-based; a pragma-looking line inside a block comment can be treated as active.
 
 #### Fragments (`<>...</>`)
 

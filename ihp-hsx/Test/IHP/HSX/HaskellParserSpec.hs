@@ -3,7 +3,6 @@ module IHP.HSX.HaskellParserSpec where
 import Prelude
 import Test.Hspec
 import Control.Exception (SomeException, displayException, evaluate, try)
-import Data.List (isInfixOf)
 import qualified "template-haskell" Language.Haskell.TH as TH
 import qualified Text.Megaparsec as Megaparsec
 import IHP.HSX.HaskellParser (mkHaskellExprParser, parseHaskellExpression)
@@ -35,7 +34,8 @@ tests = describe "HSX haskell splice parser errors" do
         case result of
             Left err -> do
                 let message = displayException err
-                message `shouldSatisfy` (\m -> "Invalid tag name: dvi" `isInfixOf` m || "Q monad failure" `isInfixOf` m)
+                message `shouldContain` "Invalid tag name: dvi"
+                message `shouldNotContain` "Q monad failure"
                 message `shouldNotContain` "not implemented"
                 message `shouldNotContain` "no TemplateHaskell"
             Right parsedResult ->

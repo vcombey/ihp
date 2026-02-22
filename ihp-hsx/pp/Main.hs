@@ -1,58 +1,132 @@
 module Main where
 
+import Prelude
 import Data.Char (isAlpha, isAlphaNum, isSpace, toLower)
-import Data.List (elemIndex, isPrefixOf, isSuffixOf, foldl')
+import Data.List (elemIndex, isPrefixOf, isSuffixOf, foldl', nub)
+import Data.Maybe (fromMaybe, isJust)
 import System.Directory (canonicalizePath, getSymbolicLinkTarget, pathIsSymbolicLink)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hPutStrLn, stderr)
 
+data PreprocessorOptions = PreprocessorOptions
+    { defaultFileLevelQQ :: String
+    , targetQQNames :: [String]
+    }
+
+defaultPreprocessorOptions :: PreprocessorOptions
+defaultPreprocessorOptions =
+    PreprocessorOptions
+        { defaultFileLevelQQ = "hsx"
+        , targetQQNames = defaultTargetNames
+        }
+
+defaultTargetNames :: [String]
+defaultTargetNames = ["hsx", "uncheckedHsx", "customHsx"]
+
 main :: IO ()
 main = do
     args <- getArgs
-    case args of
-        [] -> do
-            hPutStrLn stderr "ihp-hsx-pp: expected input file"
+    case parseInvocationArgs args of
+        Left err -> do
+            hPutStrLn stderr ("ihp-hsx-pp: " <> err)
             exitFailure
-        [input] -> do
-            resolvedInput <- resolveInputPath input
-            content <- readFile input
-            let (shebang, rest) = splitShebang content
-            let fileLevelHsx = shouldUseFileLevelHsx resolvedInput rest
-            let needsTemplateHaskell = not (hasLanguagePragma "TemplateHaskell" rest)
-            let needsQuasiQuotes = fileLevelHsx && not (hasLanguagePragma "QuasiQuotes" rest)
-            let lineStart = if null shebang then 1 else 2
-            let headerPragmas =
-                    concat
-                        [ if needsTemplateHaskell then ["{-# LANGUAGE TemplateHaskell #-}"] else []
-                        , if needsQuasiQuotes then ["{-# LANGUAGE QuasiQuotes #-}"] else []
-                        ]
-            let header =
-                    shebang
-                    ++ (if null headerPragmas then "" else unlines headerPragmas ++ "{-# LINE " ++ show lineStart ++ " " ++ show input ++ " #-}\n")
-            let rewritten = ensureQuoteExpImport (rewriteContent fileLevelHsx rest)
-            putStr (header ++ rewritten)
-        _ -> do
-            let input = args !! (length args - 2)
-            let output = args !! (length args - 1)
-            resolvedInput <- resolveInputPath input
-            content <- readFile input
-            let (shebang, rest) = splitShebang content
-            let fileLevelHsx = shouldUseFileLevelHsx resolvedInput rest
-            let needsTemplateHaskell = not (hasLanguagePragma "TemplateHaskell" rest)
-            let needsQuasiQuotes = fileLevelHsx && not (hasLanguagePragma "QuasiQuotes" rest)
-            let lineStart = if null shebang then 1 else 2
-            let headerPragmas =
-                    concat
-                        [ if needsTemplateHaskell then ["{-# LANGUAGE TemplateHaskell #-}"] else []
-                        , if needsQuasiQuotes then ["{-# LANGUAGE QuasiQuotes #-}"] else []
-                        ]
-            let header =
-                    shebang
-                    ++ (if null headerPragmas then "" else unlines headerPragmas ++ "{-# LINE " ++ show lineStart ++ " " ++ show input ++ " #-}\n")
-            let rewritten = ensureQuoteExpImport (rewriteContent fileLevelHsx rest)
-            writeFile output (header ++ rewritten)
+        Right (optionArgs, input, outputPath) -> do
+            options <- case parsePreprocessorOptions optionArgs of
+                Left err -> do
+                    hPutStrLn stderr ("ihp-hsx-pp: " <> err)
+                    exitFailure
+                Right parsed -> pure parsed
+            rewritten <- preprocessInput options input
+            case outputPath of
+                Nothing -> putStr rewritten
+                Just output -> writeFile output rewritten
+
+parseInvocationArgs :: [String] -> Either String ([String], FilePath, Maybe FilePath)
+parseInvocationArgs [] = Left "expected input file"
+parseInvocationArgs [input] = Right ([], input, Nothing)
+parseInvocationArgs args =
+    let secondToLast = args !! (length args - 2)
+    in if isOptionArg secondToLast
+        then Right (take (length args - 1) args, last args, Nothing)
+        else Right (take (length args - 2) args, secondToLast, Just (last args))
+  where
+    isOptionArg ('-':_) = True
+    isOptionArg _ = False
+
+parsePreprocessorOptions :: [String] -> Either String PreprocessorOptions
+parsePreprocessorOptions args = do
+    (customQQ, extraTargets) <- foldl' step (Right (Nothing, [])) args
+    let fileLevelQQ = fromMaybe (defaultFileLevelQQ defaultPreprocessorOptions) customQQ
+        allTargets = nub (map baseName (defaultTargetNames <> extraTargets <> [fileLevelQQ]))
+    pure PreprocessorOptions
+        { defaultFileLevelQQ = fileLevelQQ
+        , targetQQNames = allTargets
+        }
+  where
+    step :: Either String (Maybe String, [String]) -> String -> Either String (Maybe String, [String])
+    step state option = do
+        (customQQ, extraTargets) <- state
+        case () of
+            _ | Just qq <- stripPrefixOption "--hsx-qq=" option ->
+                    if null qq
+                        then Left "--hsx-qq expects a non-empty quasiquoter name"
+                        else Right (Just qq, extraTargets)
+              | Just qq <- stripPrefixOption "--hsx-target=" option ->
+                    if null qq
+                        then Left "--hsx-target expects a non-empty quasiquoter name"
+                        else Right (customQQ, extraTargets <> [qq])
+              | Just qqs <- stripPrefixOption "--hsx-targets=" option ->
+                    let parsed = filter (not . null) (map trim (splitComma qqs))
+                    in if null parsed
+                        then Left "--hsx-targets expects at least one quasiquoter name"
+                        else Right (customQQ, extraTargets <> parsed)
+              | "--hsx-" `isPrefixOf` option ->
+                    Left ("unknown option: " <> option)
+              | otherwise ->
+                    Right (customQQ, extraTargets)
+
+    stripPrefixOption prefix option =
+        if prefix `isPrefixOf` option
+            then Just (drop (length prefix) option)
+            else Nothing
+
+    splitComma [] = [""]
+    splitComma value =
+        case break (== ',') value of
+            (segment, []) -> [segment]
+            (segment, _:rest) -> segment : splitComma rest
+
+    trim = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+
+preprocessInput :: PreprocessorOptions -> FilePath -> IO String
+preprocessInput options input = do
+    resolvedInput <- resolveInputPath input
+    content <- readFile input
+    pure (renderProcessedInput options input resolvedInput content)
+
+renderProcessedInput :: PreprocessorOptions -> FilePath -> FilePath -> String -> String
+renderProcessedInput options input resolvedInput content =
+    let
+        (shebang, rest) = splitShebang content
+        fileLevelQQ = resolveFileLevelQQ options resolvedInput rest
+        effectiveTargetQQNames =
+            nub (targetQQNames options <> maybe [] (\qq -> [baseName qq]) fileLevelQQ)
+        needsTemplateHaskell = not (hasLanguagePragma "TemplateHaskell" rest)
+        needsQuasiQuotes = isJust fileLevelQQ && not (hasLanguagePragma "QuasiQuotes" rest)
+        lineStart = if null shebang then 1 else 2
+        headerPragmas =
+            concat
+                [ if needsTemplateHaskell then ["{-# LANGUAGE TemplateHaskell #-}"] else []
+                , if needsQuasiQuotes then ["{-# LANGUAGE QuasiQuotes #-}"] else []
+                ]
+        header =
+            shebang
+            ++ (if null headerPragmas then "" else unlines headerPragmas ++ "{-# LINE " ++ show lineStart ++ " " ++ show input ++ " #-}\n")
+        rewritten = ensureQuoteExpImport (rewriteContent fileLevelQQ effectiveTargetQQNames rest)
+    in
+        header ++ rewritten
 
 splitShebang :: String -> (String, String)
 splitShebang input =
@@ -77,30 +151,42 @@ hasLanguagePragma extension input = any hasLine (lines input)
         && ("LANGUAGE" `isInfixOf` line || "OPTIONS_GHC" `isInfixOf` line)
         && extension `isInfixOf` line
 
-hasFileLevelHsxMarker :: String -> Bool
-hasFileLevelHsxMarker input = scanHeader 0 (lines input)
+findFileLevelHsxMarker :: String -> Maybe (Maybe String)
+findFileLevelHsxMarker input = scanHeader 0 (lines input)
   where
     -- Header scope: language/options pragmas, blank lines, and comments that
     -- appear before the module declaration or the first non-header code line.
     --
     -- Markers are recognized only in top-level line comments (`-- hsx`), not
     -- inside block comments.
-    scanHeader _ [] = False
+    scanHeader _ [] = Nothing
     scanHeader depth (line:rest)
         | depth > 0 = scanHeader (updateBlockDepth depth line) rest
         | isPragmaLine line = scanHeader depth rest
         | all isSpace line = scanHeader depth rest
         | startsBlockComment line = scanHeader (updateBlockDepth depth line) rest
-        | isLineComment line = isMarkerLine line || scanHeader depth rest
-        | isModuleLine line = False
-        | otherwise = False
+        | isLineComment line =
+            case parseMarkerLine line of
+                Just marker -> Just marker
+                Nothing -> scanHeader depth rest
+        | isModuleLine line = Nothing
+        | otherwise = Nothing
 
-    isMarkerLine line =
+    parseMarkerLine line =
         case dropWhile isSpace line of
             '-':'-':rest ->
-                let token = map toLower (trim (dropWhile isSpace rest))
-                in token == "hsx" || token == "hsx-file"
-            _ -> False
+                case words (trim (dropWhile isSpace rest)) of
+                    [keyword]
+                        | isFileLevelKeyword keyword -> Just Nothing
+                    [keyword, qqName]
+                        | isFileLevelKeyword keyword -> Just (Just qqName)
+                    _ -> Nothing
+            _ -> Nothing
+
+    isFileLevelKeyword keyword =
+        let lowered = map toLower keyword
+        in lowered == "hsx" || lowered == "hsx-file"
+
     trim = reverse . dropWhile isSpace . reverse
     isLineComment line =
         case dropWhile isSpace line of
@@ -116,16 +202,20 @@ hasFileLevelHsxMarker input = scanHeader 0 (lines input)
             | isPrefixOf "-}" s = goDepth (max 0 (d - 1)) (drop 2 s)
             | otherwise = goDepth d (drop 1 s)
 
-shouldUseFileLevelHsx :: FilePath -> String -> Bool
-shouldUseFileLevelHsx inputPath inputContent =
-    hasFileLevelHsxMarker inputContent || isHsxFile inputPath
+resolveFileLevelQQ :: PreprocessorOptions -> FilePath -> String -> Maybe String
+resolveFileLevelQQ options inputPath inputContent =
+    case findFileLevelHsxMarker inputContent of
+        Just markerQQ -> Just (fromMaybe (defaultFileLevelQQ options) markerQQ)
+        Nothing
+            | isHsxFile inputPath -> Just (defaultFileLevelQQ options)
+            | otherwise -> Nothing
 
 isHsxFile :: FilePath -> Bool
 isHsxFile path =
     ".hsx" `isSuffixOf` map toLower path
 
-rewriteContent :: Bool -> String -> String
-rewriteContent fileLevelHsx = go Normal ""
+rewriteContent :: Maybe String -> [String] -> String -> String
+rewriteContent fileLevelQQ targetQQNames = go Normal ""
   where
     go _ _ [] = []
     go Normal lineBuf s@(c:cs)
@@ -133,16 +223,19 @@ rewriteContent fileLevelHsx = go Normal ""
         | c == '{' && isPrefixOf "{-" s = "{-" ++ go (BlockComment 1) (lineBuf ++ "{-") (drop 2 s)
         | c == '"' = '"' : go StringLit (lineBuf ++ "\"") cs
         | c == '\'' = '\'' : go CharLit (lineBuf ++ "'") cs
-        | fileLevelHsx && c == '<' && looksLikeTagStart cs && shouldStartHsxInLine lineBuf =
-            let (body, rest) = consumeHsxBlock s
-                replacement = "$(quoteExp hsx " ++ show body ++ ")"
-            in replacement ++ go Normal (lineBuf ++ "hsx") rest
+        | Just qqName <- fileLevelQQ
+        , c == '<'
+        , looksLikeTagStart cs
+        , shouldStartHsxInLine lineBuf cs =
+            let (body, rest) = consumeHsxBlock qqName s
+                replacement = "$(quoteExp " ++ qqName ++ " " ++ show body ++ ")"
+            in replacement ++ go Normal (lineBuf ++ qqName) rest
         | c == '[' =
             case parseQQStart cs of
-                Just (qqName, restAfterBar) | isTargetQQ qqName ->
-                    let (body, rest) = consumeQQ 1 restAfterBar
+                Just (qqName, restAfterBar) | isTargetQQ targetQQNames qqName ->
+                    let (body, rest) = consumeQQ targetQQNames 1 restAfterBar
                         replacement = "$(quoteExp " ++ qqName ++ " " ++ show body ++ ")"
-                    in replacement ++ go Normal (lineBuf ++ "hsx") rest
+                    in replacement ++ go Normal (lineBuf ++ qqName) rest
                 Just (qqName, restAfterBar) ->
                     let (body, rest) = consumeQQRaw restAfterBar
                         raw = "[" ++ qqName ++ "|" ++ body ++ "|]"
@@ -188,8 +281,8 @@ advanceLineStart lineStart c
     | lineStart && (c == ' ' || c == '\t') = True
     | otherwise = False
 
-consumeQQ :: Int -> String -> (String, String)
-consumeQQ depth = go depth []
+consumeQQ :: [String] -> Int -> String -> (String, String)
+consumeQQ targetNames depth = go depth []
   where
     go _ _ [] = error "ihp-hsx-pp: unterminated hsx quasiquote"
     go d acc s
@@ -199,7 +292,7 @@ consumeQQ depth = go depth []
                 else go (d - 1) (pushString "|]" acc) (drop 2 s)
         | isPrefixOf "[" s =
             case parseQQStart (drop 1 s) of
-                Just (qqName, restAfterBar) | isTargetQQ qqName ->
+                Just (qqName, restAfterBar) | isTargetQQ targetNames qqName ->
                     let acc' = pushString ("[" ++ qqName ++ "|") acc
                     in go (d + 1) acc' restAfterBar
                 _ -> case s of
@@ -267,14 +360,11 @@ isIdentStart c = isAlpha c || c == '_'
 isIdentChar :: Char -> Bool
 isIdentChar c = isAlphaNum c || c == '_' || c == '\''
 
-isTargetQQ :: String -> Bool
-isTargetQQ name = baseName name `elem` targetNames
+isTargetQQ :: [String] -> String -> Bool
+isTargetQQ targetNames name = baseName name `elem` targetNames
 
 baseName :: String -> String
 baseName = reverse . takeWhile (/= '.') . reverse
-
-targetNames :: [String]
-targetNames = ["hsx", "uncheckedHsx", "customHsx"]
 
 looksLikeTagStart :: String -> Bool
 looksLikeTagStart [] = False
@@ -299,48 +389,48 @@ data TagInfo
     | TagSpecial
     deriving (Eq, Show)
 
-consumeHsxBlock :: String -> (String, String)
-consumeHsxBlock s =
-    let (tagText, info, rest) = consumeTagText s
+consumeHsxBlock :: String -> String -> (String, String)
+consumeHsxBlock fileLevelQQ s =
+    let (tagText, info, rest) = consumeTagText fileLevelQQ s
         (stack, rawTag) = updateStack [] Nothing info
     in if null stack
         then (tagText, rest)
         else
-            let (body, rest') = consumeHsxBody stack rawTag rest
+            let (body, rest') = consumeHsxBody fileLevelQQ stack rawTag rest
             in (tagText ++ body, rest')
 
-consumeHsxBody :: [String] -> Maybe String -> String -> (String, String)
-consumeHsxBody _ _ [] = error "ihp-hsx-pp: unterminated hsx block"
-consumeHsxBody stack rawTag s
+consumeHsxBody :: String -> [String] -> Maybe String -> String -> (String, String)
+consumeHsxBody _ _ _ [] = error "ihp-hsx-pp: unterminated hsx block"
+consumeHsxBody fileLevelQQ stack rawTag s
     | Just tagName <- rawTag =
         let (rawText, rest) = scanUntilClosingTag tagName s
         in case rest of
             [] -> error "ihp-hsx-pp: unterminated raw-text hsx block"
             _ ->
-                let (tagText, info, rest') = consumeTagText rest
+                let (tagText, info, rest') = consumeTagText fileLevelQQ rest
                     (stack', rawTag') = updateStack stack rawTag info
                 in if null stack'
                     then (rawText ++ tagText, rest')
                     else
-                        let (more, rest'') = consumeHsxBody stack' rawTag' rest'
+                        let (more, rest'') = consumeHsxBody fileLevelQQ stack' rawTag' rest'
                         in (rawText ++ tagText ++ more, rest'')
     | otherwise =
         case s of
             ('{':rest) ->
                 let (content, rest') = consumeBraceRaw rest
-                    rewritten = rewriteHaskellSegment content
-                    (more, rest'') = consumeHsxBody stack rawTag rest'
+                    rewritten = rewriteHaskellSegment fileLevelQQ content
+                    (more, rest'') = consumeHsxBody fileLevelQQ stack rawTag rest'
                 in ("{" ++ rewritten ++ "}" ++ more, rest'')
             ('<':_) ->
-                let (tagText, info, rest') = consumeTagText s
+                let (tagText, info, rest') = consumeTagText fileLevelQQ s
                     (stack', rawTag') = updateStack stack rawTag info
                 in if null stack'
                     then (tagText, rest')
                     else
-                        let (more, rest'') = consumeHsxBody stack' rawTag' rest'
+                        let (more, rest'') = consumeHsxBody fileLevelQQ stack' rawTag' rest'
                         in (tagText ++ more, rest'')
             (c:cs) ->
-                let (more, rest') = consumeHsxBody stack rawTag cs
+                let (more, rest') = consumeHsxBody fileLevelQQ stack rawTag cs
                 in (c:more, rest')
 
 updateStack :: [String] -> Maybe String -> TagInfo -> ([String], Maybe String)
@@ -375,19 +465,19 @@ popMatching name (x:xs)
     | normalizeName name == normalizeName x = xs
     | otherwise = popMatching name xs
 
-consumeTagText :: String -> (String, TagInfo, String)
-consumeTagText s@('<':'!':'-':'-':rest) =
+consumeTagText :: String -> String -> (String, TagInfo, String)
+consumeTagText _ s@('<':'!':'-':'-':rest) =
     let (body, rest') = breakOn "-->" rest
     in ("<!--" ++ body ++ "-->", TagSpecial, rest')
-consumeTagText s@('<':rest) =
-    let (body, rest') = consumeTagBody rest
+consumeTagText fileLevelQQ s@('<':rest) =
+    let (body, rest') = consumeTagBody fileLevelQQ rest
         tagText = "<" ++ body
         info = classifyTag tagText
     in (tagText, info, rest')
-consumeTagText _ = error "ihp-hsx-pp: expected tag start"
+consumeTagText _ _ = error "ihp-hsx-pp: expected tag start"
 
-consumeTagBody :: String -> (String, String)
-consumeTagBody = go Nothing []
+consumeTagBody :: String -> String -> (String, String)
+consumeTagBody fileLevelQQ = go Nothing []
   where
     go _ _ [] = error "ihp-hsx-pp: unterminated tag"
     go quote acc s@(c:cs)
@@ -397,7 +487,7 @@ consumeTagBody = go Nothing []
         | quote == Just '\'' && c == '\'' = go Nothing (c:acc) cs
         | quote == Nothing && c == '{' =
             let (content, rest) = consumeBraceRaw cs
-                rewritten = rewriteHaskellSegment content
+                rewritten = rewriteHaskellSegment fileLevelQQ content
                 acc' = pushString ("{" ++ rewritten ++ "}") acc
             in go Nothing acc' rest
         | quote == Nothing && c == '>' = (reverse ('>':acc), cs)
@@ -465,8 +555,8 @@ isClosingTagStart tagName s =
                 _ -> False
         _ -> False
 
-rewriteHaskellSegment :: String -> String
-rewriteHaskellSegment = go Normal ""
+rewriteHaskellSegment :: String -> String -> String
+rewriteHaskellSegment fileLevelQQ = go Normal ""
   where
     go _ _ [] = []
     go Normal lineBuf s@(c:cs)
@@ -474,10 +564,10 @@ rewriteHaskellSegment = go Normal ""
         | c == '{' && isPrefixOf "{-" s = "{-" ++ go (BlockComment 1) (lineBuf ++ "{-") (drop 2 s)
         | c == '"' = '"' : go StringLit (lineBuf ++ "\"") cs
         | c == '\'' = '\'' : go CharLit (lineBuf ++ "'") cs
-        | c == '<' && looksLikeTagStart cs && shouldStartHsxInLine lineBuf =
-            let (body, rest) = consumeHsxBlock s
-                replacement = "$(quoteExp hsx " ++ show body ++ ")"
-            in replacement ++ go Normal (lineBuf ++ "hsx") rest
+        | c == '<' && looksLikeTagStart cs && shouldStartHsxInLine lineBuf cs =
+            let (body, rest) = consumeHsxBlock fileLevelQQ s
+                replacement = "$(quoteExp " ++ fileLevelQQ ++ " " ++ show body ++ ")"
+            in replacement ++ go Normal (lineBuf ++ fileLevelQQ) rest
         | c == '[' =
             case parseQQStart cs of
                 Just (qqName, restAfterBar) ->
@@ -517,8 +607,8 @@ rewriteHaskellSegment = go Normal ""
         | c == '\n' = '\n' : go CharLit "" cs
         | otherwise = c : go CharLit (lineBuf ++ [c]) cs
 
-shouldStartHsxInLine :: String -> Bool
-shouldStartHsxInLine lineBuf =
+shouldStartHsxInLine :: String -> String -> Bool
+shouldStartHsxInLine lineBuf tagTail =
     let trimmed = rstrip lineBuf
     in null trimmed
         || endsWithSymbol trimmed '='
@@ -532,6 +622,7 @@ shouldStartHsxInLine lineBuf =
         || endsWithWord trimmed "else"
         || endsWithWord trimmed "of"
         || endsWithWord trimmed "in"
+        || isApplicationContext lineBuf trimmed tagTail
 
 rstrip :: String -> String
 rstrip = reverse . dropWhile isSpace . reverse
@@ -551,6 +642,68 @@ endsWithWord s word =
     let len = length word
     in word `isSuffixOf` s
         && (length s == len || not (isAlpha (s !! (length s - len - 1))))
+
+isApplicationContext :: String -> String -> String -> Bool
+isApplicationContext lineBuf trimmed tagTail =
+    hasWhitespaceBeforeTag lineBuf
+        && not (null trimmed)
+        && endsWithApplicationToken trimmed
+        && looksLikeCompleteTagPrefix tagTail
+
+hasWhitespaceBeforeTag :: String -> Bool
+hasWhitespaceBeforeTag [] = False
+hasWhitespaceBeforeTag s =
+    isSpace (last s)
+
+endsWithApplicationToken :: String -> Bool
+endsWithApplicationToken trimmed =
+    case reverse trimmed of
+        (c:_) | c `elem` (")]}\"'" :: String) -> True
+        _ -> endsWithIdentifierToken trimmed || endsWithOperatorToken trimmed
+
+endsWithIdentifierToken :: String -> Bool
+endsWithIdentifierToken s =
+    let token = takeWhileEnd isIdentifierTokenChar s
+    in isQualifiedIdentifier token
+  where
+    isIdentifierTokenChar c = isIdentChar c || c == '.'
+
+endsWithOperatorToken :: String -> Bool
+endsWithOperatorToken s =
+    let token = takeWhileEnd isOperatorTokenChar s
+    in not (null token)
+
+isOperatorTokenChar :: Char -> Bool
+isOperatorTokenChar c =
+    c `elem` ("!#$%&*+./<=>?@\\^|-~:" :: String)
+
+takeWhileEnd :: (Char -> Bool) -> String -> String
+takeWhileEnd predicate = reverse . takeWhile predicate . reverse
+
+looksLikeCompleteTagPrefix :: String -> Bool
+looksLikeCompleteTagPrefix s =
+    case span isTagNameChar s of
+        ("", _) -> False
+        (_, rest) ->
+            case rest of
+                ('>':_) -> True
+                ('/':'>':_) -> True
+                (c:_) | isSpace c -> '>' `elem` rest
+                _ -> False
+
+isQualifiedIdentifier :: String -> Bool
+isQualifiedIdentifier token =
+    not (null token)
+        && all isIdentifierSegment (splitOnDot token)
+  where
+    splitOnDot [] = [""]
+    splitOnDot value =
+        case break (== '.') value of
+            (segment, []) -> [segment]
+            (segment, _:rest) -> segment : splitOnDot rest
+
+    isIdentifierSegment [] = False
+    isIdentifierSegment (x:xs) = isIdentStart x && all isIdentChar xs
 
 updateLineBuf :: String -> String -> String
 updateLineBuf lineBuf raw =

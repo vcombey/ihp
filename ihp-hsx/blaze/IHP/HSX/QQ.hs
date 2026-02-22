@@ -17,6 +17,7 @@ module IHP.HSX.QQ
   ) where
 
 import           Prelude
+import Control.Applicative ((<|>))
 import Data.Text (Text)
 import           IHP.HSX.Parser
 import qualified "template-haskell" Language.Haskell.TH           as TH
@@ -100,11 +101,16 @@ quoteHsxExpression settings code = do
 
 quoteHsxExpressionAtWithExtensions :: HsxSettings -> Megaparsec.SourcePos -> [TH.Extension] -> String -> TH.ExpQ
 quoteHsxExpressionAtWithExtensions settings hsxPosition extensions code = do
-        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        let settings' = settings { expandQuasiQuote = composeExpandQuasiQuote extensions settings }
         expression <- case parseHsx settings' hsxPosition extensions (cs code) of
                 Left error   -> fail (Megaparsec.errorBundlePretty error)
                 Right result -> pure result
         compileToHaskell expression
+
+composeExpandQuasiQuote :: [TH.Extension] -> HsxSettings -> Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+composeExpandQuasiQuote extensions settings sourcePos name body =
+    expandHsxQuasiQuoteWithExtensions extensions sourcePos name body
+        <|> expandQuasiQuote settings sourcePos name body
 
 defaultSettings :: HsxSettings
 defaultSettings =
@@ -124,15 +130,22 @@ uncheckedSettings =
         , expandQuasiQuote = expandHsxQuasiQuote
         }
 
-expandHsxQuasiQuote :: String -> String -> Maybe TH.Exp
+expandHsxQuasiQuote :: Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
 expandHsxQuasiQuote = expandHsxQuasiQuoteWithExtensions []
 
-expandHsxQuasiQuoteWithExtensions :: [TH.Extension] -> String -> String -> Maybe TH.Exp
-expandHsxQuasiQuoteWithExtensions extensions name body =
+expandHsxQuasiQuoteWithExtensions :: [TH.Extension] -> Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+expandHsxQuasiQuoteWithExtensions extensions sourcePos name body =
     case baseName name of
-        "hsx" -> Just (runQExp (quoteHsxExpressionAtWithExtensions defaultSettings helperSourcePos extensions body))
-        "uncheckedHsx" -> Just (runQExp (quoteHsxExpressionAtWithExtensions uncheckedSettings helperSourcePos extensions body))
+        "hsx" -> Just (runQExp (expandWithSettings defaultSettings))
+        "uncheckedHsx" -> Just (runQExp (expandWithSettings uncheckedSettings))
         _ -> Nothing
+  where
+    expandWithSettings settings = do
+        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        expression <- case parseHsx settings' sourcePos extensions (cs body) of
+            Left parseError -> error (Megaparsec.errorBundlePretty parseError)
+            Right result -> pure result
+        compileToHaskell expression
 
 runQExp :: TH.ExpQ -> TH.Exp
 runQExp q = unsafePerformIO (TH.runQ q)

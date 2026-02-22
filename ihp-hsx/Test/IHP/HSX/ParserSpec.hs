@@ -19,7 +19,7 @@ import qualified Data.Text as Text
 tests = do
     let position = Megaparsec.SourcePos "" (Megaparsec.mkPos 1) (Megaparsec.mkPos 1)
     let extensions = []
-    let noExpandQuasiQuote _ _ = Nothing
+    let noExpandQuasiQuote _ _ _ = Nothing
     
     describe "HSX Parser" do
         let settings = HsxSettings True Set.empty Set.empty noExpandQuasiQuote

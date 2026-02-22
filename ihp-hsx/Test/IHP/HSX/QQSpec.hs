@@ -339,6 +339,10 @@ tests = do
         it "should work with regular HTML tags and attributes too" do
            [myCustomHsx|<div class="hello" my-custom-attr="test">world</div>|] `shouldBeSameHtml` "<div class=\"hello\" my-custom-attr=\"test\">world</div>"
 
+        it "should keep custom expandQuasiQuote callbacks" do
+            [myExpandableHsx|<div>{if True then $(quoteExp myHsx "<span>ignored</span>") else ("fallback" :: Text)}</div>|]
+                `shouldBeSameHtml` "<div>from-custom-expand</div>"
+
 data Project = Project { name :: Text }
 
 data PlaceId  = PlaceId Text
