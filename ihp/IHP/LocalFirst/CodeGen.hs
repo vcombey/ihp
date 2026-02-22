@@ -17,7 +17,6 @@ import qualified System.Directory as Directory
 import qualified System.FilePath as FilePath
 import GHC.Generics (Generic)
 import IHP.LocalFirst.Safety
-import IHP.NameSupport (fieldNameToColumnName)
 
 data LocalRouteDefinition = LocalRouteDefinition
     { moduleName :: !Text

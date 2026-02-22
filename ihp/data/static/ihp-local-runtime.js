@@ -196,18 +196,42 @@
         return filesystems;
     }
 
-    async function openPGlite(dataDir) {
+    function waitForPGlite(timeoutMs) {
+        if (typeof window === 'undefined') {
+            return Promise.resolve(null);
+        }
+        if (window.PGlite) {
+            return Promise.resolve(window.PGlite);
+        }
+        var waitTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 5000;
+        return new Promise(function (resolve) {
+            var startedAt = Date.now();
+            var timer = setInterval(function () {
+                if (window.PGlite) {
+                    clearInterval(timer);
+                    resolve(window.PGlite);
+                    return;
+                }
+                if ((Date.now() - startedAt) >= waitTimeoutMs) {
+                    clearInterval(timer);
+                    resolve(null);
+                }
+            }, 50);
+        });
+    }
+
+    async function openPGlite(dataDir, pgliteCtor) {
         var db = null;
-        if (window.PGlite && typeof window.PGlite.create === 'function') {
+        if (pgliteCtor && typeof pgliteCtor.create === 'function') {
             try {
-                db = await window.PGlite.create({ dataDir: dataDir });
+                db = await pgliteCtor.create({ dataDir: dataDir });
             } catch (_error) {
                 // Fall back to constructor-based initialization for compatibility.
             }
         }
 
         if (!db) {
-            db = await new window.PGlite(dataDir);
+            db = await new pgliteCtor(dataDir);
         }
 
         // Probe the DB early so we can fall back to a different filesystem backend
@@ -1106,6 +1130,24 @@
         };
     }
 
+    function isPGliteUnavailableError(error) {
+        if (!error) {
+            return false;
+        }
+        if (error.code === 'IHP_LOCAL_PGLITE_UNAVAILABLE') {
+            return true;
+        }
+        var message = error && error.message ? String(error.message) : String(error);
+        return message.indexOf('PGlite is required for local-first runtime') !== -1;
+    }
+
+    function isTransientReplayConnectionError(errorMessage) {
+        var message = String(errorMessage || '');
+        return message.indexOf('Failed to connect to DataSync websocket') !== -1
+            || message.indexOf('DataSync websocket closed before replay finished') !== -1
+            || message.indexOf('Timed out while replaying local mutation') !== -1;
+    }
+
     function throwIfDataSyncError(response, fallbackMessage) {
         if (response && response.tag === 'DataSyncError') {
             throw new Error(response.errorMessage || fallbackMessage || 'Local DataSync operation failed');
@@ -1253,6 +1295,9 @@
             if (!isLocalRouteActive() || !this.isBrowserOnline()) {
                 return;
             }
+            if (typeof window === 'undefined' || !window.PGlite) {
+                return;
+            }
             var actionPaths = Object.keys(LOCAL_DOM_SNAPSHOTS);
             if (actionPaths.length === 0) {
                 return;
@@ -1325,13 +1370,53 @@
             this.db = null;
         },
 
-        bootstrapSchema: async function (schemaSql) {
-            this.bootstrappedSchemaSql = schemaSql;
-            if (!this.db || !schemaSql || this.schemaBootstrapped) {
+        reloadCurrentPage: function () {
+            if (typeof window === 'undefined' || !window.location) {
                 return;
             }
-            await this.db.exec(schemaSql);
-            this.schemaBootstrapped = true;
+            if (window.Turbolinks && typeof window.Turbolinks.visit === 'function') {
+                try {
+                    if (typeof window.Turbolinks.clearCache === 'function') {
+                        window.Turbolinks.clearCache();
+                    }
+                } catch (_error) {}
+                window.Turbolinks.visit(window.location.href, { action: 'replace' });
+                return;
+            }
+            if (typeof window.location.reload === 'function') {
+                window.location.reload();
+            }
+        },
+
+        bootstrapSchema: async function (schemaSql) {
+            this.bootstrappedSchemaSql = schemaSql;
+            if (!schemaSql) {
+                return;
+            }
+            var self = this;
+            if (this.db && !this.schemaBootstrapped) {
+                await this.db.exec(schemaSql);
+                this.schemaBootstrapped = true;
+            }
+            if (!this.db) {
+                this.ensureDb().then(function () {
+                    if (self.isBrowserOnline()) {
+                        return self.syncDomSnapshots();
+                    }
+                    return null;
+                }).catch(function (error) {
+                    if (!isPGliteUnavailableError(error)) {
+                        console.error('[ihp-local-runtime] failed to initialize local DB', error);
+                    }
+                });
+            }
+            if (this.isBrowserOnline()) {
+                this.syncDomSnapshots().catch(function (error) {
+                    if (!isPGliteUnavailableError(error)) {
+                        console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                    }
+                });
+            }
         },
 
         ensureDb: async function () {
@@ -1344,14 +1429,17 @@
 
             var self = this;
             this.dbInitPromise = (async function () {
-                if (!window.PGlite) {
-                    throw new Error('PGlite is required for local-first runtime but window.PGlite is not available');
+                var pgliteCtor = window.PGlite || await waitForPGlite(5000);
+                if (!pgliteCtor) {
+                    var pgliteUnavailableError = new Error('PGlite is required for local-first runtime but window.PGlite is not available');
+                    pgliteUnavailableError.code = 'IHP_LOCAL_PGLITE_UNAVAILABLE';
+                    throw pgliteUnavailableError;
                 }
                 var filesystems = pickFilesystemCandidates();
                 var lastError = null;
                 for (var index = 0; index < filesystems.length; index += 1) {
                     try {
-                        self.db = await openPGlite(filesystems[index]);
+                        self.db = await openPGlite(filesystems[index], pgliteCtor);
                         break;
                     } catch (error) {
                         lastError = error;
@@ -1709,7 +1797,9 @@
                     await pruneQuerySnapshot(db, query, resolvedRecords);
                 }
             } catch (error) {
-                console.error('[ihp-local-runtime] failed to sync subscription snapshot', error);
+                if (!isPGliteUnavailableError(error)) {
+                    console.error('[ihp-local-runtime] failed to sync subscription snapshot', error);
+                }
             }
         },
 
@@ -1831,18 +1921,20 @@
 
         replayQueuedActions: async function () {
             if (!this.isOnline()) {
-                return;
+                return { replayedActions: 0, hasPendingActions: false };
             }
             var queuedActions = readActionQueue();
             if (!Array.isArray(queuedActions) || queuedActions.length === 0) {
-                return;
+                return { replayedActions: 0, hasPendingActions: false };
             }
 
+            var replayedActions = 0;
             var remaining = deepClone(queuedActions);
             for (var index = 0; index < queuedActions.length; index += 1) {
                 var item = remaining[0];
                 try {
                     await replayQueuedAction(item);
+                    replayedActions += 1;
                     remaining.shift();
                 } catch (error) {
                     var replayError = makeErrorResponse(
@@ -1860,6 +1952,10 @@
                 }
             }
             writeActionQueue(remaining);
+            return {
+                replayedActions: replayedActions,
+                hasPendingActions: remaining.length > 0,
+            };
         },
 
         replayQueuedMutations: async function () {
@@ -1874,11 +1970,24 @@
                     return;
                 }
                 self.setSyncState('syncing');
-                await self.replayQueuedActions();
+                var replaySummary = await self.replayQueuedActions();
+                var shouldReloadAfterActionReplay =
+                    replaySummary
+                    && replaySummary.replayedActions > 0
+                    && !replaySummary.hasPendingActions;
                 var replayDispatcher = self.remoteDispatcher || sendDataSyncMessageOverWebSocket;
                 var queued = readQueue();
                 if (!Array.isArray(queued) || queued.length === 0) {
                     self.setSyncState('online');
+                    if (shouldReloadAfterActionReplay) {
+                        self.reloadCurrentPage();
+                        return;
+                    }
+                    try {
+                        await self.syncDomSnapshots();
+                    } catch (error) {
+                        console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                    }
                     return;
                 }
                 var remaining = deepClone(queued);
@@ -1906,6 +2015,10 @@
                             rewriteQueuedTransactionIds(remaining, item.localTransactionId, response.transactionId);
                         }
                         if (response && response.tag === 'DataSyncError') {
+                            if (isTransientReplayConnectionError(response.errorMessage)) {
+                                self.setSyncState('offline', { reason: 'datasync-unreachable' });
+                                break;
+                            }
                             appendFailedMutation({
                                 payload: item.payload,
                                 response: response,
@@ -1918,6 +2031,10 @@
                         remaining.shift();
                     } catch (error) {
                         var replayErrorResponse = makeErrorResponse(item.payload, error);
+                        if (isTransientReplayConnectionError(replayErrorResponse.errorMessage)) {
+                            self.setSyncState('offline', { reason: 'datasync-unreachable' });
+                            break;
+                        }
                         appendFailedMutation({
                             payload: item.payload,
                             response: replayErrorResponse,
@@ -1931,6 +2048,10 @@
                 writeQueue(remaining);
                 if (remaining.length === 0 && readActionQueue().length === 0) {
                     self.setSyncState('online');
+                }
+                if (shouldReloadAfterActionReplay && remaining.length === 0 && readActionQueue().length === 0) {
+                    self.reloadCurrentPage();
+                    return;
                 }
                 try {
                     await self.syncDomSnapshots();

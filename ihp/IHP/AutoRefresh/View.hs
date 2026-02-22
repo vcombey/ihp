@@ -10,6 +10,7 @@ import IHP.AutoRefresh (autoRefreshStateVaultKey)
 import IHP.LocalFirst (localFirstStateVaultKey)
 import qualified Data.Vault.Lazy as Vault
 import qualified Data.Text as Text
+import Network.Wai (vault)
 
 autoRefreshMeta :: (?context :: ControllerContext) => Html5.Html
 autoRefreshMeta = case (autoRefreshState, localFirstState) of
@@ -52,8 +53,8 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
         |]
     _ -> mempty
     where
-        autoRefreshState = Vault.lookup autoRefreshStateVaultKey ?context.request.vault
-        localFirstState = Vault.lookup localFirstStateVaultKey ?context.request.vault
+        autoRefreshState = Vault.lookup autoRefreshStateVaultKey (vault ?context.request)
+        localFirstState = Vault.lookup localFirstStateVaultKey (vault ?context.request)
 
         localMetaPropertyText :: Text
         localMetaPropertyText = cs localMetaProperty

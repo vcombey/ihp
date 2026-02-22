@@ -8,7 +8,6 @@ module IHP.LocalFirst where
 import IHP.Prelude
 import IHP.Controller.Context
 import IHP.ControllerSupport
-import IHP.ModelSupport
 import IHP.Router.UrlGenerator (HasPath (..))
 import IHP.LocalFirst.Types
 import IHP.LocalFirst.Safety
@@ -17,7 +16,6 @@ import qualified Data.UUID.V4 as UUID
 import qualified Control.Exception as Exception
 import qualified Data.IORef as IORef
 import qualified Data.Vault.Lazy as Vault
-import Network.Wai (Request)
 import qualified Network.Wai as Wai
 import qualified Data.TMap as TypeMap
 import System.IO.Unsafe (unsafePerformIO)
