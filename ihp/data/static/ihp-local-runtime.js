@@ -6,6 +6,7 @@
     var LOCAL_DB_PREFIX = 'idb://ihp-local-db:';
     var LOCAL_RENDERERS = {};
     var LOCAL_ACTIONS = {};
+    var LOCAL_CONFLICT_RESOLVERS = {};
     var localActionFormInterceptorInstalled = false;
 
     function parseJson(value, fallback) {
@@ -121,11 +122,15 @@
         }
         var syncTables = parseCsvAttribute(meta.getAttribute('data-ihp-local-sync-tables'));
         var reconnectProbePath = meta.getAttribute('data-ihp-local-reconnect-probe-path') || '';
+        var conflictPolicy = meta.getAttribute('data-ihp-local-conflict-policy') || 'server-wins';
+        var conflictField = meta.getAttribute('data-ihp-local-conflict-field') || '';
         var explicitRoutePath = meta.getAttribute('data-ihp-local-route');
         return {
             routePath: explicitRoutePath || meta.getAttribute('content'),
             routeId: meta.getAttribute('data-ihp-local-route-id') || null,
             syncPolicy: meta.getAttribute('data-ihp-local-sync-policy') || 'server-wins',
+            conflictPolicy: conflictPolicy,
+            conflictField: conflictField.length > 0 ? conflictField : null,
             syncTables: syncTables,
             authPolicy: meta.getAttribute('data-ihp-local-auth-policy') || 'last-authenticated-user',
             schemaPolicy: meta.getAttribute('data-ihp-local-schema-policy') || 'whole-app',
@@ -798,6 +803,26 @@
         await db.query(sql, params);
     }
 
+    async function readExistingRowsByIds(db, table, ids) {
+        var validIds = withArray(ids).filter(function (id) {
+            return id !== null && id !== undefined;
+        });
+        if (validIds.length === 0) {
+            return {};
+        }
+        var result = await db.query(
+            'SELECT * FROM ' + quoteIdentifier(table) + ' WHERE id IN (' + validIds.map(function () { return '?'; }).join(', ') + ')',
+            validIds
+        );
+        var byId = {};
+        toRows(result).forEach(function (row) {
+            if (row && row.id !== undefined && row.id !== null) {
+                byId[row.id] = row;
+            }
+        });
+        return byId;
+    }
+
     function queryHasResultWindow(query) {
         return !!query && (typeof query.limit === 'number' || typeof query.offset === 'number');
     }
@@ -835,6 +860,147 @@
             + ' WHERE (' + whereClause + ')'
             + ' AND ' + quoteIdentifier('id') + ' NOT IN (' + ids.map(function () { return '?'; }).join(', ') + ')';
         await db.query(sql, whereParameters.concat(ids));
+    }
+
+    function parseComparableTimestamp(value) {
+        if (value === null || value === undefined) {
+            return null;
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+        if (value instanceof Date) {
+            var dateMillis = value.getTime();
+            return Number.isFinite(dateMillis) ? dateMillis : null;
+        }
+        if (typeof value === 'string') {
+            var parsedDate = Date.parse(value);
+            if (Number.isFinite(parsedDate)) {
+                return parsedDate;
+            }
+            var parsedNumber = Number(value);
+            if (Number.isFinite(parsedNumber)) {
+                return parsedNumber;
+            }
+        }
+        return null;
+    }
+
+    function normalizeConflictPolicy(metadata) {
+        if (!metadata || typeof metadata.conflictPolicy !== 'string') {
+            return 'server-wins';
+        }
+        switch (metadata.conflictPolicy) {
+            case 'client-wins':
+            case 'last-write-wins':
+            case 'server-wins':
+                return metadata.conflictPolicy;
+            default:
+                return 'server-wins';
+        }
+    }
+
+    function recordsAreEqual(left, right) {
+        if (left === right) {
+            return true;
+        }
+        if (!left || !right) {
+            return false;
+        }
+        try {
+            return JSON.stringify(left) === JSON.stringify(right);
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    function emitConflictEvent(table, id, metadata, resolution) {
+        document.dispatchEvent(new CustomEvent('ihp:sync:conflict', {
+            detail: {
+                table: table,
+                id: id || null,
+                policy: normalizeConflictPolicy(metadata),
+                field: metadata && metadata.conflictField ? metadata.conflictField : null,
+                resolution: resolution,
+            },
+        }));
+    }
+
+    function resolveRecordConflict(table, localRecord, incomingRecord, metadata) {
+        var resolver = LOCAL_CONFLICT_RESOLVERS[table];
+        if (typeof resolver === 'function') {
+            try {
+                var resolvedByHook = resolver({
+                    table: table,
+                    localRecord: localRecord ? deepClone(localRecord) : null,
+                    incomingRecord: incomingRecord ? deepClone(incomingRecord) : null,
+                    policy: normalizeConflictPolicy(metadata),
+                    field: metadata && metadata.conflictField ? metadata.conflictField : null,
+                });
+                if (resolvedByHook === null || (resolvedByHook && typeof resolvedByHook === 'object')) {
+                    return {
+                        record: resolvedByHook,
+                        source: 'hook',
+                    };
+                }
+            } catch (error) {
+                console.error('[ihp-local-runtime] conflict resolver hook failed', error);
+            }
+        }
+
+        var policy = normalizeConflictPolicy(metadata);
+        if (policy === 'client-wins') {
+            if (localRecord) {
+                return {
+                    record: localRecord,
+                    source: 'client',
+                };
+            }
+            return {
+                record: incomingRecord,
+                source: 'server',
+            };
+        }
+
+        if (policy === 'last-write-wins') {
+            var field = metadata && metadata.conflictField ? metadata.conflictField : 'updated_at';
+            var localTimestamp = parseComparableTimestamp(localRecord && localRecord[field]);
+            var incomingTimestamp = parseComparableTimestamp(incomingRecord && incomingRecord[field]);
+
+            if (localRecord && localTimestamp !== null && incomingTimestamp !== null) {
+                if (localTimestamp > incomingTimestamp) {
+                    return {
+                        record: localRecord,
+                        source: 'client',
+                    };
+                }
+                return {
+                    record: incomingRecord,
+                    source: 'server',
+                };
+            }
+            if (localRecord && localTimestamp !== null && incomingTimestamp === null) {
+                return {
+                    record: localRecord,
+                    source: 'client',
+                };
+            }
+            if (incomingTimestamp !== null) {
+                return {
+                    record: incomingRecord,
+                    source: 'server',
+                };
+            }
+            return {
+                record: incomingRecord,
+                source: 'server',
+            };
+        }
+
+        return {
+            record: incomingRecord,
+            source: 'server',
+        };
     }
 
     function makeErrorResponse(payload, error) {
@@ -958,6 +1124,24 @@
                 handler: actionHandler,
                 methods: normalizeActionMethods(options && options.methods),
             };
+        },
+
+        registerConflictResolver: function (table, resolver) {
+            if (!table || typeof resolver !== 'function') {
+                throw new Error('registerConflictResolver expects a table name and resolver function');
+            }
+            LOCAL_CONFLICT_RESOLVERS[String(table)] = resolver;
+        },
+
+        unregisterConflictResolver: function (table) {
+            if (!table) {
+                return;
+            }
+            delete LOCAL_CONFLICT_RESOLVERS[String(table)];
+        },
+
+        getCurrentMetadata: function () {
+            return readLocalRouteMetadata();
         },
 
         unregisterAction: function (routePath) {
@@ -1320,6 +1504,8 @@
             if (!this.shouldMirrorTable(query.table)) {
                 return;
             }
+            var metadata = readLocalRouteMetadata();
+            var policy = normalizeConflictPolicy(metadata);
             var normalizedRecords = withArray(records)
                 .map(decodeDataSyncRecord)
                 .filter(function (record) {
@@ -1339,8 +1525,40 @@
 
             try {
                 var db = await this.ensureDb();
-                await executeUpsertMany(db, query.table, normalizedRecords);
-                await pruneQuerySnapshot(db, query, normalizedRecords);
+                var existingById = await readExistingRowsByIds(
+                    db,
+                    query.table,
+                    normalizedRecords.map(function (record) { return record.id; })
+                );
+                var resolvedRecords = normalizedRecords.map(function (incomingRecord) {
+                    var localRecord = Object.prototype.hasOwnProperty.call(existingById, incomingRecord.id)
+                        ? existingById[incomingRecord.id]
+                        : null;
+                    var decision = resolveRecordConflict(query.table, localRecord, incomingRecord, metadata);
+                    var resolvedRecord = decision && decision.record ? decision.record : incomingRecord;
+
+                    if (
+                        localRecord
+                        && !recordsAreEqual(localRecord, incomingRecord)
+                        && decision
+                        && decision.source !== 'server'
+                        && !recordsAreEqual(resolvedRecord, incomingRecord)
+                    ) {
+                        emitConflictEvent(
+                            query.table,
+                            incomingRecord.id,
+                            metadata,
+                            decision.source === 'hook' ? 'custom' : 'local'
+                        );
+                    }
+
+                    return resolvedRecord;
+                });
+
+                await executeUpsertMany(db, query.table, resolvedRecords);
+                if (policy === 'server-wins') {
+                    await pruneQuerySnapshot(db, query, resolvedRecords);
+                }
             } catch (error) {
                 console.error('[ihp-local-runtime] failed to sync subscription snapshot', error);
             }
@@ -1353,6 +1571,7 @@
             if (!this.shouldMirrorTable(query.table)) {
                 return;
             }
+            var metadata = readLocalRouteMetadata();
 
             try {
                 var db = await this.ensureDb();
@@ -1361,7 +1580,30 @@
                         if (!message.record) {
                             return;
                         }
-                        await executeUpsertMany(db, query.table, [decodeDataSyncRecord(message.record)]);
+                        var incomingInsertRecord = decodeDataSyncRecord(message.record);
+                        var existingInsertRows = await readExistingRowsByIds(db, query.table, [incomingInsertRecord.id]);
+                        var localInsertRecord = Object.prototype.hasOwnProperty.call(existingInsertRows, incomingInsertRecord.id)
+                            ? existingInsertRows[incomingInsertRecord.id]
+                            : null;
+                        var insertDecision = resolveRecordConflict(query.table, localInsertRecord, incomingInsertRecord, metadata);
+                        var resolvedInsertRecord = insertDecision && insertDecision.record ? insertDecision.record : incomingInsertRecord;
+
+                        if (
+                            localInsertRecord
+                            && !recordsAreEqual(localInsertRecord, incomingInsertRecord)
+                            && insertDecision
+                            && insertDecision.source !== 'server'
+                            && !recordsAreEqual(resolvedInsertRecord, incomingInsertRecord)
+                        ) {
+                            emitConflictEvent(
+                                query.table,
+                                incomingInsertRecord.id,
+                                metadata,
+                                insertDecision.source === 'hook' ? 'custom' : 'local'
+                            );
+                        }
+
+                        await executeUpsertMany(db, query.table, [resolvedInsertRecord]);
                         return;
                     }
                     case 'DidUpdate': {
@@ -1372,20 +1614,56 @@
                             'SELECT * FROM ' + quoteIdentifier(query.table) + ' WHERE id = ?',
                             [message.id]
                         );
-                        var current = toRows(existingResult)[0] || { id: message.id };
-                        var merged = Object.assign({}, current, decodeDataSyncRecord(message.changeSet || {}));
+                        var current = toRows(existingResult)[0] || null;
+                        var incomingUpdateRecord = Object.assign({}, current || { id: message.id }, decodeDataSyncRecord(message.changeSet || {}));
                         if (message.appendSet) {
                             Object.keys(message.appendSet).forEach(function (key) {
                                 var value = decodeDynamicValue(message.appendSet[key]);
                                 var suffix = value === null || value === undefined ? '' : String(value);
-                                merged[key] = (typeof merged[key] === 'string' ? merged[key] : '') + suffix;
+                                incomingUpdateRecord[key] = (typeof incomingUpdateRecord[key] === 'string' ? incomingUpdateRecord[key] : '') + suffix;
                             });
                         }
-                        await executeUpsertMany(db, query.table, [merged]);
+                        var updateDecision = resolveRecordConflict(query.table, current, incomingUpdateRecord, metadata);
+                        var resolvedUpdateRecord = updateDecision && updateDecision.record ? updateDecision.record : incomingUpdateRecord;
+
+                        if (
+                            current
+                            && !recordsAreEqual(current, incomingUpdateRecord)
+                            && updateDecision
+                            && updateDecision.source !== 'server'
+                            && !recordsAreEqual(resolvedUpdateRecord, incomingUpdateRecord)
+                        ) {
+                            emitConflictEvent(
+                                query.table,
+                                message.id,
+                                metadata,
+                                updateDecision.source === 'hook' ? 'custom' : 'local'
+                            );
+                        }
+
+                        await executeUpsertMany(db, query.table, [resolvedUpdateRecord]);
                         return;
                     }
                     case 'DidDelete': {
                         if (!message.id) {
+                            return;
+                        }
+                        var existingDeleteResult = await db.query(
+                            'SELECT * FROM ' + quoteIdentifier(query.table) + ' WHERE id = ?',
+                            [message.id]
+                        );
+                        var localDeleteRecord = toRows(existingDeleteResult)[0] || null;
+                        var deleteDecision = resolveRecordConflict(query.table, localDeleteRecord, null, metadata);
+                        if (deleteDecision && deleteDecision.record && typeof deleteDecision.record === 'object') {
+                            if (deleteDecision.source !== 'server') {
+                                emitConflictEvent(
+                                    query.table,
+                                    message.id,
+                                    metadata,
+                                    deleteDecision.source === 'hook' ? 'custom' : 'local'
+                                );
+                            }
+                            await executeUpsertMany(db, query.table, [deleteDecision.record]);
                             return;
                         }
                         await db.query(

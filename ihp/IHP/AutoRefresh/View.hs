@@ -21,6 +21,8 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
                 data-ihp-local-route-id={localRouteIdText localState}
                 data-ihp-local-route={localRoutePathText localState}
                 data-ihp-local-sync-policy={localSyncPolicyText localState}
+                data-ihp-local-conflict-policy={localConflictPolicyText localState}
+                data-ihp-local-conflict-field={localConflictFieldText localState}
                 data-ihp-local-sync-tables={localSyncTablesText localState}
                 data-ihp-local-auth-policy={localAuthPolicyText localState}
                 data-ihp-local-schema-policy={localSchemaPolicyText localState}
@@ -38,6 +40,8 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
                 content={localRoutePathText localState}
                 data-ihp-local-route-id={localRouteIdText localState}
                 data-ihp-local-sync-policy={localSyncPolicyText localState}
+                data-ihp-local-conflict-policy={localConflictPolicyText localState}
+                data-ihp-local-conflict-field={localConflictFieldText localState}
                 data-ihp-local-sync-tables={localSyncTablesText localState}
                 data-ihp-local-auth-policy={localAuthPolicyText localState}
                 data-ihp-local-schema-policy={localSchemaPolicyText localState}
@@ -66,6 +70,19 @@ autoRefreshMeta = case (autoRefreshState, localFirstState) of
         localSyncPolicyText LocalFirstEnabled { options = LocalOptions { syncPolicy } } = case syncPolicy of
             LocalSyncServerWins -> "server-wins"
         localSyncPolicyText LocalFirstDisabled = ""
+
+        localConflictPolicyText :: LocalFirstState -> Text
+        localConflictPolicyText LocalFirstEnabled { options = LocalOptions { conflictPolicy } } = case conflictPolicy of
+            LocalConflictServerWins -> "server-wins"
+            LocalConflictClientWins -> "client-wins"
+            LocalConflictLastWriteWinsBy {} -> "last-write-wins"
+        localConflictPolicyText LocalFirstDisabled = ""
+
+        localConflictFieldText :: LocalFirstState -> Text
+        localConflictFieldText LocalFirstEnabled { options = LocalOptions { conflictPolicy } } = case conflictPolicy of
+            LocalConflictLastWriteWinsBy field -> field
+            _ -> ""
+        localConflictFieldText LocalFirstDisabled = ""
 
         localAuthPolicyText :: LocalFirstState -> Text
         localAuthPolicyText LocalFirstEnabled { options = LocalOptions { authPolicy } } = case authPolicy of

@@ -19,6 +19,12 @@ data LocalSchemaPolicy
     = LocalSchemaWholeApp
     deriving (Eq, Show)
 
+data LocalConflictPolicy
+    = LocalConflictServerWins
+    | LocalConflictClientWins
+    | LocalConflictLastWriteWinsBy !Text
+    deriving (Eq, Show)
+
 data LocalReconnectPolicy = LocalReconnectPolicy
     { probePath :: !(Maybe Text)
     , probeTimeoutMs :: !Int
@@ -36,6 +42,7 @@ data LocalOptions = LocalOptions
     { syncPolicy :: !LocalSyncPolicy
     , authPolicy :: !LocalAuthPolicy
     , schemaPolicy :: !LocalSchemaPolicy
+    , conflictPolicy :: !LocalConflictPolicy
     , syncTables :: ![Text]
     , reconnectPolicy :: !LocalReconnectPolicy
     } deriving (Eq, Show)
@@ -45,6 +52,7 @@ defaultLocalOptions = LocalOptions
     { syncPolicy = LocalSyncServerWins
     , authPolicy = LocalAuthLastAuthenticatedUser
     , schemaPolicy = LocalSchemaWholeApp
+    , conflictPolicy = LocalConflictServerWins
     , syncTables = []
     , reconnectPolicy = defaultLocalReconnectPolicy
     }

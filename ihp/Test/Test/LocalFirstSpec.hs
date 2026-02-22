@@ -57,7 +57,24 @@ tests = do
             let rendered = cs (Blaze.renderHtml autoRefreshMeta) :: Text
             rendered `shouldSatisfy` Text.isInfixOf "ihp-local-route"
             rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-sync-tables"
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-policy"
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-field"
             rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-reconnect-probe-timeout-ms"
+
+        it "injects configured conflict metadata through autoRefreshMeta" do
+            let ?request = Wai.defaultRequest
+            context <- newControllerContext
+            let ?context = context
+            let ?modelContext = error "not needed in this test"
+            let ?theAction = DemoAction
+            initAutoRefresh
+            initLocalFirst
+            localWith (defaultLocalOptions { conflictPolicy = LocalConflictLastWriteWinsBy "updatedAt" }) (pure ())
+            frozen <- freeze ?context
+            let ?context = frozen
+            let rendered = cs (Blaze.renderHtml autoRefreshMeta) :: Text
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-policy=\"last-write-wins\""
+            rendered `shouldSatisfy` Text.isInfixOf "data-ihp-local-conflict-field=\"updatedAt\""
 
     describe "LocalSafety" do
         it "finds unsafe API usage inside local blocks" do
