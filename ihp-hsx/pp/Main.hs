@@ -1,14 +1,36 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import Prelude
 import Data.Char (isAlpha, isAlphaNum, isSpace, toLower)
-import Data.List (elemIndex, isPrefixOf, isSuffixOf, foldl')
+import Data.Data (Data, cast, gmapQ)
+import Data.List (elemIndex, isPrefixOf, isSuffixOf, foldl', sortOn)
 import Data.Maybe (fromMaybe, isJust)
+import qualified Data.Set as Set
+import Data.Set (Set)
 import System.Directory (canonicalizePath, getSymbolicLinkTarget, pathIsSymbolicLink)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hPutStrLn, stderr)
+import qualified GHC.Data.EnumSet as EnumSet
+import GHC.Data.FastString (mkFastString)
+import GHC.Data.StringBuffer (stringToStringBuffer)
+import GHC.Hs (GhcPs, HsExpr (..), HsModule, LocatedA (..))
+import qualified GHC.Parser as GHCParser
+import qualified GHC.Parser.Lexer as GHCLexer
+import GHC.Parser.Lexer (ParseResult (..), PState (..))
+import GHC.Types.Error
+import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name.Reader (rdrNameOcc)
+import GHC.Types.SrcLoc (mkRealSrcLoc)
+import GHC.Utils.Error
+import GHC.Utils.Outputable hiding ((<>))
+import GHC
+#if __GLASGOW_HASKELL__ >= 908
+import GHC.Unit.Module.Warnings (emptyWarningCategorySet)
+#endif
 
 data PreprocessorOptions = PreprocessorOptions
     { defaultFileLevelQQ :: String
@@ -194,7 +216,39 @@ isHsxFile path =
     ".hsx" `isSuffixOf` map toLower path
 
 rewriteContent :: Maybe String -> String -> String
-rewriteContent fileLevelQQ = go Normal ""
+rewriteContent Nothing input = input
+rewriteContent (Just fileLevelQQ) input =
+    case rewriteContentRigorous fileLevelQQ input of
+        Right rewritten -> rewritten
+        Left _ -> rewriteContentHeuristic (Just fileLevelQQ) input
+
+rewriteContentRigorous :: String -> String -> Either String String
+rewriteContentRigorous fileLevelQQ input = do
+    let detectedCandidates = detectHsxCandidates fileLevelQQ input
+    if null detectedCandidates
+        then
+            if containsLikelyTagStart input
+                then case parseModuleWithGhc "<ihp-hsx-pp>" input of
+                    Right _ -> Right input
+                    Left _ -> Left "fallback to heuristic rewrite"
+                else Right input
+        else do
+            let placeholderPrefix = pickPlaceholderPrefix input
+            let candidates = assignPlaceholderNames placeholderPrefix detectedCandidates
+            let allPlaceholderInput = applyCandidateReplacement input candidates candidatePlaceholderName
+            moduleAst <- parseModuleWithGhc "<ihp-hsx-pp>" allPlaceholderInput
+            let expressionPlaceholders = collectExpressionPlaceholders placeholderPrefix moduleAst
+            let expressionCandidates = Prelude.filter (\candidate -> candidatePlaceholderName candidate `Set.member` expressionPlaceholders) candidates
+            let requiredCandidates = Prelude.filter (isRequiredHsxCandidate input candidates) expressionCandidates
+            pure (applyCandidateReplacement input requiredCandidates candidateReplacement)
+
+containsLikelyTagStart :: String -> Bool
+containsLikelyTagStart [] = False
+containsLikelyTagStart ('<':rest) = looksLikeTagStart rest || containsLikelyTagStart rest
+containsLikelyTagStart (_:rest) = containsLikelyTagStart rest
+
+rewriteContentHeuristic :: Maybe String -> String -> String
+rewriteContentHeuristic fileLevelQQ = go Normal ""
   where
     go _ _ [] = []
     go Normal lineBuf s@(c:cs)
@@ -206,7 +260,7 @@ rewriteContent fileLevelQQ = go Normal ""
         , c == '<'
         , looksLikeTagStart cs
         , shouldStartHsxInLine lineBuf cs =
-            let (body, rest) = consumeHsxBlock qqName s
+            let (body, rest) = orDie (consumeHsxBlock qqName s)
                 replacement = "$(quoteExp " ++ qqName ++ " " ++ show body ++ ")"
             in replacement ++ go Normal (lineBuf ++ qqName) rest
         | c == '\n' = '\n' : go Normal "" cs
@@ -240,6 +294,186 @@ rewriteContent fileLevelQQ = go Normal ""
         | c == '\n' = '\n' : go CharLit "" cs
         | otherwise = c : go CharLit (lineBuf ++ [c]) cs
 
+isRequiredHsxCandidate :: String -> [HsxCandidate] -> HsxCandidate -> Bool
+isRequiredHsxCandidate input allCandidates candidate =
+    case parseModuleWithGhc "<ihp-hsx-pp>" testInput of
+        Left _ -> True
+        Right _ -> False
+  where
+    testInput =
+        applyCandidateReplacement input allCandidates replacementForCandidate
+
+    replacementForCandidate current
+        | candidateId current == candidateId candidate = candidateOriginal current
+        | otherwise = candidatePlaceholderName current
+
+collectExpressionPlaceholders :: String -> Located (HsModule GhcPs) -> Set String
+collectExpressionPlaceholders prefix moduleAst =
+    query moduleAst
+  where
+    query :: forall a. Data a => a -> Set String
+    query value
+        | Just (expr :: HsExpr GhcPs) <- cast value = collectFromExpression expr
+        | otherwise = Set.unions (gmapQ query value)
+
+    collectFromExpression :: HsExpr GhcPs -> Set String
+    collectFromExpression expression =
+        let current = case expression of
+                HsVar _ (L _ rdrName) ->
+                    let occ = occNameString (rdrNameOcc rdrName)
+                    in if prefix `isPrefixOf` occ then Set.singleton occ else Set.empty
+                _ -> Set.empty
+        in current `Set.union` Set.unions (gmapQ query expression)
+
+parseModuleWithGhc :: FilePath -> String -> Either String (Located (HsModule GhcPs))
+parseModuleWithGhc sourceName input =
+    case GHCLexer.unP GHCParser.parseModule parseState of
+        POk _ result -> Right result
+        PFailed parserState -> Left (renderParserError parserState)
+  where
+    location = mkRealSrcLoc (mkFastString sourceName) 1 1
+    buffer = stringToStringBuffer input
+    parseState = GHCLexer.initParserState parserOpts buffer location
+
+renderParserError :: PState -> String
+renderParserError parserState =
+    renderWithContext defaultSDocContext
+        $ vcat
+#if __GLASGOW_HASKELL__ >= 908
+        $ map formatBulleted
+#else
+        $ map (formatBulleted defaultSDocContext)
+#endif
+#if __GLASGOW_HASKELL__ >= 906
+        $ map (diagnosticMessage NoDiagnosticOpts)
+#else
+        $ map diagnosticMessage
+#endif
+        $ map errMsgDiagnostic
+        $ sortMsgBag Nothing
+        $ getMessages (GHCLexer.errors parserState)
+
+parserOpts :: GHCLexer.ParserOpts
+parserOpts = GHCLexer.mkParserOpts (EnumSet.empty) diagOpts [] False False False False
+
+diagOpts :: DiagOpts
+diagOpts =
+    DiagOpts
+        { diag_warning_flags = EnumSet.empty
+        , diag_fatal_warning_flags = EnumSet.empty
+        , diag_warn_is_error = False
+        , diag_reverse_errors = False
+        , diag_max_errors = Nothing
+        , diag_ppr_ctx = defaultSDocContext
+#if __GLASGOW_HASKELL__ >= 908
+        , diag_custom_warning_categories = emptyWarningCategorySet
+        , diag_fatal_custom_warning_categories = emptyWarningCategorySet
+#endif
+        }
+
+data HsxCandidate = HsxCandidate
+    { candidateId :: !Int
+    , candidateStart :: !Int
+    , candidateEnd :: !Int
+    , candidateOriginal :: !String
+    , candidateReplacement :: !String
+    , candidatePlaceholderName :: !String
+    }
+    deriving (Eq, Show)
+
+assignPlaceholderNames :: String -> [HsxCandidate] -> [HsxCandidate]
+assignPlaceholderNames prefix =
+    zipWith assign [1 :: Int ..]
+  where
+    assign idx candidate =
+        candidate
+            { candidatePlaceholderName = prefix ++ show idx
+            }
+
+pickPlaceholderPrefix :: String -> String
+pickPlaceholderPrefix input =
+    head (Prelude.dropWhile (`isInfixOf` input) prefixes)
+  where
+    base = "__ihp_hsx_pp_placeholder_"
+    prefixes = [base ++ replicate n '_' | n <- [0 :: Int ..]]
+
+applyCandidateReplacement :: String -> [HsxCandidate] -> (HsxCandidate -> String) -> String
+applyCandidateReplacement input candidates replacementFor =
+    go 0 (sortOn candidateStart candidates)
+  where
+    go offset [] = drop offset input
+    go offset (candidate:rest) =
+        let prefixChunk = take (candidateStart candidate - offset) (drop offset input)
+            replacement = replacementFor candidate
+        in prefixChunk ++ replacement ++ go (candidateEnd candidate) rest
+
+detectHsxCandidates :: String -> String -> [HsxCandidate]
+detectHsxCandidates fileLevelQQ input =
+    reverse (go Normal 0 1 [] input)
+  where
+    go _ _ _ acc [] = acc
+    go Normal offset nextId acc s@(c:cs)
+        | c == '-' && isPrefixOf "--" s = go LineComment (offset + 2) nextId acc (drop 2 s)
+        | c == '{' && isPrefixOf "{-" s = go (BlockComment 1) (offset + 2) nextId acc (drop 2 s)
+        | c == '"' = go StringLit (offset + 1) nextId acc cs
+        | c == '\'' = go CharLit (offset + 1) nextId acc cs
+        | c == '[' =
+            case parseQQStart cs of
+                Just (qqName, restAfterBar) ->
+                    case consumeQQRaw restAfterBar of
+                        Right (body, rest) ->
+                            let consumedLen = 1 + length qqName + 1 + length body + 2
+                            in go Normal (offset + consumedLen) nextId acc rest
+                        Left _ ->
+                            go Normal (offset + 1) nextId acc cs
+                Nothing ->
+                    go Normal (offset + 1) nextId acc cs
+        | c == '<'
+        , looksLikeTagStart cs
+        , looksLikeCompleteTagPrefix cs =
+            case consumeHsxBlock fileLevelQQ s of
+                Right (body, rest) ->
+                    let consumedLen = length s - length rest
+                        original = take consumedLen s
+                        replacement = "$(quoteExp " ++ fileLevelQQ ++ " " ++ show body ++ ")"
+                        candidate = HsxCandidate
+                            { candidateId = nextId
+                            , candidateStart = offset
+                            , candidateEnd = offset + consumedLen
+                            , candidateOriginal = original
+                            , candidateReplacement = replacement
+                            , candidatePlaceholderName = ""
+                            }
+                    in go Normal (offset + consumedLen) (nextId + 1) (candidate : acc) rest
+                Left _ ->
+                    go Normal (offset + 1) nextId acc cs
+        | otherwise = go Normal (offset + 1) nextId acc cs
+    go LineComment offset nextId acc s@(c:cs)
+        | c == '\n' = go Normal (offset + 1) nextId acc cs
+        | otherwise = go LineComment (offset + 1) nextId acc cs
+    go (BlockComment depth) offset nextId acc s
+        | isPrefixOf "{-" s = go (BlockComment (depth + 1)) (offset + 2) nextId acc (drop 2 s)
+        | isPrefixOf "-}" s =
+            let depth' = depth - 1
+            in if depth' == 0
+                then go Normal (offset + 2) nextId acc (drop 2 s)
+                else go (BlockComment depth') (offset + 2) nextId acc (drop 2 s)
+        | otherwise =
+            case s of
+                (_:rest) -> go (BlockComment depth) (offset + 1) nextId acc rest
+    go StringLit offset nextId acc s@(c:cs)
+        | c == '\\' = case cs of
+            [] -> go StringLit (offset + 1) nextId acc []
+            (_:ds) -> go StringLit (offset + 2) nextId acc ds
+        | c == '"' = go Normal (offset + 1) nextId acc cs
+        | otherwise = go StringLit (offset + 1) nextId acc cs
+    go CharLit offset nextId acc s@(c:cs)
+        | c == '\\' = case cs of
+            [] -> go CharLit (offset + 1) nextId acc []
+            (_:ds) -> go CharLit (offset + 2) nextId acc ds
+        | c == '\'' = go Normal (offset + 1) nextId acc cs
+        | otherwise = go CharLit (offset + 1) nextId acc cs
+
 data Mode = Normal | LineComment | BlockComment Int | StringLit | CharLit
 
 advanceLineStart :: Bool -> Char -> Bool
@@ -248,12 +482,12 @@ advanceLineStart lineStart c
     | lineStart && (c == ' ' || c == '\t') = True
     | otherwise = False
 
-consumeQQRaw :: String -> (String, String)
+consumeQQRaw :: String -> Either String (String, String)
 consumeQQRaw = go []
   where
-    go _ [] = error "ihp-hsx-pp: unterminated quasiquote"
+    go _ [] = Left "ihp-hsx-pp: unterminated quasiquote"
     go acc s
-        | isPrefixOf "|]" s = (reverse acc, drop 2 s)
+        | isPrefixOf "|]" s = Right (reverse acc, drop 2 s)
         | otherwise =
             case s of
                 (c:cs) -> go (c:acc) cs
@@ -329,63 +563,62 @@ data TagInfo
     | TagSpecial
     deriving (Eq, Show)
 
-consumeHsxBlock :: String -> String -> (String, String)
+consumeHsxBlock :: String -> String -> Either String (String, String)
 consumeHsxBlock fileLevelQQ s =
-    let (firstRoot, rest) = consumeSingleHsxBlock fileLevelQQ s
-    in consumeSiblingRoots firstRoot rest
+    consumeSingleHsxBlock fileLevelQQ s >>= uncurry consumeSiblingRoots
   where
     consumeSiblingRoots acc rest =
         let (spaces, rest') = span isSpace rest
         in case rest' of
             ('<':tagTail)
                 | looksLikeTagStart tagTail ->
-                    let (nextRoot, rest'') = consumeSingleHsxBlock fileLevelQQ rest'
-                    in consumeSiblingRoots (acc ++ spaces ++ nextRoot) rest''
-            _ -> (acc, rest)
+                    consumeSingleHsxBlock fileLevelQQ rest'
+                        >>= \(nextRoot, rest'') -> consumeSiblingRoots (acc ++ spaces ++ nextRoot) rest''
+            _ -> Right (acc, rest)
 
-consumeSingleHsxBlock :: String -> String -> (String, String)
+consumeSingleHsxBlock :: String -> String -> Either String (String, String)
 consumeSingleHsxBlock fileLevelQQ s =
-    let (tagText, info, rest) = consumeTagText fileLevelQQ s
-        (stack, rawTag) = updateStack [] Nothing info
-    in if null stack
-        then (tagText, rest)
-        else
-            let (body, rest') = consumeHsxBody fileLevelQQ stack rawTag rest
-            in (tagText ++ body, rest')
+    consumeTagText fileLevelQQ s >>= \(tagText, info, rest) ->
+        let (stack, rawTag) = updateStack [] Nothing info
+        in if null stack
+            then Right (tagText, rest)
+            else do
+                (body, rest') <- consumeHsxBody fileLevelQQ stack rawTag rest
+                Right (tagText ++ body, rest')
 
-consumeHsxBody :: String -> [String] -> Maybe String -> String -> (String, String)
-consumeHsxBody _ _ _ [] = error "ihp-hsx-pp: unterminated hsx block"
+consumeHsxBody :: String -> [String] -> Maybe String -> String -> Either String (String, String)
+consumeHsxBody _ _ _ [] = Left "ihp-hsx-pp: unterminated hsx block"
 consumeHsxBody fileLevelQQ stack rawTag s
     | Just tagName <- rawTag =
         let (rawText, rest) = scanUntilClosingTag tagName s
         in case rest of
-            [] -> error "ihp-hsx-pp: unterminated raw-text hsx block"
+            [] -> Left "ihp-hsx-pp: unterminated raw-text hsx block"
             _ ->
-                let (tagText, info, rest') = consumeTagText fileLevelQQ rest
-                    (stack', rawTag') = updateStack stack rawTag info
-                in if null stack'
-                    then (rawText ++ tagText, rest')
-                    else
-                        let (more, rest'') = consumeHsxBody fileLevelQQ stack' rawTag' rest'
-                        in (rawText ++ tagText ++ more, rest'')
+                consumeTagText fileLevelQQ rest >>= \(tagText, info, rest') ->
+                    let (stack', rawTag') = updateStack stack rawTag info
+                    in if null stack'
+                        then Right (rawText ++ tagText, rest')
+                        else do
+                            (more, rest'') <- consumeHsxBody fileLevelQQ stack' rawTag' rest'
+                            Right (rawText ++ tagText ++ more, rest'')
     | otherwise =
         case s of
-            ('{':rest) ->
-                let (content, rest') = consumeBraceRaw rest
-                    rewritten = rewriteHaskellSegment fileLevelQQ content
-                    (more, rest'') = consumeHsxBody fileLevelQQ stack rawTag rest'
-                in ("{" ++ rewritten ++ "}" ++ more, rest'')
+            ('{':rest) -> do
+                (content, rest') <- consumeBraceRaw rest
+                let rewritten = rewriteHaskellSegment fileLevelQQ content
+                (more, rest'') <- consumeHsxBody fileLevelQQ stack rawTag rest'
+                Right ("{" ++ rewritten ++ "}" ++ more, rest'')
             ('<':_) ->
-                let (tagText, info, rest') = consumeTagText fileLevelQQ s
-                    (stack', rawTag') = updateStack stack rawTag info
-                in if null stack'
-                    then (tagText, rest')
-                    else
-                        let (more, rest'') = consumeHsxBody fileLevelQQ stack' rawTag' rest'
-                        in (tagText ++ more, rest'')
+                consumeTagText fileLevelQQ s >>= \(tagText, info, rest') ->
+                    let (stack', rawTag') = updateStack stack rawTag info
+                    in if null stack'
+                        then Right (tagText, rest')
+                        else do
+                            (more, rest'') <- consumeHsxBody fileLevelQQ stack' rawTag' rest'
+                            Right (tagText ++ more, rest'')
             (c:cs) ->
-                let (more, rest') = consumeHsxBody fileLevelQQ stack rawTag cs
-                in (c:more, rest')
+                consumeHsxBody fileLevelQQ stack rawTag cs >>= \(more, rest') ->
+                    Right (c:more, rest')
 
 updateStack :: [String] -> Maybe String -> TagInfo -> ([String], Maybe String)
 updateStack stack rawTag info =
@@ -419,32 +652,32 @@ popMatching name (x:xs)
     | normalizeName name == normalizeName x = xs
     | otherwise = popMatching name xs
 
-consumeTagText :: String -> String -> (String, TagInfo, String)
+consumeTagText :: String -> String -> Either String (String, TagInfo, String)
 consumeTagText _ s@('<':'!':'-':'-':rest) =
     let (body, rest') = breakOn "-->" rest
-    in ("<!--" ++ body ++ "-->", TagSpecial, rest')
+    in Right ("<!--" ++ body ++ "-->", TagSpecial, rest')
 consumeTagText fileLevelQQ s@('<':rest) =
-    let (body, rest') = consumeTagBody fileLevelQQ rest
-        tagText = "<" ++ body
-        info = classifyTag tagText
-    in (tagText, info, rest')
-consumeTagText _ _ = error "ihp-hsx-pp: expected tag start"
+    consumeTagBody fileLevelQQ rest >>= \(body, rest') ->
+        let tagText = "<" ++ body
+            info = classifyTag tagText
+        in Right (tagText, info, rest')
+consumeTagText _ _ = Left "ihp-hsx-pp: expected tag start"
 
-consumeTagBody :: String -> String -> (String, String)
+consumeTagBody :: String -> String -> Either String (String, String)
 consumeTagBody fileLevelQQ = go Nothing []
   where
-    go _ _ [] = error "ihp-hsx-pp: unterminated tag"
+    go _ _ [] = Left "ihp-hsx-pp: unterminated tag"
     go quote acc s@(c:cs)
         | quote == Nothing && c == '"' = go (Just '"') (c:acc) cs
         | quote == Just '"' && c == '"' = go Nothing (c:acc) cs
         | quote == Nothing && c == '\'' = go (Just '\'') (c:acc) cs
         | quote == Just '\'' && c == '\'' = go Nothing (c:acc) cs
-        | quote == Nothing && c == '{' =
-            let (content, rest) = consumeBraceRaw cs
-                rewritten = rewriteHaskellSegment fileLevelQQ content
-                acc' = pushString ("{" ++ rewritten ++ "}") acc
-            in go Nothing acc' rest
-        | quote == Nothing && c == '>' = (reverse ('>':acc), cs)
+        | quote == Nothing && c == '{' = do
+            (content, rest) <- consumeBraceRaw cs
+            let rewritten = rewriteHaskellSegment fileLevelQQ content
+            let acc' = pushString ("{" ++ rewritten ++ "}") acc
+            go Nothing acc' rest
+        | quote == Nothing && c == '>' = Right (reverse ('>':acc), cs)
         | otherwise = go quote (c:acc) cs
 
 classifyTag :: String -> TagInfo
@@ -514,13 +747,13 @@ rewriteHaskellSegment fileLevelQQ = go Normal ""
         | c == '"' = '"' : go StringLit (lineBuf ++ "\"") cs
         | c == '\'' = '\'' : go CharLit (lineBuf ++ "'") cs
         | c == '<' && looksLikeTagStart cs && shouldStartHsxInLine lineBuf cs =
-            let (body, rest) = consumeHsxBlock fileLevelQQ s
+            let (body, rest) = orDie (consumeHsxBlock fileLevelQQ s)
                 replacement = "$(quoteExp " ++ fileLevelQQ ++ " " ++ show body ++ ")"
             in replacement ++ go Normal (lineBuf ++ fileLevelQQ) rest
         | c == '[' =
             case parseQQStart cs of
                 Just (qqName, restAfterBar) ->
-                    let (body, rest) = consumeQQRaw restAfterBar
+                    let (body, rest) = orDie (consumeQQRaw restAfterBar)
                         raw = "[" ++ qqName ++ "|" ++ body ++ "|]"
                         lineBuf' = updateLineBuf lineBuf raw
                     in raw ++ go Normal lineBuf' rest
@@ -555,6 +788,10 @@ rewriteHaskellSegment fileLevelQQ = go Normal ""
         | c == '\'' = '\'' : go Normal (lineBuf ++ "'") cs
         | c == '\n' = '\n' : go CharLit "" cs
         | otherwise = c : go CharLit (lineBuf ++ [c]) cs
+
+orDie :: Either String a -> a
+orDie =
+    either error id
 
 shouldStartHsxInLine :: String -> String -> Bool
 shouldStartHsxInLine lineBuf tagTail =
@@ -662,12 +899,12 @@ updateLineBuf lineBuf raw =
             let idx = length raw - idxFromEnd - 1
             in drop (idx + 1) raw
 
-consumeBraceRaw :: String -> (String, String)
+consumeBraceRaw :: String -> Either String (String, String)
 consumeBraceRaw = go 1 Normal []
   where
-    go _ _ acc [] = error "ihp-hsx-pp: unterminated { } splice"
+    go _ _ _ [] = Left "ihp-hsx-pp: unterminated { } splice"
     go depth mode acc s
-        | depth == 0 = (reverse acc, s)
+        | depth == 0 = Right (reverse acc, s)
         | otherwise =
             case mode of
                 Normal ->
@@ -681,7 +918,7 @@ consumeBraceRaw = go 1 Normal []
                                 ('{':cs) -> go (depth + 1) Normal ('{':acc) cs
                                 ('}':cs) ->
                                     if depth == 1
-                                        then (reverse acc, cs)
+                                        then Right (reverse acc, cs)
                                         else go (depth - 1) Normal ('}':acc) cs
                                 (c:cs) -> go depth Normal (c:acc) cs
                 LineComment ->

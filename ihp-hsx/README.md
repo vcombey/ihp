@@ -93,15 +93,16 @@ myComponent =
 
 Notes:
 `ihp-hsx-pp` injects `TemplateHaskell`, and in file-level mode it also injects `QuasiQuotes` so the nested expansion can be parsed.
-This is heuristic: tags are rewritten when they start a line (ignoring whitespace), after common expression introducers like `then`, `else`, `=`, or `->`, and after common operators such as `$` and `<$>` when followed by a complete tag.
-Nested HSX inside `{...}` works under the same heuristic.
+File-level rewriting is parser-guided: the preprocessor first scans tag-shaped spans, then uses the GHC module parser and rewrites only spans that are required in expression positions.
+Nested HSX inside `{...}` is still rewritten by a lightweight lexical pass.
 `ihp-hsx-pp` only rewrites file-level tags in this mode. It does not rewrite regular `[hsx|...|]` syntax.
 By default file-level mode emits `$(quoteExp hsx "...")`.
 To use a different quasiquoter, set it in the header marker (`-- hsx myHsx`) or via `-optF --hsx-qq=myHsx`.
 Make sure the selected quasiquoter is in scope.
 
 Known limitations of `ihp-hsx-pp` (current implementation):
-- File-level rewriting is still heuristic (not a full Haskell parser). It handles common starts (`=`, `then`, `else`, `in`, `->`) and common function-application forms, but exotic expression contexts can still be missed.
+- Candidate detection is lexical before the GHC pass. Very unusual malformed/tag-like operator sequences can still require escaping or spacing tweaks.
+- Nested rewriting inside HSX splices (`{...}`) is still heuristic (expression-level lexical scan), not module-AST driven.
 - `quoteExp` import injection is text-based. If `Language.Haskell.TH.Quote` appears only in a comment/string, import insertion can be skipped even though `quoteExp` is needed.
 - Module-header import insertion is text-based (`where` substring search). If `where` appears in comments inside a multi-line export list, the generated import can be inserted in the wrong place.
 - Splice scanning in `{...}` is lexical and does not fully understand arbitrary non-HSX quasiquotes; constructs like `{[r|{|]}` can currently fail with `unterminated { } splice`.

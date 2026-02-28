@@ -201,6 +201,16 @@ tests = describe "ihp-hsx-pp preprocessor" do
         output `shouldContain` "isLess x y = x <y"
         output `shouldNotContain` "$(quoteExp hsx \"<y\")"
 
+    it "does not mis-detect infix comparisons with spaced identifiers as hsx tags" do
+        output <- runPreprocessorOn "View.hs" (unlines
+            [ "-- hsx"
+            , "module View where"
+            , "compareTriple x foo bar = x < foo > bar"
+            ])
+
+        output `shouldContain` "compareTriple x foo bar = x < foo > bar"
+        output `shouldNotContain` "$(quoteExp hsx \"<foo >\")"
+
     it "respects header pragmas/comments before module and still detects marker" do
         output <- runPreprocessorOn "View.hs" (unlines
             [ "{-# OPTIONS_GHC -Wall #-}"
