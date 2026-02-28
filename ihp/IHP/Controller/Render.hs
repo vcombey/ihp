@@ -11,6 +11,7 @@ import qualified Network.HTTP.Media as Accept
 
 
 import IHP.HSX.Markup (Markup, MarkupM(..))
+import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified IHP.Controller.Context as Context
 import IHP.Controller.Layout
 import IHP.FlashMessages (consumeFlashMessagesMiddleware)
@@ -36,6 +37,16 @@ respondSvg (Markup builder) =
         respondWith $ responseBuilder status200 [(hContentType, "image/svg+xml"), (hConnection, "keep-alive")] builder
 {-# INLINABLE respondSvg #-}
 
+-- | Like 'respondHtml', but always prepends 'autoRefreshMeta' to the response body.
+--
+-- Intended for fragment-style responses (e.g. HTMX) where a full layout is not rendered.
+respondHtmlFragment :: (?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => Markup -> IO ResponseReceived
+respondHtmlFragment html = do
+        frozenContext <- Context.freeze ?context
+        let ?context = frozenContext
+        respondHtml (autoRefreshMeta <> html)
+{-# INLINE respondHtmlFragment #-}
+
 renderHtml :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request) => view -> IO Markup
 renderHtml !view = do
     let ?view = view
@@ -48,6 +59,19 @@ renderHtml !view = do
     let boundHtml = let ?context = frozenContext; in layout (ViewSupport.html ?view)
     pure boundHtml
 {-# INLINE renderHtml #-}
+
+-- | Like 'renderHtml', but does not apply the current layout.
+--
+-- Useful for endpoint fragments that should return only partial HTML.
+renderHtmlFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request) => view -> IO Markup
+renderHtmlFragment !view = do
+    let ?view = view
+    ViewSupport.beforeRender view
+    frozenContext <- Context.freeze ?context
+
+    let ?context = frozenContext
+    pure (ViewSupport.html ?view)
+{-# INLINE renderHtmlFragment #-}
 
 renderFile :: (?request :: Request, ?respond :: Respond) => String -> ByteString -> IO ResponseReceived
 renderFile filePath contentType = respondWith $ responseFile status200 [(hContentType, contentType)] filePath Nothing
@@ -99,6 +123,11 @@ renderPolymorphic PolymorphicRender { html, json } = do
 
 polymorphicRender :: PolymorphicRender
 polymorphicRender = PolymorphicRender Nothing Nothing
+
+-- | Render a view fragment without layout and respond with 'autoRefreshMeta' prepended.
+renderFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
+renderFragment !view = (renderHtmlFragment view) >>= respondHtmlFragment
+{-# INLINE renderFragment #-}
 
 {-# INLINE render #-}
 render :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
