@@ -44,6 +44,19 @@ renderHtml !view = do
     pure (layout (ViewSupport.html ?view))
 {-# INLINE renderHtml #-}
 
+-- | Like 'renderHtml', but does not apply the current layout.
+--
+-- Useful for endpoint fragments that should return only partial HTML.
+renderHtmlFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request) => view -> IO Markup
+renderHtmlFragment !view = do
+    let ?view = view
+    ViewSupport.beforeRender view
+    frozenContext <- Context.freeze ?context
+
+    let ?context = frozenContext
+    pure (ViewSupport.html ?view)
+{-# INLINE renderHtmlFragment #-}
+
 renderFile :: (?request :: Request, ?respond :: Respond) => String -> ByteString -> IO ResponseReceived
 renderFile filePath contentType = respondWith $ responseFile status200 [(hContentType, contentType)] filePath Nothing
 {-# INLINE renderFile #-}
@@ -94,6 +107,11 @@ renderPolymorphic PolymorphicRender { html, json } = do
 
 polymorphicRender :: PolymorphicRender
 polymorphicRender = PolymorphicRender Nothing Nothing
+
+-- | Render a view fragment without layout and respond with 'autoRefreshMeta' prepended.
+renderFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
+renderFragment !view = (renderHtmlFragment view) >>= respondHtmlFragment
+{-# INLINE renderFragment #-}
 
 {-# INLINE render #-}
 render :: forall view. (ViewSupport.View view, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
