@@ -56,6 +56,81 @@ in
 
 As the HSX expressions are compiled to Haskell code at compile-time, type errors inside these `{}` expressions will be reported to you by the compiler.
 
+Nested `[hsx|...|]` inside another `[hsx|...|]` is not supported because quasiquotes close on the first `|]`.
+
+#### File-level HSX mode (experimental)
+
+If you want to drop the outer `[hsx|...|]` completely, you can enable a file-level mode via the preprocessor.
+Add this to the `ghc-options` of the component that contains HSX:
+
+```haskell
+ghc-options: -F -pgmF ihp-hsx-pp
+```
+
+When using Cabal, also add `build-tool-depends: ihp-hsx:ihp-hsx-pp`.
+
+Use either:
+
+1. A header marker near the top of the module (before the `module` line is recommended):
+
+```haskell
+-- hsx
+```
+
+2. Or a file path ending in `.hsx` (the preprocessor enables file-level mode automatically for that extension).
+
+Then you can write plain tags as expressions:
+
+```haskell
+myComponent =
+    <div>
+        {if isAdmin
+            then <span>Admin</span>
+            else <span>User</span>
+        }
+    </div>
+```
+
+Notes:
+`ihp-hsx-pp` injects `TemplateHaskell`, and in file-level mode it also injects `QuasiQuotes` so the nested expansion can be parsed.
+File-level rewriting is parser-guided: the preprocessor first scans tag-shaped spans, then uses the GHC module parser and rewrites only spans that are required in expression positions.
+Nested HSX inside `{...}` is still rewritten by a lightweight lexical pass.
+`ihp-hsx-pp` only rewrites file-level tags in this mode. It does not rewrite regular `[hsx|...|]` syntax.
+By default file-level mode emits `$(quoteExp hsx "...")`.
+To use a different quasiquoter, set it in the header marker (`-- hsx myHsx`) or via `-optF --hsx-qq=myHsx`.
+Make sure the selected quasiquoter is in scope.
+
+Known limitations of `ihp-hsx-pp` (current implementation):
+- Candidate detection is lexical before the GHC pass. Very unusual malformed/tag-like operator sequences can still require escaping or spacing tweaks.
+- Nested rewriting inside HSX splices (`{...}`) is still heuristic (expression-level lexical scan), not module-AST driven.
+- `quoteExp` import injection is text-based. If `Language.Haskell.TH.Quote` appears only in a comment/string, import insertion can be skipped even though `quoteExp` is needed.
+- Module-header import insertion is text-based (`where` substring search). If `where` appears in comments inside a multi-line export list, the generated import can be inserted in the wrong place.
+- Splice scanning in `{...}` is lexical and does not fully understand arbitrary non-HSX quasiquotes; constructs like `{[r|{|]}` can currently fail with `unterminated { } splice`.
+- LANGUAGE pragma detection is text-based; a pragma-looking line inside a block comment can be treated as active.
+
+#### Multiple Root Nodes
+
+HSX supports multiple sibling root nodes directly, without wrapper tags:
+
+```haskell
+stylesheets :: Html
+stylesheets =
+    [hsx|
+        <link rel="stylesheet" href="/vendor/bootstrap.min.css"/>
+        <link rel="stylesheet" href="/vendor/flatpickr.min.css"/>
+        <link rel="stylesheet" href="/app.css"/>
+    |]
+```
+
+In file-level mode, the same shape works directly:
+
+```haskell
+stylesheets =
+    <link rel="stylesheet" href="/vendor/bootstrap.min.css"/>
+    <link rel="stylesheet" href="/vendor/flatpickr.min.css"/>
+    <link rel="stylesheet" href="/app.css"/>
+```
+
 ### Dynamic Attributes
 
 The variable syntax can also be used in attribute values:
@@ -310,7 +385,7 @@ To use `customHsx`, you need to create it in a separate module due to Template H
 module Application.Helper.CustomHsx where
 
 import IHP.Prelude
-import IHP.HSX.QQ (customHsx)
+import IHP.HSX.QQ (customHsx, expandHsxQuasiQuote)
 import IHP.HSX.Parser
 import Language.Haskell.TH.Quote
 import qualified Data.Set as Set
@@ -321,6 +396,7 @@ myHsx = customHsx
         { checkMarkup = True
         , additionalTagNames = Set.fromList ["book", "heading", "name"]
         , additionalAttributeNames = Set.fromList ["_", "custom-attribute"]
+        , expandQuasiQuote = expandHsxQuasiQuote
         }
     )
 ```
@@ -329,6 +405,7 @@ Configuration options for `HsxSettings`:
 - `checkMarkup`: Boolean to enable/disable markup checking
 - `additionalTagNames`: Set of additional allowed tag names
 - `additionalAttributeNames`: Set of additional allowed attribute names
+- `expandQuasiQuote`: Callback to expand nested quasiquotes inside `{...}` splices (use `expandHsxQuasiQuote` to enable nested HSX)
 
 2. Make it available in your views by adding it to your view helpers module:
 

@@ -30,7 +30,7 @@ position :: Megaparsec.SourcePos
 position = Megaparsec.SourcePos "" (Megaparsec.mkPos 1) (Megaparsec.mkPos 1)
 
 settings :: HsxSettings
-settings = HsxSettings True mempty mempty
+settings = HsxSettings True mempty mempty (\_ _ _ -> Nothing)
 
 -- Small template: single element with text
 small :: Text

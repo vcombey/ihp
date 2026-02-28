@@ -1,6 +1,7 @@
 { mkDerivation, base, blaze-html, blaze-markup, bytestring
-, containers, deepseq, ghc, hspec, lib, lucid2, megaparsec, mtl
-, string-conversions, tasty-bench, template-haskell, text
+, containers, deepseq, directory, filepath, ghc, hspec, lib, lucid2
+, megaparsec, mtl, process, string-conversions, tasty-bench
+, template-haskell, temporary, text
 , transformers, unordered-containers
 }:
 mkDerivation {
@@ -13,8 +14,9 @@ mkDerivation {
     unordered-containers
   ];
   testHaskellDepends = [
-    base blaze-markup bytestring containers hspec lucid2 megaparsec mtl
-    string-conversions template-haskell text unordered-containers
+    base blaze-markup bytestring containers directory filepath hspec
+    lucid2 megaparsec mtl process string-conversions template-haskell
+    temporary text unordered-containers
   ];
   benchmarkHaskellDepends = [
     base bytestring containers deepseq megaparsec string-conversions

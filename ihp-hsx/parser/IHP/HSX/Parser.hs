@@ -14,6 +14,7 @@ module IHP.HSX.Parser
 , Node (..)
 , Attribute (..)
 , AttributeValue (..)
+, renderStaticNode
 , collapseSpace
 , HsxSettings (..)
 ) where
@@ -29,7 +30,7 @@ import qualified Data.Text as Text
 import Data.String.Conversions
 import qualified Data.List as List
 import Data.List (sortOn)
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import qualified "template-haskell" Language.Haskell.TH.Syntax as Haskell
 import qualified "template-haskell" Language.Haskell.TH as TH
 import qualified Data.Set as Set
@@ -41,6 +42,7 @@ data HsxSettings = HsxSettings
     { checkMarkup :: Bool
     , additionalTagNames :: Set Text
     , additionalAttributeNames :: Set Text
+    , expandQuasiQuote :: SourcePos -> String -> String -> Maybe Haskell.Exp
     }
 
 data AttributeValue = TextValue !Text | ExpressionValue !Haskell.Exp deriving (Eq, Show)
@@ -70,7 +72,7 @@ data Node = Node !Text ![Attribute] ![Node] !Bool
 parseHsx :: HsxSettings -> SourcePos -> [TH.Extension] -> Text -> Either (ParseErrorBundle Text Void) Node
 parseHsx settings position extensions code =
     let
-        ?haskellParser = mkHaskellExprParser extensions
+        ?haskellParser = mkHaskellExprParser extensions settings.expandQuasiQuote
         ?settings = settings
     in
         runParser (setPosition position *> parser) "" code
@@ -137,7 +139,7 @@ hsxNoRenderComment = do
 hsxTagContent :: Parser Node
 hsxTagContent = do
     name <- hsxElementName
-    let isLeaf = name `Set.member` leafs
+    let isLeaf = (Text.toCaseFold name) `Set.member` leafsCI
     attributes <- hsxAttributes
     -- Determine self-closing vs opening tag from the closing delimiter
     (string "/>" >> space >> pure (Node name attributes [] isLeaf))
@@ -158,7 +160,7 @@ hsxTagChildren name attributes = do
     --
     -- Additionally we don't do the usual escaping for style and script bodies, as this will make e.g. the
     -- javascript unusuable.
-    children <- case name of
+    children <- case Text.toCaseFold name of
         "script" -> parsePreEscapedTextChildren name Text.strip
         "style" -> parsePreEscapedTextChildren name (collapseSpace . Text.strip)
         _ -> space >> collectChildren name []
@@ -216,13 +218,26 @@ hsxAttributes = do
 
 hsxSplicedAttributes :: Parser Attribute
 hsxSplicedAttributes = do
-    (pos, name) <- between (do char '{'; optional space; string "...") (string "}") do
-            pos <- getSourcePos
-            code <- takeWhile1P Nothing (\c -> c /= '}')
-            pure (pos, code)
+    (pos, expression) <- hsxSplicedExpression
+    spreadExpression <- case Text.stripPrefix "..." (Text.stripStart expression) of
+        Just value -> pure (Text.strip value)
+        Nothing -> fail "Expected spread attributes syntax: {...expression}"
+    when (Text.null spreadExpression) do
+        fail "Expected expression after `...` in spread attributes"
     space
-    haskellExpression <- parseHaskellExpression pos (cs name)
+    haskellExpression <- parseHaskellExpression pos (cs spreadExpression)
     pure (SpreadAttributes haskellExpression)
+
+hsxSplicedExpression :: Parser (SourcePos, Text)
+hsxSplicedExpression = do
+    _ <- char '{'
+    pos <- getSourcePos
+    input <- getInput
+    case consumeSplicedExpression input of
+        Left err -> fail err
+        Right (expression, consumedTokens) -> do
+            _ <- takeP (Just "spliced expression") consumedTokens
+            pure (pos, expression)
 
 parseHaskellExpression :: SourcePos -> Text -> Parser Haskell.Exp
 parseHaskellExpression sourcePos input = do
@@ -294,11 +309,8 @@ hsxQuotedValue = do
 
 hsxSplicedValue :: Parser AttributeValue
 hsxSplicedValue = do
-    (pos, value) <- between (char '{') (char '}') do
-        pos <- getSourcePos
-        code <- takeWhile1P Nothing (\c -> c /= '}')
-        pure (pos, code)
-    haskellExpression <- parseHaskellExpression pos (cs value)
+    (pos, expression) <- hsxSplicedExpression
+    haskellExpression <- parseHaskellExpression pos (cs expression)
     pure (ExpressionValue haskellExpression)
 
 hsxClosingElement name = (hsxClosingElement' name) <?> friendlyErrorMessage
@@ -359,36 +371,149 @@ buildTextNode value = TextNode (collapseSpace value)
 
 hsxSplicedNode :: Parser Node
 hsxSplicedNode = do
-    _ <- char '{'
-    pos <- getSourcePos
-    expression <- scanBracedExpression 0 []
+    (pos, expression) <- hsxSplicedExpression
     haskellExpression <- parseHaskellExpression pos (cs expression)
     pure (SplicedNode haskellExpression)
 
--- | Scan brace-balanced expression, tracking nesting depth.
--- Accumulates text chunks in reverse for O(n) final concat.
-scanBracedExpression :: Int -> [Text] -> Parser Text
-scanBracedExpression !depth !acc = do
-    chunk <- takeWhileP Nothing (\c -> c /= '{' && c /= '}')
-    let acc' = if Text.null chunk then acc else chunk : acc
-    c <- anySingle  -- must be '{' or '}'
-    case c of
-        '{' -> scanBracedExpression (depth + 1) ("{" : acc')
-        '}' | depth > 0 -> scanBracedExpression (depth - 1) ("}" : acc')
-            | otherwise -> pure (Text.concat (reverse acc'))
-        _ -> error "impossible: takeWhileP guarantees '{' or '}'"
+data SpliceScanMode
+    = SpliceNormal
+    | SpliceLineComment
+    | SpliceBlockComment !Int
+    | SpliceString
+    | SpliceChar
+    | SpliceQuasiQuote !Int
+    deriving (Eq, Show)
+
+-- | Consume the content of a @{ ... }@ splice, returning:
+--   1) expression text (without surrounding braces)
+--   2) amount of input consumed (including the closing @}@)
+consumeSplicedExpression :: Text -> Either String (Text, Int)
+consumeSplicedExpression input =
+    case go 0 SpliceNormal [] 0 (Text.unpack input) of
+        Left err -> Left err
+        Right (chunks, consumed) -> Right (Text.concat (reverse chunks), consumed)
+  where
+    go :: Int -> SpliceScanMode -> [Text] -> Int -> String -> Either String ([Text], Int)
+    go _ _ _ _ [] = Left "unterminated { } splice"
+    go depth mode acc consumed s@(c:cs) =
+        case mode of
+            SpliceNormal
+                | hasPrefix "--" s ->
+                    go depth SpliceLineComment ("--" : acc) (consumed + 2) (Prelude.drop 2 s)
+                | hasPrefix "{-" s ->
+                    go depth (SpliceBlockComment 1) ("{-" : acc) (consumed + 2) (Prelude.drop 2 s)
+                | c == '"' ->
+                    go depth SpliceString ("\"" : acc) (consumed + 1) cs
+                | c == '\'' ->
+                    go depth SpliceChar ("'" : acc) (consumed + 1) cs
+                | c == '[' && isQuasiQuoteStart cs ->
+                    let (prefix, rest) = consumeQuasiQuotePrefix cs
+                    in go depth (SpliceQuasiQuote 1) (Text.pack ('[' : prefix) : acc) (consumed + 1 + length prefix) rest
+                | c == '{' ->
+                    go (depth + 1) SpliceNormal ("{" : acc) (consumed + 1) cs
+                | c == '}' && depth == 0 ->
+                    Right (acc, consumed + 1)
+                | c == '}' ->
+                    go (depth - 1) SpliceNormal ("}" : acc) (consumed + 1) cs
+                | otherwise ->
+                    go depth SpliceNormal (Text.singleton c : acc) (consumed + 1) cs
+            SpliceLineComment
+                | c == '\n' ->
+                    go depth SpliceNormal (Text.singleton c : acc) (consumed + 1) cs
+                | otherwise ->
+                    go depth SpliceLineComment (Text.singleton c : acc) (consumed + 1) cs
+            SpliceBlockComment nesting
+                | hasPrefix "{-" s ->
+                    go depth (SpliceBlockComment (nesting + 1)) ("{-" : acc) (consumed + 2) (Prelude.drop 2 s)
+                | hasPrefix "-}" s ->
+                    if nesting == 1
+                        then go depth SpliceNormal ("-}" : acc) (consumed + 2) (Prelude.drop 2 s)
+                        else go depth (SpliceBlockComment (nesting - 1)) ("-}" : acc) (consumed + 2) (Prelude.drop 2 s)
+                | otherwise ->
+                    go depth (SpliceBlockComment nesting) (Text.singleton c : acc) (consumed + 1) cs
+            SpliceString
+                | c == '\\' ->
+                    case cs of
+                        [] -> Left "unterminated string literal in splice"
+                        (d:ds) ->
+                            go depth SpliceString (Text.pack ['\\', d] : acc) (consumed + 2) ds
+                | c == '"' ->
+                    go depth SpliceNormal ("\"" : acc) (consumed + 1) cs
+                | otherwise ->
+                    go depth SpliceString (Text.singleton c : acc) (consumed + 1) cs
+            SpliceChar
+                | c == '\\' ->
+                    case cs of
+                        [] -> Left "unterminated char literal in splice"
+                        (d:ds) ->
+                            go depth SpliceChar (Text.pack ['\\', d] : acc) (consumed + 2) ds
+                | c == '\'' ->
+                    go depth SpliceNormal ("'" : acc) (consumed + 1) cs
+                | otherwise ->
+                    go depth SpliceChar (Text.singleton c : acc) (consumed + 1) cs
+            SpliceQuasiQuote qqDepth
+                | c == '[' && isQuasiQuoteStart cs ->
+                    let (prefix, rest) = consumeQuasiQuotePrefix cs
+                    in go depth (SpliceQuasiQuote (qqDepth + 1)) (Text.pack ('[' : prefix) : acc) (consumed + 1 + length prefix) rest
+                | hasPrefix "|]" s ->
+                    if qqDepth == 1
+                        then go depth SpliceNormal ("|]" : acc) (consumed + 2) (Prelude.drop 2 s)
+                        else go depth (SpliceQuasiQuote (qqDepth - 1)) ("|]" : acc) (consumed + 2) (Prelude.drop 2 s)
+                | otherwise ->
+                    go depth (SpliceQuasiQuote qqDepth) (Text.singleton c : acc) (consumed + 1) cs
+
+    hasPrefix :: String -> String -> Bool
+    hasPrefix = List.isPrefixOf
+
+    isQuasiQuoteStart :: String -> Bool
+    isQuasiQuoteStart s =
+        case parseQualifiedName s of
+            Just (_, '|':_) -> True
+            _ -> False
+
+    consumeQuasiQuotePrefix :: String -> (String, String)
+    consumeQuasiQuotePrefix s =
+        case parseQualifiedName s of
+            Just (name, '|':rest) -> (name ++ "|", rest)
+            _ -> ("", s)
+
+    parseQualifiedName :: String -> Maybe (String, String)
+    parseQualifiedName s = do
+        (first, rest) <- parseIdent s
+        let (segments, rest') = parseMoreSegments rest
+        pure (concat (first : segments), rest')
+      where
+        parseMoreSegments ('.':cs) =
+            case parseIdent cs of
+                Nothing -> ([], '.':cs)
+                Just (seg, rest) ->
+                    let (more, rest') = parseMoreSegments rest
+                    in (("." ++ seg) : more, rest')
+        parseMoreSegments other = ([], other)
+
+    parseIdent :: String -> Maybe (String, String)
+    parseIdent [] = Nothing
+    parseIdent (x:xs)
+        | Char.isAlpha x || x == '_' =
+            let (tailName, rest) = span (\ch -> Char.isAlphaNum ch || ch == '_' || ch == '\'') xs
+            in Just (x : tailName, rest)
+        | otherwise = Nothing
 
 
 
 hsxElementName :: Parser Text
 hsxElementName = do
     name <- takeWhile1P (Just "identifier") (\c -> Char.isAlphaNum c || c == '_' || c == '-' || c == '!')
-    let isValidParent = name `Set.member` parents
-    let isValidLeaf = name `Set.member` leafs
+    -- Validate tag names case-insensitively against known parents and leafs.
+    let nameCI = Text.toCaseFold name
+    let isValidParent = nameCI `Set.member` parentsCI
+    let isValidLeaf = nameCI `Set.member` leafsCI
     let isValidCustomWebComponent = "-" `Text.isInfixOf` name 
                                   && not (Text.isPrefixOf "-" name)
                                   && not (Char.isNumber (Text.head name))
-    let isValidAdditionalTag = name `Set.member` ?settings.additionalTagNames
+    let isValidAdditionalTag =
+            let additionalCI = Set.map Text.toCaseFold ?settings.additionalTagNames
+            in nameCI `Set.member` additionalCI
     let checkingMarkup = ?settings.checkMarkup
     unless (isValidParent || isValidLeaf || isValidCustomWebComponent || isValidAdditionalTag || not checkingMarkup) do
         let allTags = parents `Set.union` leafs `Set.union` ?settings.additionalTagNames
@@ -698,6 +823,13 @@ leafs = Set.fromList
         , "!DOCTYPE"
         ]
 
+-- Case-insensitive lookup sets for tags
+parentsCI :: Set Text
+parentsCI = Set.map Text.toCaseFold parents
+
+leafsCI :: Set Text
+leafsCI = Set.map Text.toCaseFold leafs
+
 stripTextNodeWhitespaces :: [Node] -> [Node]
 stripTextNodeWhitespaces nodes = stripLastTextNodeWhitespaces (stripFirstTextNodeWhitespaces nodes)
 
@@ -768,3 +900,29 @@ collapseSpace text
         | Text.null t = []
         | Char.isSpace (Text.head t) = " " : go (Text.dropWhile Char.isSpace t)
         | otherwise = let (w, rest) = Text.span (not . Char.isSpace) t in w : go rest
+
+-- | Render a parsed HSX tree to static HTML.
+-- Fails when the tree contains dynamic splices or attributes.
+renderStaticNode :: Node -> Either Text Text
+renderStaticNode (Node name _ _ _) | Text.toCaseFold name == "!doctype" = Right "<!DOCTYPE HTML>\n"
+renderStaticNode (Node name attributes children isLeaf) = do
+    renderedAttributes <- Text.concat <$> mapM renderStaticAttribute attributes
+    renderedChildren <- Text.concat <$> mapM renderStaticNode children
+    let openingTag = "<" <> name <> renderedAttributes <> ">"
+    pure if isLeaf
+        then openingTag
+        else openingTag <> renderedChildren <> "</" <> name <> ">"
+renderStaticNode (TextNode value) = Right value
+renderStaticNode (PreEscapedTextNode value) = Right value
+renderStaticNode (CommentNode value) = Right ("<!-- " <> value <> " -->")
+renderStaticNode NoRenderCommentNode = Right ""
+renderStaticNode (Children children) = Text.concat <$> mapM renderStaticNode children
+renderStaticNode (SplicedNode _) = Left "Dynamic splice nodes are not supported here"
+
+renderStaticAttribute :: Attribute -> Either Text Text
+renderStaticAttribute (StaticAttribute name (TextValue value)) =
+    Right (" " <> name <> "=\"" <> value <> "\"")
+renderStaticAttribute (StaticAttribute _ (ExpressionValue _)) =
+    Left "Dynamic attribute expressions are not supported here"
+renderStaticAttribute (SpreadAttributes _) =
+    Left "Spread attributes are not supported here"

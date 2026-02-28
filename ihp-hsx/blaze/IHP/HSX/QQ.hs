@@ -9,10 +9,15 @@ module IHP.HSX.QQ
   ( hsx
   , uncheckedHsx
   , customHsx
+  , hsxExpression
+  , uncheckedHsxExpression
+  , customHsxExpression
   , quoteHsxExpression
+  , expandHsxQuasiQuote
   ) where
 
 import           Prelude
+import Control.Applicative ((<|>))
 import Data.Text (Text)
 import           IHP.HSX.Parser
 import qualified "template-haskell" Language.Haskell.TH           as TH
@@ -29,6 +34,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import IHP.HSX.Attribute
 import qualified Data.Set as Set
+import System.IO.Unsafe (unsafePerformIO)
 
 hsx :: QuasiQuoter
 hsx = customHsx
@@ -36,6 +42,7 @@ hsx = customHsx
             { checkMarkup = True
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = expandHsxQuasiQuote
             }
         )
 
@@ -45,6 +52,7 @@ uncheckedHsx = customHsx
             { checkMarkup = False
             , additionalTagNames = Set.empty
             , additionalAttributeNames = Set.empty
+            , expandQuasiQuote = expandHsxQuasiQuote
             }
         )
 
@@ -57,14 +65,33 @@ customHsx settings =
         , quoteType = error "quoteType: not defined"
         }
 
+-- | Parse a static HSX snippet from a string and return Blaze HTML.
+--
+-- This is useful inside @{...}@ expressions when nesting another @[hsx|...|]@
+-- is not possible because @|]@ would close the outer quasiquote.
+hsxExpression :: String -> Html
+hsxExpression = customHsxExpression defaultSettings
+
+uncheckedHsxExpression :: String -> Html
+uncheckedHsxExpression = customHsxExpression uncheckedSettings
+
+customHsxExpression :: HsxSettings -> String -> Html
+customHsxExpression settings code =
+    case parseHsx settings helperSourcePos [] (cs code) of
+        Left parseError ->
+            error ("hsxExpression parse error:\n" <> Megaparsec.errorBundlePretty parseError)
+        Right parsedNode ->
+            case renderStaticNode parsedNode of
+                Left renderError ->
+                    error ("hsxExpression supports only static HSX (no {..} splices): " <> cs renderError)
+                Right htmlCode ->
+                    Html5.preEscapedText htmlCode
+
 quoteHsxExpression :: HsxSettings -> String -> TH.ExpQ
 quoteHsxExpression settings code = do
         hsxPosition <- findHSXPosition
         extensions <- TH.extsEnabled
-        expression <- case parseHsx settings hsxPosition extensions (cs code) of
-                Left error   -> fail (Megaparsec.errorBundlePretty error)
-                Right result -> pure result
-        compileToHaskell expression
+        quoteHsxExpressionAtWithExtensions settings hsxPosition extensions code
     where
 
         findHSXPosition = do
@@ -72,7 +99,67 @@ quoteHsxExpression settings code = do
             let (line, col) = TH.loc_start loc
             pure $ Megaparsec.SourcePos (TH.loc_filename loc) (Megaparsec.mkPos line) (Megaparsec.mkPos col)
 
+quoteHsxExpressionAtWithExtensions :: HsxSettings -> Megaparsec.SourcePos -> [TH.Extension] -> String -> TH.ExpQ
+quoteHsxExpressionAtWithExtensions settings hsxPosition extensions code = do
+        let settings' = settings { expandQuasiQuote = composeExpandQuasiQuote extensions settings }
+        expression <- case parseHsx settings' hsxPosition extensions (cs code) of
+                Left error   -> fail (Megaparsec.errorBundlePretty error)
+                Right result -> pure result
+        compileToHaskell expression
+
+composeExpandQuasiQuote :: [TH.Extension] -> HsxSettings -> Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+composeExpandQuasiQuote extensions settings sourcePos name body =
+    expandHsxQuasiQuoteWithExtensions extensions sourcePos name body
+        <|> expandQuasiQuote settings sourcePos name body
+
+defaultSettings :: HsxSettings
+defaultSettings =
+    HsxSettings
+        { checkMarkup = True
+        , additionalTagNames = Set.empty
+        , additionalAttributeNames = Set.empty
+        , expandQuasiQuote = expandHsxQuasiQuote
+        }
+
+uncheckedSettings :: HsxSettings
+uncheckedSettings =
+    HsxSettings
+        { checkMarkup = False
+        , additionalTagNames = Set.empty
+        , additionalAttributeNames = Set.empty
+        , expandQuasiQuote = expandHsxQuasiQuote
+        }
+
+expandHsxQuasiQuote :: Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+expandHsxQuasiQuote = expandHsxQuasiQuoteWithExtensions []
+
+expandHsxQuasiQuoteWithExtensions :: [TH.Extension] -> Megaparsec.SourcePos -> String -> String -> Maybe TH.Exp
+expandHsxQuasiQuoteWithExtensions extensions sourcePos name body =
+    case baseName name of
+        "hsx" -> Just (runQExp (expandWithSettings defaultSettings))
+        "uncheckedHsx" -> Just (runQExp (expandWithSettings uncheckedSettings))
+        _ -> Nothing
+  where
+    expandWithSettings settings = do
+        let settings' = settings { expandQuasiQuote = expandHsxQuasiQuoteWithExtensions extensions }
+        expression <- case parseHsx settings' sourcePos extensions (cs body) of
+            Left parseError -> error (Megaparsec.errorBundlePretty parseError)
+            Right result -> pure result
+        compileToHaskell expression
+
+runQExp :: TH.ExpQ -> TH.Exp
+runQExp q = unsafePerformIO (TH.runQ q)
+{-# NOINLINE runQExp #-}
+
+baseName :: String -> String
+baseName = reverse . takeWhile (/= '.') . reverse
+
+helperSourcePos :: Megaparsec.SourcePos
+helperSourcePos = Megaparsec.SourcePos "<hsxExpression>" (Megaparsec.mkPos 1) (Megaparsec.mkPos 1)
+
 compileToHaskell :: Node -> TH.ExpQ
+compileToHaskell (Node name [StaticAttribute "html" (TextValue "html")] [] True)
+    | Text.toCaseFold name == "!doctype" = [| Html5.docType |]
 -- Pre-render fully static subtrees to a single unsafeByteString at compile time
 compileToHaskell node
     | isStaticTree node, isNonTrivialStaticNode node =
@@ -105,7 +192,7 @@ data Part = S !Text | D TH.ExpQ
 -- | Flatten a static-attribute node into parts, recursing into children.
 -- Adjacent static parts are merged into single ByteString literals.
 flattenNode :: Text -> [Attribute] -> [Node] -> Bool -> [Part]
-flattenNode "!DOCTYPE" _ _ _ = [S "<!DOCTYPE HTML>\n"]
+flattenNode name _ _ _ | Text.toCaseFold name == "!doctype" = [S "<!DOCTYPE HTML>\n"]
 flattenNode name attributes children isLeaf
     | isLeaf    = [S ("<" <> name <> attrs <> ">")]
     | otherwise = S ("<" <> name <> attrs <> ">") : concatMap flattenChild children ++ [S ("</" <> name <> ">")]
@@ -175,7 +262,7 @@ isNonTrivialStaticNode _                     = True
 
 -- | Render a static Node tree to HTML Text at compile time.
 renderStaticHtml :: Node -> Text
-renderStaticHtml (Node "!DOCTYPE" _ _ _) = "<!DOCTYPE HTML>\n"
+renderStaticHtml (Node name _ _ _) | Text.toCaseFold name == "!doctype" = "<!DOCTYPE HTML>\n"
 renderStaticHtml (Node name attributes children isLeaf) =
     let openTag = "<" <> name <> foldMap renderStaticAttribute attributes <> ">"
     in if isLeaf

@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, ImplicitParams #-}
 module IHP.HSX.HaskellParser (parseHaskellExpression, HaskellExprParser, mkHaskellExprParser) where
 
 import Prelude
@@ -25,18 +25,34 @@ import GHC.Unit.Module.Warnings
 #endif
 
 -- | Cached GHC parser options, constructed once per HSX quasi-quote splice.
-newtype HaskellExprParser = HaskellExprParser Lexer.ParserOpts
+data HaskellExprParser = HaskellExprParser
+    { parserOpts :: Lexer.ParserOpts
+    , expandQuasiQuote :: SourcePos -> String -> String -> Maybe TH.Exp
+    }
 
 -- | Build a 'HaskellExprParser' from the given extensions.
 -- Call this once and reuse for every @{expr}@ splice in the template.
-mkHaskellExprParser :: [TH.Extension] -> HaskellExprParser
-mkHaskellExprParser extensions = HaskellExprParser $
-    Lexer.mkParserOpts (EnumSet.fromList extensions) diagOpts [] False False False False
+mkHaskellExprParser :: [TH.Extension] -> (SourcePos -> String -> String -> Maybe TH.Exp) -> HaskellExprParser
+mkHaskellExprParser extensions expandQuasiQuote = HaskellExprParser
+    { parserOpts = Lexer.mkParserOpts (EnumSet.fromList (requiredExtensions <> extensions)) diagOpts [] False False False False
+    , expandQuasiQuote
+    }
+    where
+        -- Keep quasiquotes/TH parsing enabled inside HSX splices so expressions
+        -- like {if cond then [hsx|...|] else [hsx|...|]} can be parsed.
+        requiredExtensions =
+            [ TH.QuasiQuotes
+            , TH.TemplateHaskell
+            , TH.TemplateHaskellQuotes
+            , TH.BlockArguments
+            ]
 
 parseHaskellExpression :: HaskellExprParser -> SourcePos -> String -> Either (Int, Int, String) TH.Exp
-parseHaskellExpression (HaskellExprParser parserOpts) sourcePos input =
+parseHaskellExpression HaskellExprParser { parserOpts, expandQuasiQuote } sourcePos input =
         case expr of
-            POk parserState result -> Right (toExp (unLoc result))
+            POk parserState result ->
+                let ?expandQuasiQuote = expandQuasiQuote sourcePos
+                in Right (toExp (unLoc result))
             PFailed parserState ->
                 let
                     error = renderWithContext defaultSDocContext
@@ -78,7 +94,6 @@ parseHaskellExpression (HaskellExprParser parserOpts) sourcePos input =
 
         buffer = stringToStringBuffer input
         parseState = Lexer.initParserState parserOpts buffer location
-
 diagOpts :: DiagOpts
 diagOpts =
     DiagOpts

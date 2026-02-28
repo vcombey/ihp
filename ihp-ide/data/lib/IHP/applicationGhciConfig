@@ -3,6 +3,7 @@
 :set -iIHP/ihp-hsx
 :set -iConfig
 :set -ibuild
+:set -ibuild/hsx-shims
 :set -iIHP
 :set -iIHP/IDE
 :set -threaded
@@ -18,6 +19,7 @@
 :set -XTypeSynonymInstances
 :set -XFlexibleInstances
 :set -XQuasiQuotes
+:set -F -pgmF ihp-hsx-pp
 :set -XTypeFamilies
 :set -XPackageImports
 :set -XScopedTypeVariables
@@ -52,4 +54,5 @@
 :set -fwarn-incomplete-patterns
 :set -package ghc
 :set -fno-warn-ambiguous-fields 
+:! mkdir -p build/hsx-shims && find . -name '*.hsx' -type f | while read -r file; do shim="build/hsx-shims/${file#./}"; shim="${shim%.hsx}.hs"; mkdir -p "$(dirname "$shim")"; abs="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"; ln -sfn "$abs" "$shim"; done
 :l Main.hs
