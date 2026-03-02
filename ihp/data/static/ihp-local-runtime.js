@@ -4,16 +4,95 @@
     var LOCAL_FAILED_QUEUE_KEY_PREFIX = 'ihp_local_failed_queue:';
     var LOCAL_ACTION_QUEUE_KEY_PREFIX = 'ihp_local_action_queue:';
     var LOCAL_DB_PREFIX = 'idb://ihp-local-db:';
+    var LOCAL_DEBUG_FLAG_KEY = 'ihp_local_debug';
+    var LOCAL_DEBUG_PANEL_FLAG_KEY = 'ihp_local_debug_panel';
+    var LOCAL_DEBUG_PANEL_ID = 'ihp-local-debug-panel';
+    var LOCAL_DEBUG_PANEL_STYLE_ID = 'ihp-local-debug-panel-style';
+    var LOCAL_RUNTIME_LOG_PREFIX = '[ihp-local-runtime]';
     var LOCAL_RENDERERS = {};
     var LOCAL_ACTIONS = {};
     var LOCAL_DOM_SNAPSHOTS = {};
     var LOCAL_CONFLICT_RESOLVERS = {};
     var localActionFormInterceptorInstalled = false;
+    var localDebugPanelRefreshTimer = null;
+
+    function isLocalDebugEnabled() {
+        try {
+            var flag = localStorage.getItem(LOCAL_DEBUG_FLAG_KEY);
+            if (flag === null || flag === undefined) {
+                return true;
+            }
+            var normalized = String(flag).trim().toLowerCase();
+            return normalized !== '0' && normalized !== 'false' && normalized !== 'off';
+        } catch (_error) {
+            return true;
+        }
+    }
+
+    function debugLog(message, details) {
+        if (!isLocalDebugEnabled()) {
+            return;
+        }
+        if (details === undefined) {
+            console.log(LOCAL_RUNTIME_LOG_PREFIX + ' ' + message);
+            return;
+        }
+        console.log(LOCAL_RUNTIME_LOG_PREFIX + ' ' + message, details);
+    }
+
+    function debugWarn(message, details) {
+        if (!isLocalDebugEnabled()) {
+            return;
+        }
+        if (details === undefined) {
+            console.warn(LOCAL_RUNTIME_LOG_PREFIX + ' ' + message);
+            return;
+        }
+        console.warn(LOCAL_RUNTIME_LOG_PREFIX + ' ' + message, details);
+    }
+
+    function debugError(message, error, context) {
+        if (!isLocalDebugEnabled()) {
+            return;
+        }
+        var payload = { error: error };
+        if (context && typeof context === 'object') {
+            payload.context = context;
+        }
+        console.error(LOCAL_RUNTIME_LOG_PREFIX + ' ' + message, payload);
+    }
+
+    function requestOnPageDebugPanelRefresh() {
+        if (typeof document === 'undefined') {
+            return;
+        }
+        document.dispatchEvent(new CustomEvent('ihp:local-debug:refresh'));
+    }
+
+    function isOnPageDebugPanelEnabled() {
+        try {
+            var flag = localStorage.getItem(LOCAL_DEBUG_PANEL_FLAG_KEY);
+            if (flag === null || flag === undefined) {
+                return true;
+            }
+            var normalized = String(flag).trim().toLowerCase();
+            return normalized !== '0' && normalized !== 'false' && normalized !== 'off';
+        } catch (_error) {
+            return true;
+        }
+    }
+
+    function setOnPageDebugPanelEnabled(enabled) {
+        try {
+            localStorage.setItem(LOCAL_DEBUG_PANEL_FLAG_KEY, enabled ? '1' : '0');
+        } catch (_error) {}
+    }
 
     function parseJson(value, fallback) {
         try {
             return JSON.parse(value);
-        } catch (_error) {
+        } catch (error) {
+            debugWarn('Failed to parse JSON payload, using fallback', { value: value, error: String(error) });
             return fallback;
         }
     }
@@ -24,10 +103,14 @@
 
     function setCurrentUserId(userId) {
         if (!userId) {
+            debugLog('Clearing current local user id');
             localStorage.removeItem(LOCAL_USER_KEY);
+            requestOnPageDebugPanelRefresh();
             return;
         }
+        debugLog('Setting current local user id', { userId: userId });
         localStorage.setItem(LOCAL_USER_KEY, userId);
+        requestOnPageDebugPanelRefresh();
     }
 
     function queueKey() {
@@ -47,7 +130,9 @@
     }
 
     function writeQueue(queue) {
+        debugLog('Writing mutation queue', { length: withArray(queue).length });
         localStorage.setItem(queueKey(), JSON.stringify(queue));
+        requestOnPageDebugPanelRefresh();
     }
 
     function readFailedQueue() {
@@ -55,7 +140,9 @@
     }
 
     function writeFailedQueue(queue) {
+        debugLog('Writing failed queue', { length: withArray(queue).length });
         localStorage.setItem(failedQueueKey(), JSON.stringify(queue));
+        requestOnPageDebugPanelRefresh();
     }
 
     function readActionQueue() {
@@ -63,30 +150,47 @@
     }
 
     function writeActionQueue(queue) {
+        debugLog('Writing action queue', { length: withArray(queue).length });
         localStorage.setItem(actionQueueKey(), JSON.stringify(queue));
+        requestOnPageDebugPanelRefresh();
     }
 
     function appendFailedMutation(item) {
         var queue = readFailedQueue();
         queue.push(item);
         writeFailedQueue(queue);
+        debugWarn('Appended failed mutation', {
+            queueLength: queue.length,
+            payload: item && item.payload ? summarizePayload(item.payload) : null,
+            response: item && item.response ? item.response : null,
+        });
     }
 
     function appendQueuedMutation(item) {
         var queue = readQueue();
         queue.push(item);
         writeQueue(queue);
+        debugLog('Appended mutation to replay queue', {
+            queueLength: queue.length,
+            payload: item && item.payload ? summarizePayload(item.payload) : null,
+        });
     }
 
     function appendQueuedAction(item) {
         var queue = readActionQueue();
         queue.push(item);
         writeActionQueue(queue);
+        debugLog('Appended action to replay queue', {
+            queueLength: queue.length,
+            routePath: item ? item.routePath : null,
+            method: item ? item.method : null,
+        });
     }
 
     function drainQueuedMutations() {
         var queue = readQueue();
         writeQueue([]);
+        debugLog('Drained mutation replay queue', { drained: withArray(queue).length });
         return queue;
     }
 
@@ -116,9 +220,13 @@
             .filter(function (entry) { return entry.length > 0; });
     }
 
-    function readLocalRouteMetadata() {
+    function readLocalRouteMetadata(options) {
+        var shouldLog = !(options && options.log === false);
         var meta = localMeta();
         if (!meta) {
+            if (shouldLog) {
+                debugLog('No local-route meta tag found on page');
+            }
             return null;
         }
         var syncTables = parseCsvAttribute(meta.getAttribute('data-ihp-local-sync-tables'));
@@ -126,7 +234,7 @@
         var conflictPolicy = meta.getAttribute('data-ihp-local-conflict-policy') || 'server-wins';
         var conflictField = meta.getAttribute('data-ihp-local-conflict-field') || '';
         var explicitRoutePath = meta.getAttribute('data-ihp-local-route');
-        return {
+        var metadata = {
             routePath: explicitRoutePath || meta.getAttribute('content'),
             routeId: meta.getAttribute('data-ihp-local-route-id') || null,
             syncPolicy: meta.getAttribute('data-ihp-local-sync-policy') || 'server-wins',
@@ -139,6 +247,10 @@
             reconnectProbeTimeoutMs: parseIntAttribute(meta.getAttribute('data-ihp-local-reconnect-probe-timeout-ms'), 2000),
             reconnectProbeIntervalMs: parseIntAttribute(meta.getAttribute('data-ihp-local-reconnect-probe-interval-ms'), 15000),
         };
+        if (shouldLog) {
+            debugLog('Read local-route metadata', metadata);
+        }
+        return metadata;
     }
 
     function isLocalRouteActive() {
@@ -198,22 +310,27 @@
 
     function waitForPGlite(timeoutMs) {
         if (typeof window === 'undefined') {
+            debugWarn('window is unavailable while waiting for PGlite');
             return Promise.resolve(null);
         }
         if (window.PGlite) {
+            debugLog('PGlite constructor already available on window');
             return Promise.resolve(window.PGlite);
         }
         var waitTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 5000;
+        debugLog('Waiting for PGlite constructor', { timeoutMs: waitTimeoutMs });
         return new Promise(function (resolve) {
             var startedAt = Date.now();
             var timer = setInterval(function () {
                 if (window.PGlite) {
                     clearInterval(timer);
+                    debugLog('PGlite constructor became available', { waitedMs: Date.now() - startedAt });
                     resolve(window.PGlite);
                     return;
                 }
                 if ((Date.now() - startedAt) >= waitTimeoutMs) {
                     clearInterval(timer);
+                    debugWarn('Timed out waiting for PGlite constructor', { waitedMs: Date.now() - startedAt });
                     resolve(null);
                 }
             }, 50);
@@ -221,17 +338,24 @@
     }
 
     async function openPGlite(dataDir, pgliteCtor) {
+        debugLog('Opening local PGlite database', { dataDir: dataDir });
         var db = null;
         if (pgliteCtor && typeof pgliteCtor.create === 'function') {
             try {
                 db = await pgliteCtor.create({ dataDir: dataDir });
-            } catch (_error) {
+                debugLog('Opened PGlite using static create()', { dataDir: dataDir });
+            } catch (error) {
+                debugWarn('PGlite.create() failed, falling back to constructor', {
+                    dataDir: dataDir,
+                    error: String(error && error.message ? error.message : error),
+                });
                 // Fall back to constructor-based initialization for compatibility.
             }
         }
 
         if (!db) {
             db = await new pgliteCtor(dataDir);
+            debugLog('Opened PGlite using constructor', { dataDir: dataDir });
         }
 
         // Probe the DB early so we can fall back to a different filesystem backend
@@ -241,6 +365,7 @@
         } else if (db && typeof db.exec === 'function') {
             await db.exec('SELECT 1');
         }
+        debugLog('PGlite probe query succeeded', { dataDir: dataDir });
 
         return db;
     }
@@ -398,6 +523,293 @@
         return JSON.parse(JSON.stringify(value));
     }
 
+    function summarizePayload(payload) {
+        if (!payload || typeof payload !== 'object') {
+            return payload;
+        }
+        var summary = {
+            tag: payload.tag || null,
+            requestId: payload.requestId,
+        };
+        if (payload.table) {
+            summary.table = payload.table;
+        }
+        if (payload.id) {
+            summary.id = payload.id;
+        }
+        if (payload.transactionId) {
+            summary.transactionId = payload.transactionId;
+        }
+        if (Array.isArray(payload.records)) {
+            summary.recordCount = payload.records.length;
+        }
+        if (payload.record && typeof payload.record === 'object') {
+            summary.recordKeys = Object.keys(payload.record);
+        }
+        if (payload.patch && typeof payload.patch === 'object') {
+            summary.patchKeys = Object.keys(payload.patch);
+        }
+        if (payload.query && payload.query.table) {
+            summary.queryTable = payload.query.table;
+        }
+        return summary;
+    }
+
+    function queueLengths() {
+        return {
+            mutationQueue: withArray(readQueue()).length,
+            actionQueue: withArray(readActionQueue()).length,
+            failedQueue: withArray(readFailedQueue()).length,
+        };
+    }
+
+    function ensureOnPageDebugPanelStyles() {
+        if (typeof document === 'undefined') {
+            return;
+        }
+        if (document.getElementById(LOCAL_DEBUG_PANEL_STYLE_ID)) {
+            return;
+        }
+        var style = document.createElement('style');
+        style.id = LOCAL_DEBUG_PANEL_STYLE_ID;
+        style.textContent = ''
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' {'
+            + ' position: fixed;'
+            + ' right: 12px;'
+            + ' bottom: 12px;'
+            + ' width: 360px;'
+            + ' max-width: calc(100vw - 24px);'
+            + ' max-height: calc(100vh - 24px);'
+            + ' z-index: 2147483647;'
+            + ' background: rgba(17, 24, 39, 0.96);'
+            + ' color: #f9fafb;'
+            + ' border: 1px solid rgba(148, 163, 184, 0.4);'
+            + ' border-radius: 10px;'
+            + ' box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);'
+            + ' font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;'
+            + ' font-size: 12px;'
+            + ' line-height: 1.4;'
+            + ' overflow: hidden;'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' .ihp-local-debug-header {'
+            + ' display: flex;'
+            + ' align-items: center;'
+            + ' justify-content: space-between;'
+            + ' gap: 8px;'
+            + ' padding: 8px 10px;'
+            + ' background: rgba(30, 41, 59, 0.96);'
+            + ' border-bottom: 1px solid rgba(148, 163, 184, 0.3);'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' .ihp-local-debug-title {'
+            + ' font-weight: 700;'
+            + ' letter-spacing: 0.02em;'
+            + ' white-space: nowrap;'
+            + ' overflow: hidden;'
+            + ' text-overflow: ellipsis;'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' .ihp-local-debug-actions {'
+            + ' display: flex;'
+            + ' gap: 6px;'
+            + ' flex-wrap: wrap;'
+            + ' justify-content: flex-end;'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' button {'
+            + ' border: 1px solid rgba(148, 163, 184, 0.45);'
+            + ' border-radius: 6px;'
+            + ' background: rgba(15, 23, 42, 0.9);'
+            + ' color: #f8fafc;'
+            + ' padding: 2px 6px;'
+            + ' font-size: 11px;'
+            + ' cursor: pointer;'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' button:hover {'
+            + ' background: rgba(30, 41, 59, 0.95);'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' .ihp-local-debug-body {'
+            + ' padding: 8px 10px 10px;'
+            + ' overflow: auto;'
+            + ' max-height: min(55vh, 420px);'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + ' pre {'
+            + ' margin: 0;'
+            + ' white-space: pre-wrap;'
+            + ' word-break: break-word;'
+            + ' }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + '[data-sync-state="online"] .ihp-local-debug-title { color: #34d399; }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + '[data-sync-state="syncing"] .ihp-local-debug-title { color: #fbbf24; }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + '[data-sync-state="offline"] .ihp-local-debug-title { color: #f87171; }'
+            + '#' + LOCAL_DEBUG_PANEL_ID + '[data-sync-state="error"] .ihp-local-debug-title { color: #fb7185; }';
+        document.head.appendChild(style);
+    }
+
+    function collectRuntimeSnapshot(runtime) {
+        var metadata = readLocalRouteMetadata({ log: false });
+        var localQueueLengths = queueLengths();
+        return {
+            at: new Date().toISOString(),
+            syncState: runtime.syncState,
+            browserOnline: runtime.isBrowserOnline(),
+            isReadyForLocal: runtime.isReadyForLocal(),
+            metadata: metadata,
+            queues: localQueueLengths,
+            hasDb: !!runtime.db,
+            schemaBootstrapped: runtime.schemaBootstrapped,
+            hasRemoteDispatcher: !!runtime.remoteDispatcher,
+            registeredActions: Object.keys(LOCAL_ACTIONS),
+            registeredRenderers: Object.keys(LOCAL_RENDERERS),
+            registeredDomSnapshots: Object.keys(LOCAL_DOM_SNAPSHOTS),
+        };
+    }
+
+    function formatRuntimeSnapshot(snapshot) {
+        var metadata = snapshot.metadata || {};
+        var queues = snapshot.queues || {};
+        return [
+            'at: ' + snapshot.at,
+            'syncState: ' + snapshot.syncState,
+            'browserOnline: ' + String(snapshot.browserOnline),
+            'readyForLocal: ' + String(snapshot.isReadyForLocal),
+            'hasDb: ' + String(snapshot.hasDb) + ' | schemaBootstrapped: ' + String(snapshot.schemaBootstrapped),
+            'hasRemoteDispatcher: ' + String(snapshot.hasRemoteDispatcher),
+            'routePath: ' + (metadata.routePath || '-'),
+            'routeId: ' + (metadata.routeId || '-'),
+            'syncPolicy: ' + (metadata.syncPolicy || '-'),
+            'conflictPolicy: ' + (metadata.conflictPolicy || '-'),
+            'conflictField: ' + (metadata.conflictField || '-'),
+            'syncTables: ' + ((metadata.syncTables && metadata.syncTables.length > 0) ? metadata.syncTables.join(', ') : '*'),
+            'probe: ' + ((metadata.reconnectProbePath || '(current path)') + ' | timeout=' + String(metadata.reconnectProbeTimeoutMs || '-') + 'ms interval=' + String(metadata.reconnectProbeIntervalMs || '-') + 'ms'),
+            'queues: mutations=' + String(queues.mutationQueue || 0) + ' actions=' + String(queues.actionQueue || 0) + ' failed=' + String(queues.failedQueue || 0),
+            'actions: ' + (snapshot.registeredActions.length > 0 ? snapshot.registeredActions.join(', ') : '(none)'),
+            'renderers: ' + (snapshot.registeredRenderers.length > 0 ? snapshot.registeredRenderers.join(', ') : '(none)'),
+            'domSnapshots: ' + (snapshot.registeredDomSnapshots.length > 0 ? snapshot.registeredDomSnapshots.join(', ') : '(none)'),
+        ].join('\n');
+    }
+
+    function removeOnPageDebugPanel() {
+        if (typeof document === 'undefined') {
+            return;
+        }
+        var panel = document.getElementById(LOCAL_DEBUG_PANEL_ID);
+        if (panel && panel.parentNode) {
+            panel.parentNode.removeChild(panel);
+        }
+        if (localDebugPanelRefreshTimer) {
+            clearInterval(localDebugPanelRefreshTimer);
+            localDebugPanelRefreshTimer = null;
+        }
+    }
+
+    function refreshOnPageDebugPanel(runtime) {
+        if (typeof document === 'undefined' || !isOnPageDebugPanelEnabled()) {
+            return;
+        }
+        var panel = document.getElementById(LOCAL_DEBUG_PANEL_ID);
+        if (!panel) {
+            return;
+        }
+        var snapshot = collectRuntimeSnapshot(runtime);
+        panel.setAttribute('data-sync-state', String(snapshot.syncState || 'idle'));
+
+        var logButton = panel.querySelector('[data-action="toggle-logs"]');
+        if (logButton) {
+            logButton.textContent = runtime.isDebugLoggingEnabled() ? 'logs:on' : 'logs:off';
+        }
+        var panelButton = panel.querySelector('[data-action="toggle-panel"]');
+        if (panelButton) {
+            panelButton.textContent = isOnPageDebugPanelEnabled() ? 'panel:on' : 'panel:off';
+        }
+        var body = panel.querySelector('pre');
+        if (body) {
+            body.textContent = formatRuntimeSnapshot(snapshot);
+        }
+    }
+
+    function mountOnPageDebugPanel(runtime) {
+        if (typeof document === 'undefined') {
+            return;
+        }
+        if (!isOnPageDebugPanelEnabled()) {
+            removeOnPageDebugPanel();
+            return;
+        }
+
+        ensureOnPageDebugPanelStyles();
+
+        var panel = document.getElementById(LOCAL_DEBUG_PANEL_ID);
+        if (!panel) {
+            panel = document.createElement('section');
+            panel.id = LOCAL_DEBUG_PANEL_ID;
+            panel.innerHTML = ''
+                + '<div class="ihp-local-debug-header">'
+                + '  <div class="ihp-local-debug-title">Local First Debug</div>'
+                + '  <div class="ihp-local-debug-actions">'
+                + '    <button type="button" data-action="copy">copy</button>'
+                + '    <button type="button" data-action="clear-queues">clear:q</button>'
+                + '    <button type="button" data-action="toggle-logs">logs:on</button>'
+                + '    <button type="button" data-action="toggle-panel">panel:on</button>'
+                + '  </div>'
+                + '</div>'
+                + '<div class="ihp-local-debug-body"><pre></pre></div>';
+
+            panel.addEventListener('click', function (event) {
+                var button = event.target;
+                if (!button || button.tagName !== 'BUTTON') {
+                    return;
+                }
+                var action = button.getAttribute('data-action');
+                if (action === 'copy') {
+                    var snapshot = collectRuntimeSnapshot(runtime);
+                    var serialized = JSON.stringify(snapshot, null, 2);
+                    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                        navigator.clipboard.writeText(serialized).then(function () {
+                            debugLog('Copied local-first debug snapshot to clipboard');
+                        }).catch(function (error) {
+                            debugError('Failed to copy local-first debug snapshot', error);
+                        });
+                    } else {
+                        debugWarn('Clipboard API unavailable; cannot copy debug snapshot');
+                    }
+                    return;
+                }
+                if (action === 'clear-queues') {
+                    writeQueue([]);
+                    writeActionQueue([]);
+                    writeFailedQueue([]);
+                    debugLog('Cleared all local-first queues from debug panel');
+                    requestOnPageDebugPanelRefresh();
+                    return;
+                }
+                if (action === 'toggle-logs') {
+                    runtime.setDebugLogging(!runtime.isDebugLoggingEnabled());
+                    requestOnPageDebugPanelRefresh();
+                    return;
+                }
+                if (action === 'toggle-panel') {
+                    setOnPageDebugPanelEnabled(!isOnPageDebugPanelEnabled());
+                    if (!isOnPageDebugPanelEnabled()) {
+                        removeOnPageDebugPanel();
+                        debugLog('Disabled on-page debug panel');
+                        return;
+                    }
+                    mountOnPageDebugPanel(runtime);
+                    requestOnPageDebugPanelRefresh();
+                    debugLog('Enabled on-page debug panel');
+                }
+            });
+
+            document.body.appendChild(panel);
+            debugLog('Mounted on-page local-first debug panel');
+        }
+
+        refreshOnPageDebugPanel(runtime);
+        if (localDebugPanelRefreshTimer) {
+            clearInterval(localDebugPanelRefreshTimer);
+        }
+        localDebugPanelRefreshTimer = setInterval(function () {
+            refreshOnPageDebugPanel(runtime);
+        }, 1000);
+    }
+
     function readJwtToken() {
         try {
             return localStorage.getItem('ihp_jwt');
@@ -413,10 +825,12 @@
         if (jwt) {
             url += '?access_token=' + encodeURIComponent(jwt);
         }
+        debugLog('Computed DataSync websocket URL', { url: url, hasJwt: !!jwt });
         return url;
     }
 
     function sendDataSyncMessageOverWebSocket(payload) {
+        debugLog('Sending replay payload over DataSync websocket', summarizePayload(payload));
         return new Promise(function (resolve, reject) {
             var socket;
             var settled = false;
@@ -430,6 +844,7 @@
                         socket.close();
                     }
                 } catch (_error) {}
+                debugWarn('DataSync replay timed out', summarizePayload(payload));
                 reject(new Error('Timed out while replaying local mutation'));
             }, 5000);
 
@@ -444,6 +859,7 @@
                         socket.close();
                     }
                 } catch (_error) {}
+                debugError('DataSync websocket replay failed', error, summarizePayload(payload));
                 reject(error);
             }
 
@@ -456,6 +872,7 @@
 
             socket.onopen = function () {
                 try {
+                    debugLog('DataSync websocket opened', summarizePayload(payload));
                     socket.send(JSON.stringify(payload));
                 } catch (error) {
                     finishWithError(error);
@@ -474,7 +891,9 @@
                     }
                 } catch (_error) {}
                 try {
-                    resolve(JSON.parse(event.data));
+                    var decoded = JSON.parse(event.data);
+                    debugLog('Received DataSync websocket response', decoded);
+                    resolve(decoded);
                 } catch (error) {
                     reject(error);
                 }
@@ -696,8 +1115,14 @@
 
     async function replayQueuedAction(item) {
         if (!item || !item.routePath) {
+            debugWarn('Skipping replay action without routePath', item);
             return;
         }
+        debugLog('Replaying queued form action', {
+            routePath: item.routePath,
+            method: item.method,
+            formFieldKeys: Object.keys(item.formFields || {}),
+        });
         var originalMethod = String(item.method || 'POST').toUpperCase();
         var requestMethod = originalMethod;
         var urlParams = new URLSearchParams();
@@ -721,8 +1146,18 @@
             credentials: 'same-origin',
         });
         if (!response.ok) {
+            debugWarn('Queued action replay failed with non-OK HTTP status', {
+                routePath: item.routePath,
+                method: requestMethod,
+                status: response.status,
+            });
             throw new Error('Replay action request failed with status ' + String(response.status));
         }
+        debugLog('Queued action replay succeeded', {
+            routePath: item.routePath,
+            method: requestMethod,
+            status: response.status,
+        });
     }
 
     function resolveConnectivityProbePath(metadata) {
@@ -736,6 +1171,7 @@
     }
 
     async function probeConnectivity(path, timeoutMs) {
+        debugLog('Probing connectivity', { path: path, timeoutMs: timeoutMs });
         var controller = null;
         var timeoutId = null;
         if (typeof AbortController !== 'undefined') {
@@ -755,8 +1191,19 @@
                 headers: { 'X-IHP-Local-Probe': '1' },
                 signal: controller ? controller.signal : undefined,
             });
-            return response.ok || (response.status >= 300 && response.status < 400);
-        } catch (_error) {
+            var isReachable = response.ok || (response.status >= 300 && response.status < 400);
+            debugLog('Connectivity probe finished', {
+                path: path,
+                status: response.status,
+                reachable: isReachable,
+            });
+            return isReachable;
+        } catch (error) {
+            debugWarn('Connectivity probe failed', {
+                path: path,
+                timeoutMs: timeoutMs,
+                error: String(error && error.message ? error.message : error),
+            });
             return false;
         } finally {
             if (timeoutId) {
@@ -1063,7 +1510,7 @@
                     };
                 }
             } catch (error) {
-                console.error('[ihp-local-runtime] conflict resolver hook failed', error);
+                debugError('Conflict resolver hook failed', error, { table: table });
             }
         }
 
@@ -1178,24 +1625,35 @@
 
         setSyncState: function (state, detail) {
             if (this.syncState === state) {
+                debugLog('Sync state unchanged', { state: state, detail: detail || null });
                 return;
             }
+            debugLog('Sync state transition', {
+                from: this.syncState,
+                to: state,
+                detail: detail || null,
+                queues: queueLengths(),
+            });
             this.syncState = state;
             document.dispatchEvent(new CustomEvent('ihp:sync:state', {
                 detail: Object.assign({ state: state }, detail || {}),
             }));
+            requestOnPageDebugPanelRefresh();
         },
 
         getConnectivityProbeConfig: function () {
             var metadata = readLocalRouteMetadata();
-            return {
+            var config = {
                 path: resolveConnectivityProbePath(metadata),
                 timeoutMs: metadata ? metadata.reconnectProbeTimeoutMs : 2000,
                 intervalMs: metadata ? metadata.reconnectProbeIntervalMs : 15000,
             };
+            debugLog('Computed connectivity probe config', config);
+            return config;
         },
 
         ensureOnlineWithProbe: async function () {
+            debugLog('Checking connectivity state with probe', { browserOnline: this.isBrowserOnline() });
             if (!this.isBrowserOnline()) {
                 this.setSyncState('offline', { reason: 'browser-offline' });
                 return false;
@@ -1209,9 +1667,11 @@
             var isReachable = await probeConnectivity(config.path, config.timeoutMs);
             if (isReachable) {
                 this.setSyncState('online', { path: config.path });
+                debugLog('Connectivity probe reports online', { path: config.path });
                 return true;
             }
             this.setSyncState('offline', { reason: 'probe-failed', path: config.path });
+            debugWarn('Connectivity probe reports offline', { path: config.path });
             return false;
         },
 
@@ -1219,24 +1679,29 @@
             if (this.connectivityProbeTimer) {
                 clearInterval(this.connectivityProbeTimer);
                 this.connectivityProbeTimer = null;
+                debugLog('Cleared existing connectivity probe timer');
             }
             var self = this;
             var config = this.getConnectivityProbeConfig();
             if (!config.intervalMs || config.intervalMs <= 0) {
+                debugWarn('Connectivity probe timer disabled due to non-positive interval', config);
                 return;
             }
+            debugLog('Starting connectivity probe timer', config);
             this.connectivityProbeTimer = setInterval(function () {
+                debugLog('Connectivity probe timer tick');
                 self.ensureOnlineWithProbe().then(function (online) {
                     if (!online) {
+                        debugWarn('Skipping replay because probe reported offline');
                         return;
                     }
                     self.replayQueuedMutations().catch(function (error) {
                         self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
-                        console.error('[ihp-local-runtime] replay failed', error);
+                        debugError('Replay failed after connectivity probe tick', error);
                     });
                 }).catch(function (error) {
                     self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
-                    console.error('[ihp-local-runtime] connectivity probe failed', error);
+                    debugError('Connectivity probe tick failed', error);
                 });
             }, config.intervalMs);
         },
@@ -1247,6 +1712,7 @@
 
         registerRenderer: function (routePath, renderFn) {
             LOCAL_RENDERERS[routePath] = renderFn;
+            debugLog('Registered local renderer', { routePath: routePath });
         },
 
         registerAction: function (routePath, actionHandler, options) {
@@ -1261,6 +1727,11 @@
                 handler: actionHandler,
                 methods: normalizeActionMethods(options && options.methods),
             };
+            debugLog('Registered local action', {
+                routePath: routePath,
+                normalizedRoutePath: normalizedRoutePath,
+                methods: LOCAL_ACTIONS[normalizedRoutePath].methods,
+            });
         },
 
         registerDomSnapshot: function (actionPath, descriptor) {
@@ -1282,6 +1753,11 @@
                     };
                 }),
             };
+            debugLog('Registered DOM snapshot descriptor', {
+                actionPath: actionPath,
+                normalizedActionPath: normalizedActionPath,
+                descriptor: LOCAL_DOM_SNAPSHOTS[normalizedActionPath],
+            });
         },
 
         unregisterDomSnapshot: function (actionPath) {
@@ -1289,30 +1765,45 @@
                 return;
             }
             delete LOCAL_DOM_SNAPSHOTS[normalizeRoutePath(actionPath)];
+            debugLog('Unregistered DOM snapshot descriptor', { actionPath: actionPath });
         },
 
         syncDomSnapshots: async function () {
             if (!isLocalRouteActive() || !this.isBrowserOnline()) {
+                debugLog('Skipping DOM snapshot sync because local route is inactive or browser is offline', {
+                    localRouteActive: isLocalRouteActive(),
+                    browserOnline: this.isBrowserOnline(),
+                });
                 return;
             }
             if (typeof window === 'undefined' || !window.PGlite) {
+                debugWarn('Skipping DOM snapshot sync because PGlite is unavailable on window');
                 return;
             }
             var actionPaths = Object.keys(LOCAL_DOM_SNAPSHOTS);
             if (actionPaths.length === 0) {
+                debugLog('Skipping DOM snapshot sync because no descriptors are registered');
                 return;
             }
+            debugLog('Syncing DOM snapshot descriptors', { actionPaths: actionPaths });
 
             for (var index = 0; index < actionPaths.length; index += 1) {
                 var actionPath = actionPaths[index];
                 var descriptor = LOCAL_DOM_SNAPSHOTS[actionPath];
                 if (!descriptor || !descriptor.table) {
+                    debugWarn('Skipping invalid DOM snapshot descriptor', { actionPath: actionPath, descriptor: descriptor });
                     continue;
                 }
                 var snapshot = collectDomSnapshotRecords(actionPath, descriptor);
                 if (!snapshot.hasMatchingForms) {
+                    debugLog('No matching forms for DOM snapshot descriptor', { actionPath: actionPath });
                     continue;
                 }
+                debugLog('Applying DOM snapshot descriptor', {
+                    actionPath: actionPath,
+                    table: descriptor.table,
+                    recordCount: snapshot.records.length,
+                });
                 await this.syncDataSubscriptionSnapshot(
                     { table: descriptor.table },
                     snapshot.records
@@ -1325,6 +1816,7 @@
                 throw new Error('registerConflictResolver expects a table name and resolver function');
             }
             LOCAL_CONFLICT_RESOLVERS[String(table)] = resolver;
+            debugLog('Registered conflict resolver', { table: String(table) });
         },
 
         unregisterConflictResolver: function (table) {
@@ -1332,6 +1824,7 @@
                 return;
             }
             delete LOCAL_CONFLICT_RESOLVERS[String(table)];
+            debugLog('Unregistered conflict resolver', { table: String(table) });
         },
 
         getCurrentMetadata: function () {
@@ -1343,41 +1836,50 @@
                 return;
             }
             delete LOCAL_ACTIONS[normalizeRoutePath(routePath)];
+            debugLog('Unregistered local action', { routePath: routePath });
         },
 
         registerRemoteDispatcher: function (remoteDispatcher) {
             this.remoteDispatcher = remoteDispatcher;
+            debugLog('Registered remote dispatcher', { online: this.isOnline(), queues: queueLengths() });
             if (this.isOnline()) {
                 this.replayQueuedMutations().catch(function (error) {
-                    console.error('[ihp-local-runtime] replay failed', error);
+                    debugError('Replay failed right after registering remote dispatcher', error);
                 });
             }
         },
 
         setCurrentUser: function (userId) {
             setCurrentUserId(userId);
+            debugLog('setCurrentUser called', { userId: userId });
         },
 
         clearCurrentUserData: async function () {
             var userId = getCurrentUserId();
+            debugLog('Clearing all local-first state for user', { userId: userId, queuesBefore: queueLengths() });
             localStorage.removeItem(LOCAL_QUEUE_KEY_PREFIX + userId);
             localStorage.removeItem(LOCAL_FAILED_QUEUE_KEY_PREFIX + userId);
             localStorage.removeItem(LOCAL_ACTION_QUEUE_KEY_PREFIX + userId);
             localStorage.removeItem(LOCAL_USER_KEY);
             if (this.db && this.db.close) {
                 await this.db.close();
+                debugLog('Closed local PGlite connection while clearing user data');
             }
             this.db = null;
+            debugLog('Cleared local-first user state');
         },
 
         reloadCurrentPage: function () {
             if (typeof window === 'undefined' || !window.location) {
+                debugWarn('Cannot reload page because window.location is unavailable');
                 return;
             }
+            debugLog('Reloading current page for reconciliation', { href: window.location.href });
             if (window.Turbolinks && typeof window.Turbolinks.visit === 'function') {
                 try {
                     if (typeof window.Turbolinks.clearCache === 'function') {
                         window.Turbolinks.clearCache();
+                        debugLog('Cleared Turbolinks cache before reload');
                     }
                 } catch (_error) {}
                 window.Turbolinks.visit(window.location.href, { action: 'replace' });
@@ -1391,12 +1893,19 @@
         bootstrapSchema: async function (schemaSql) {
             this.bootstrappedSchemaSql = schemaSql;
             if (!schemaSql) {
+                debugWarn('bootstrapSchema called with empty schema SQL');
                 return;
             }
+            debugLog('Bootstrapping local schema', {
+                schemaLength: schemaSql.length,
+                hasDb: !!this.db,
+                alreadyBootstrapped: this.schemaBootstrapped,
+            });
             var self = this;
             if (this.db && !this.schemaBootstrapped) {
                 await this.db.exec(schemaSql);
                 this.schemaBootstrapped = true;
+                debugLog('Bootstrapped schema directly on existing DB instance');
             }
             if (!this.db) {
                 this.ensureDb().then(function () {
@@ -1406,14 +1915,14 @@
                     return null;
                 }).catch(function (error) {
                     if (!isPGliteUnavailableError(error)) {
-                        console.error('[ihp-local-runtime] failed to initialize local DB', error);
+                        debugError('Failed to initialize local DB during schema bootstrap', error);
                     }
                 });
             }
             if (this.isBrowserOnline()) {
                 this.syncDomSnapshots().catch(function (error) {
                     if (!isPGliteUnavailableError(error)) {
-                        console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                        debugError('Failed to sync DOM snapshots right after bootstrapSchema', error);
                     }
                 });
             }
@@ -1421,31 +1930,42 @@
 
         ensureDb: async function () {
             if (this.db) {
+                debugLog('Returning cached local DB handle');
                 return this.db;
             }
             if (this.dbInitPromise) {
+                debugLog('Awaiting in-flight local DB initialization');
                 return this.dbInitPromise;
             }
 
             var self = this;
             this.dbInitPromise = (async function () {
+                debugLog('Starting local DB initialization');
                 var pgliteCtor = window.PGlite || await waitForPGlite(5000);
                 if (!pgliteCtor) {
                     var pgliteUnavailableError = new Error('PGlite is required for local-first runtime but window.PGlite is not available');
                     pgliteUnavailableError.code = 'IHP_LOCAL_PGLITE_UNAVAILABLE';
+                    debugWarn('Local DB initialization failed because PGlite is unavailable');
                     throw pgliteUnavailableError;
                 }
                 var filesystems = pickFilesystemCandidates();
                 var lastError = null;
                 for (var index = 0; index < filesystems.length; index += 1) {
                     try {
+                        debugLog('Attempting local DB initialization on filesystem candidate', { dataDir: filesystems[index] });
                         self.db = await openPGlite(filesystems[index], pgliteCtor);
+                        debugLog('Initialized local DB on filesystem candidate', { dataDir: filesystems[index] });
                         break;
                     } catch (error) {
                         lastError = error;
+                        debugWarn('Local DB candidate initialization failed', {
+                            dataDir: filesystems[index],
+                            error: String(error && error.message ? error.message : error),
+                        });
                     }
                 }
                 if (!self.db) {
+                    debugError('Unable to initialize local PGlite database', lastError);
                     throw (lastError || new Error('Unable to initialize local PGlite database'));
                 }
                 if (self.db && !self.db.__ihpPlaceholderCompat && typeof self.db.query === "function") {
@@ -1461,16 +1981,20 @@
                         return originalQuery(sql, params);
                     };
                     self.db.__ihpPlaceholderCompat = true;
+                    debugLog('Installed placeholder compatibility wrapper for local DB driver');
                 }
                 if (self.bootstrappedSchemaSql && !self.schemaBootstrapped) {
                     await self.db.exec(self.bootstrappedSchemaSql);
                     self.schemaBootstrapped = true;
+                    debugLog('Bootstrapped schema during local DB initialization');
                 }
                 return self.db;
             })();
 
             try {
-                return await this.dbInitPromise;
+                var db = await this.dbInitPromise;
+                debugLog('Local DB initialization complete');
+                return db;
             } finally {
                 this.dbInitPromise = null;
             }
@@ -1479,28 +2003,50 @@
         refreshActiveLocalRoute: async function () {
             var metadata = readLocalRouteMetadata();
             if (!metadata || !metadata.routePath) {
+                debugLog('Skipping local route refresh because no active route metadata exists');
                 return;
             }
             var render = LOCAL_RENDERERS[metadata.routePath];
             if (!render) {
+                debugLog('Refreshing local route without renderer (event only)', { routePath: metadata.routePath });
                 document.dispatchEvent(new CustomEvent('ihp:local-refresh', { detail: { routePath: metadata.routePath } }));
                 return;
             }
+            debugLog('Refreshing local route via registered renderer', { routePath: metadata.routePath });
             var html = await render();
             if (typeof html === 'string' && html.length > 0) {
+                debugLog('Renderer produced HTML for local refresh', { routePath: metadata.routePath, htmlLength: html.length });
                 document.dispatchEvent(new CustomEvent('ihp:local-refresh', { detail: { routePath: metadata.routePath, html: html } }));
             }
         },
 
         shouldHandleFormLocally: function (routePath, method) {
-            if (!this.isReadyForLocal()) {
+            var readyForLocal = this.isReadyForLocal();
+            if (!readyForLocal) {
+                debugLog('Form will not be handled locally because runtime is not ready for local mode', {
+                    routePath: routePath,
+                    method: method,
+                    readyForLocal: readyForLocal,
+                    browserOnline: this.isBrowserOnline(),
+                });
                 return false;
             }
             var action = LOCAL_ACTIONS[normalizeRoutePath(routePath)];
             if (!action) {
+                debugLog('Form will not be handled locally because no local action is registered', {
+                    routePath: routePath,
+                    method: method,
+                });
                 return false;
             }
-            return action.methods.indexOf(String(method).toUpperCase()) !== -1;
+            var matchesMethod = action.methods.indexOf(String(method).toUpperCase()) !== -1;
+            debugLog('Evaluated local form handling decision', {
+                routePath: routePath,
+                method: method,
+                matchesMethod: matchesMethod,
+                registeredMethods: action.methods,
+            });
+            return matchesMethod;
         },
 
         executeRegisteredAction: async function (routePath, request) {
@@ -1509,6 +2055,11 @@
             if (!action) {
                 throw new Error('No local action registered for route: ' + normalizedRoutePath);
             }
+            debugLog('Executing registered local action', {
+                routePath: routePath,
+                normalizedRoutePath: normalizedRoutePath,
+                method: request && request.method ? request.method : null,
+            });
             return await action.handler(request);
         },
 
@@ -1517,10 +2068,24 @@
             var method = readSubmissionMethod(form, formData);
             var routePath = readSubmissionPath(form);
             var replayPath = readSubmissionReplayPath(form);
+            debugLog('Handling offline form submission', {
+                routePath: routePath,
+                replayPath: replayPath,
+                method: method,
+            });
             if (!this.shouldHandleFormLocally(routePath, method)) {
+                debugLog('Offline form submission is not handled locally', {
+                    routePath: routePath,
+                    method: method,
+                });
                 return false;
             }
             var formFields = formDataToObject(formData);
+            debugLog('Offline form submission payload', {
+                routePath: routePath,
+                method: method,
+                formFields: formFields,
+            });
             try {
                 var previousSuppressMutationQueue = this.suppressMutationQueue;
                 this.suppressMutationQueue = true;
@@ -1543,6 +2108,12 @@
                     formFields: deepClone(formFields),
                     createdAt: new Date().toISOString(),
                 });
+                debugLog('Offline form action handled locally and queued for replay', {
+                    routePath: routePath,
+                    replayPath: replayPath,
+                    method: method,
+                    queues: queueLengths(),
+                });
                 document.dispatchEvent(new CustomEvent('ihp:local-action:success', {
                     detail: { routePath: routePath, method: method, result: result },
                 }));
@@ -1551,16 +2122,22 @@
                 document.dispatchEvent(new CustomEvent('ihp:local-action:error', {
                     detail: { routePath: routePath, method: method, error: error },
                 }));
-                console.error('[ihp-local-runtime] local action failed', error);
+                debugError('Local action failed during offline form submission', error, {
+                    routePath: routePath,
+                    method: method,
+                    formFields: formFields,
+                });
                 return true;
             }
         },
 
         installOfflineActionFormInterceptor: function () {
             if (localActionFormInterceptorInstalled) {
+                debugLog('Offline action form interceptor already installed');
                 return;
             }
             localActionFormInterceptorInstalled = true;
+            debugLog('Installing offline action form interceptor');
             var self = this;
             document.addEventListener('submit', function (event) {
                 var form = event.target;
@@ -1574,20 +2151,32 @@
                 if (!self.shouldHandleFormLocally(routePath, method)) {
                     return;
                 }
+                debugLog('Intercepting form submission for local-first handling', {
+                    routePath: routePath,
+                    method: method,
+                });
                 event.preventDefault();
                 self.handleOfflineFormSubmission(form, submitter).catch(function (error) {
-                    console.error('[ihp-local-runtime] failed to handle local form submission', error);
+                    debugError('Failed to handle intercepted local form submission', error, {
+                        routePath: routePath,
+                        method: method,
+                    });
                 });
             }, true);
         },
 
         executeLocal: async function (payload) {
+            debugLog('Executing local DataSync payload', summarizePayload(payload));
             var db = await this.ensureDb();
 
             switch (payload.tag) {
                 case 'DataSyncQuery': {
                     var compiled = compileSelectQuery(payload.query);
                     var result = await db.query(compiled.sql, compiled.parameters);
+                    debugLog('Executed local DataSync query', {
+                        table: payload.query ? payload.query.table : null,
+                        rowCount: toRows(result).length,
+                    });
                     return { tag: 'DataSyncResult', requestId: payload.requestId, result: toRows(result) };
                 }
                 case 'CreateRecordMessage':
@@ -1621,6 +2210,7 @@
                     return { tag: 'DidRollbackTransaction', requestId: payload.requestId, transactionId: payload.id };
                 }
                 default:
+                    debugWarn('Unsupported local DataSync payload received', summarizePayload(payload));
                     throw new Error('Unsupported local DataSync payload: ' + payload.tag);
             }
         },
@@ -1664,8 +2254,13 @@
         },
 
         dispatchDataSync: async function (payload) {
+            debugLog('Dispatching DataSync payload to local runtime', summarizePayload(payload));
             try {
                 var response = await this.executeLocal(payload);
+                debugLog('Local DataSync execution completed', {
+                    payload: summarizePayload(payload),
+                    responseTag: response ? response.tag : null,
+                });
                 if (this.isMutationPayload(payload)) {
                     if (!this.suppressMutationQueue) {
                         var queueItem = {
@@ -1676,17 +2271,27 @@
                             queueItem.localTransactionId = response.transactionId;
                         }
                         appendQueuedMutation(queueItem);
+                        debugLog('Queued local mutation for replay', {
+                            payload: summarizePayload(payload),
+                            queues: queueLengths(),
+                        });
                     }
                     await this.refreshActiveLocalRoute();
                 }
                 return response;
             } catch (error) {
+                debugError('Local DataSync execution failed', error, summarizePayload(payload));
                 return makeErrorResponse(payload, error);
             }
         },
 
         createRecord: async function (table, record, options) {
             record = ensureRecordId(record);
+            debugLog('createRecord called', {
+                table: table,
+                recordId: record ? record.id : null,
+                keys: record ? Object.keys(record) : [],
+            });
             var transactionId = options && options.transactionId ? options.transactionId : null;
             var response = await this.dispatchDataSync({
                 tag: 'CreateRecordMessage',
@@ -1699,6 +2304,11 @@
         },
 
         updateRecord: async function (table, id, patch, options) {
+            debugLog('updateRecord called', {
+                table: table,
+                id: id,
+                patchKeys: patch ? Object.keys(patch) : [],
+            });
             var transactionId = options && options.transactionId ? options.transactionId : null;
             var response = await this.dispatchDataSync({
                 tag: 'UpdateRecordMessage',
@@ -1712,6 +2322,7 @@
         },
 
         deleteRecord: async function (table, id, options) {
+            debugLog('deleteRecord called', { table: table, id: id });
             var transactionId = options && options.transactionId ? options.transactionId : null;
             var response = await this.dispatchDataSync({
                 tag: 'DeleteRecordMessage',
@@ -1725,20 +2336,34 @@
 
         shouldMirrorTable: function (table) {
             if (!table) {
+                debugWarn('shouldMirrorTable called without table');
                 return false;
             }
             var metadata = readLocalRouteMetadata();
             if (!metadata || !Array.isArray(metadata.syncTables) || metadata.syncTables.length === 0) {
+                debugLog('Mirroring table because syncTables is empty', { table: table });
                 return true;
             }
-            return metadata.syncTables.indexOf(table) !== -1;
+            var shouldMirror = metadata.syncTables.indexOf(table) !== -1;
+            debugLog('Evaluated table mirroring rule', {
+                table: table,
+                syncTables: metadata.syncTables,
+                shouldMirror: shouldMirror,
+            });
+            return shouldMirror;
         },
 
         syncDataSubscriptionSnapshot: async function (query, records) {
             if (!query || !query.table) {
+                debugWarn('Ignoring subscription snapshot without query.table', { query: query });
                 return;
             }
+            debugLog('Syncing subscription snapshot', {
+                table: query.table,
+                incomingRecordCount: withArray(records).length,
+            });
             if (!this.shouldMirrorTable(query.table)) {
+                debugLog('Skipping subscription snapshot because table is not mirrored', { table: query.table });
                 return;
             }
             var metadata = readLocalRouteMetadata();
@@ -1754,7 +2379,7 @@
                     return Object.prototype.hasOwnProperty.call(record, 'id');
                 })
             ) {
-                console.warn(
+                debugWarn(
                     '[ihp-local-runtime] skipped snapshot sync for table "' + query.table + '" because records are missing ids'
                 );
                 return;
@@ -1796,18 +2421,36 @@
                 if (policy === 'server-wins') {
                     await pruneQuerySnapshot(db, query, resolvedRecords);
                 }
+                debugLog('Subscription snapshot sync complete', {
+                    table: query.table,
+                    policy: policy,
+                    upsertedRecords: resolvedRecords.length,
+                });
             } catch (error) {
                 if (!isPGliteUnavailableError(error)) {
-                    console.error('[ihp-local-runtime] failed to sync subscription snapshot', error);
+                    debugError('Failed to sync subscription snapshot', error, {
+                        table: query.table,
+                        incomingRecordCount: normalizedRecords.length,
+                    });
                 }
             }
         },
 
         applyServerSubscriptionMessage: async function (query, message) {
             if (!query || !query.table || !message || !message.tag) {
+                debugWarn('Ignoring invalid server subscription message', { query: query, message: message });
                 return;
             }
+            debugLog('Applying server subscription message', {
+                table: query.table,
+                tag: message.tag,
+                id: message.id || (message.record && message.record.id) || null,
+            });
             if (!this.shouldMirrorTable(query.table)) {
+                debugLog('Skipping server subscription message because table is not mirrored', {
+                    table: query.table,
+                    tag: message.tag,
+                });
                 return;
             }
             var metadata = readLocalRouteMetadata();
@@ -1817,6 +2460,7 @@
                 switch (message.tag) {
                     case 'DidInsert': {
                         if (!message.record) {
+                            debugWarn('Ignoring DidInsert message without record', message);
                             return;
                         }
                         var incomingInsertRecord = decodeDataSyncRecord(message.record);
@@ -1843,10 +2487,15 @@
                         }
 
                         await executeUpsertMany(db, query.table, [resolvedInsertRecord]);
+                        debugLog('Applied DidInsert subscription message', {
+                            table: query.table,
+                            id: resolvedInsertRecord ? resolvedInsertRecord.id : null,
+                        });
                         return;
                     }
                     case 'DidUpdate': {
                         if (!message.id) {
+                            debugWarn('Ignoring DidUpdate message without id', message);
                             return;
                         }
                         var existingResult = await db.query(
@@ -1881,10 +2530,15 @@
                         }
 
                         await executeUpsertMany(db, query.table, [resolvedUpdateRecord]);
+                        debugLog('Applied DidUpdate subscription message', {
+                            table: query.table,
+                            id: message.id,
+                        });
                         return;
                     }
                     case 'DidDelete': {
                         if (!message.id) {
+                            debugWarn('Ignoring DidDelete message without id', message);
                             return;
                         }
                         var existingDeleteResult = await db.query(
@@ -1903,30 +2557,45 @@
                                 );
                             }
                             await executeUpsertMany(db, query.table, [deleteDecision.record]);
+                            debugLog('Resolved DidDelete conflict by keeping local/custom record', {
+                                table: query.table,
+                                id: message.id,
+                            });
                             return;
                         }
                         await db.query(
                             'DELETE FROM ' + quoteIdentifier(query.table) + ' WHERE id = ?',
                             [message.id]
                         );
+                        debugLog('Applied DidDelete subscription message', {
+                            table: query.table,
+                            id: message.id,
+                        });
                         return;
                     }
                     default:
+                        debugLog('Ignoring unknown server subscription message tag', { tag: message.tag });
                         return;
                 }
             } catch (error) {
-                console.error('[ihp-local-runtime] failed to apply server subscription message', error);
+                debugError('Failed to apply server subscription message', error, {
+                    table: query.table,
+                    tag: message.tag,
+                });
             }
         },
 
         replayQueuedActions: async function () {
             if (!this.isOnline()) {
+                debugLog('Skipping action replay because runtime is offline');
                 return { replayedActions: 0, hasPendingActions: false };
             }
             var queuedActions = readActionQueue();
             if (!Array.isArray(queuedActions) || queuedActions.length === 0) {
+                debugLog('No queued actions to replay');
                 return { replayedActions: 0, hasPendingActions: false };
             }
+            debugLog('Starting queued action replay', { queuedActionCount: queuedActions.length });
 
             var replayedActions = 0;
             var remaining = deepClone(queuedActions);
@@ -1947,11 +2616,18 @@
                         failedAt: new Date().toISOString(),
                     });
                     this.setSyncState('error', { error: replayError.errorMessage || 'replay action failed' });
-                    console.error('[ihp-local-runtime] replay action failed', replayError);
+                    debugError('Queued action replay failed', replayError, {
+                        routePath: item ? item.routePath : null,
+                        method: item ? item.method : null,
+                    });
                     break;
                 }
             }
             writeActionQueue(remaining);
+            debugLog('Queued action replay finished', {
+                replayedActions: replayedActions,
+                remainingActions: remaining.length,
+            });
             return {
                 replayedActions: replayedActions,
                 hasPendingActions: remaining.length > 0,
@@ -1960,13 +2636,16 @@
 
         replayQueuedMutations: async function () {
             if (this.replayInFlight) {
+                debugLog('Awaiting in-flight mutation replay');
                 return await this.replayInFlight;
             }
 
             var self = this;
             this.replayInFlight = (async function () {
+                debugLog('Starting mutation replay run', { queues: queueLengths() });
                 var isReachable = await self.ensureOnlineWithProbe();
                 if (!isReachable) {
+                    debugWarn('Stopping mutation replay because connectivity probe reported offline');
                     return;
                 }
                 self.setSyncState('syncing');
@@ -1979,6 +2658,10 @@
                 var queued = readQueue();
                 if (!Array.isArray(queued) || queued.length === 0) {
                     self.setSyncState('online');
+                    debugLog('No queued mutations to replay', {
+                        replaySummary: replaySummary,
+                        queues: queueLengths(),
+                    });
                     if (shouldReloadAfterActionReplay) {
                         self.reloadCurrentPage();
                         return;
@@ -1986,10 +2669,11 @@
                     try {
                         await self.syncDomSnapshots();
                     } catch (error) {
-                        console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                        debugError('Failed to sync DOM snapshots after empty mutation replay queue', error);
                     }
                     return;
                 }
+                debugLog('Replaying queued mutations', { queuedMutationCount: queued.length });
                 var remaining = deepClone(queued);
                 var transactionIdMap = {};
                 for (var i = 0; i < queued.length; i += 1) {
@@ -2010,13 +2694,25 @@
                         }
 
                         var response = await replayDispatcher(replayPayload);
+                        debugLog('Received replay response for mutation', {
+                            payload: summarizePayload(replayPayload),
+                            responseTag: response ? response.tag : null,
+                        });
                         if (replayPayload.tag === 'StartTransaction' && item.localTransactionId && response && response.transactionId) {
                             transactionIdMap[item.localTransactionId] = response.transactionId;
                             rewriteQueuedTransactionIds(remaining, item.localTransactionId, response.transactionId);
+                            debugLog('Mapped local transaction id to remote transaction id', {
+                                localTransactionId: item.localTransactionId,
+                                remoteTransactionId: response.transactionId,
+                            });
                         }
                         if (response && response.tag === 'DataSyncError') {
                             if (isTransientReplayConnectionError(response.errorMessage)) {
                                 self.setSyncState('offline', { reason: 'datasync-unreachable' });
+                                debugWarn('Mutation replay stopped due to transient DataSync connection error', {
+                                    message: response.errorMessage,
+                                    payload: summarizePayload(replayPayload),
+                                });
                                 break;
                             }
                             appendFailedMutation({
@@ -2025,7 +2721,9 @@
                                 failedAt: new Date().toISOString(),
                             });
                             self.setSyncState('error', { error: response.errorMessage || 'replay mutation failed' });
-                            console.error('[ihp-local-runtime] replay mutation failed', response);
+                            debugError('Mutation replay failed with DataSyncError response', response, {
+                                payload: summarizePayload(replayPayload),
+                            });
                             break;
                         }
                         remaining.shift();
@@ -2033,6 +2731,10 @@
                         var replayErrorResponse = makeErrorResponse(item.payload, error);
                         if (isTransientReplayConnectionError(replayErrorResponse.errorMessage)) {
                             self.setSyncState('offline', { reason: 'datasync-unreachable' });
+                            debugWarn('Mutation replay stopped due to transient transport error', {
+                                message: replayErrorResponse.errorMessage,
+                                payload: item ? summarizePayload(item.payload) : null,
+                            });
                             break;
                         }
                         appendFailedMutation({
@@ -2041,7 +2743,9 @@
                             failedAt: new Date().toISOString(),
                         });
                         self.setSyncState('error', { error: replayErrorResponse.errorMessage || 'replay mutation failed' });
-                        console.error('[ihp-local-runtime] replay mutation failed', replayErrorResponse);
+                        debugError('Mutation replay failed with exception', replayErrorResponse, {
+                            payload: item ? summarizePayload(item.payload) : null,
+                        });
                         break;
                     }
                 }
@@ -2049,6 +2753,10 @@
                 if (remaining.length === 0 && readActionQueue().length === 0) {
                     self.setSyncState('online');
                 }
+                debugLog('Mutation replay loop finished', {
+                    remainingMutations: remaining.length,
+                    queues: queueLengths(),
+                });
                 if (shouldReloadAfterActionReplay && remaining.length === 0 && readActionQueue().length === 0) {
                     self.reloadCurrentPage();
                     return;
@@ -2056,7 +2764,7 @@
                 try {
                     await self.syncDomSnapshots();
                 } catch (error) {
-                    console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                    debugError('Failed to sync DOM snapshots after mutation replay', error);
                 }
             })();
 
@@ -2064,41 +2772,97 @@
                 return await this.replayInFlight;
             } finally {
                 self.replayInFlight = null;
+                debugLog('Mutation replay run finalized', { queues: queueLengths() });
             }
         },
 
         getFailedMutations: function () {
-            return readFailedQueue();
+            var failed = readFailedQueue();
+            debugLog('Reading failed mutation queue', { failedCount: failed.length });
+            return failed;
+        },
+
+        setDebugLogging: function (enabled) {
+            try {
+                localStorage.setItem(LOCAL_DEBUG_FLAG_KEY, enabled ? '1' : '0');
+            } catch (_error) {}
+            debugLog('Toggled local-first debug logging', { enabled: enabled });
+            requestOnPageDebugPanelRefresh();
+        },
+
+        isDebugLoggingEnabled: function () {
+            return isLocalDebugEnabled();
+        },
+
+        getDebugSnapshot: function () {
+            var snapshot = collectRuntimeSnapshot(this);
+            debugLog('Built local-first debug snapshot', snapshot);
+            return snapshot;
+        },
+
+        setDebugPanelVisible: function (enabled) {
+            setOnPageDebugPanelEnabled(!!enabled);
+            if (enabled) {
+                mountOnPageDebugPanel(this);
+            } else {
+                removeOnPageDebugPanel();
+            }
+            debugLog('Toggled on-page debug panel visibility', { enabled: !!enabled });
+        },
+
+        isDebugPanelVisible: function () {
+            return isOnPageDebugPanelEnabled();
         },
 
         initialize: function () {
             if (this.initialized) {
+                debugLog('Local runtime initialize() called more than once; ignoring');
                 return;
             }
             this.initialized = true;
+            debugLog('Initializing local-first runtime', {
+                debugLoggingEnabled: isLocalDebugEnabled(),
+                queues: queueLengths(),
+            });
             var self = this;
             window.addEventListener('offline', function () {
+                debugLog('Received browser offline event');
                 self.setSyncState('offline', { reason: 'browser-offline' });
             });
             window.addEventListener('online', function () {
+                debugLog('Received browser online event');
                 self.replayQueuedMutations().catch(function (error) {
                     self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
-                    console.error('[ihp-local-runtime] replay failed', error);
+                    debugError('Replay failed after browser online event', error);
                 });
             });
             window.addEventListener('turbolinks:load', function () {
+                debugLog('Received turbolinks:load event');
                 self.restartConnectivityProbes();
+                mountOnPageDebugPanel(self);
                 self.syncDomSnapshots().catch(function (error) {
-                    console.error('[ihp-local-runtime] failed to sync DOM snapshots', error);
+                    debugError('Failed to sync DOM snapshots on turbolinks:load', error);
                 });
             });
-            self.restartConnectivityProbes();
-            if (self.isBrowserOnline()) {
-                self.replayQueuedMutations().catch(function (error) {
-                    self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
-                    console.error('[ihp-local-runtime] replay failed', error);
+            document.addEventListener('ihp:local-debug:refresh', function () {
+                refreshOnPageDebugPanel(self);
+            });
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', function () {
+                    mountOnPageDebugPanel(self);
                 });
             } else {
+                mountOnPageDebugPanel(self);
+            }
+            self.restartConnectivityProbes();
+            if (self.isBrowserOnline()) {
+                debugLog('Browser starts online, scheduling replay');
+                self.replayQueuedMutations().catch(function (error) {
+                    self.setSyncState('error', { error: error && error.message ? error.message : String(error) });
+                    debugError('Replay failed during initial online bootstrap', error);
+                });
+            } else {
+                debugLog('Browser starts offline');
                 self.setSyncState('offline', { reason: 'browser-offline' });
             }
         },
