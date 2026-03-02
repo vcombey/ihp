@@ -38,6 +38,8 @@ module IHP.ControllerPrelude
     , module IHP.FileStorage.Preprocessor.ImageMagick
     , module IHP.Pagination.ControllerFunctions
     , module IHP.HSX.QQ
+    , module IHP.LocalFirst
+    , module IHP.LocalFirst.Types
     ) where
 import IHP.Prelude
 import IHP.Controller.Param
@@ -73,6 +75,8 @@ import qualified IHP.ViewSupport as ViewSupport
 
 import IHP.Job.Types
 import IHP.AutoRefresh (autoRefresh)
+import IHP.LocalFirst
+import IHP.LocalFirst.Types
 
 import IHP.LoginSupport.Helper.Controller
 import IHP.PageHead.ControllerFunctions

@@ -22,6 +22,7 @@ module IHP.FileStorage.ControllerFunctions
 
 import IHP.Prelude
 import IHP.FileStorage.Types
+import qualified IHP.FileStorage.Types as FileStorageTypes
 import IHP.Controller.Context
 import IHP.Controller.FileUpload
 import IHP.FrameworkConfig
@@ -61,7 +62,7 @@ import qualified Network.Mime as Mime
 -- >
 --
 storeFile :: (?context :: context, ConfigProvider context) => Wai.FileInfo LByteString -> Text -> IO StoredFile
-storeFile fileInfo directory = storeFileWithOptions fileInfo (def { directory })
+storeFile fileInfo directory = storeFileWithOptions fileInfo (def { FileStorageTypes.directory = directory })
 
 
 -- | Like 'storeFile' but with more options.
@@ -352,7 +353,7 @@ uploadToStorageWithOptions options field record = do
 
     case fileOrNothing fieldName of
         Just fileInfo -> do
-            storeFileWithOptions fileInfo options { directory }
+            storeFileWithOptions fileInfo options { FileStorageTypes.directory = directory }
             |> Exception.try
             >>= \case
                 Left (exception :: SomeException) -> record
