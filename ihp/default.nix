@@ -9,6 +9,7 @@
 , http-client, http-client-tls, http-media, http-types, ihp-context
 , ihp-hsx, ihp-imagemagick, ihp-log, ihp-modal, ihp-pagehead
 , ihp-pglistener, inflections, interpolate, lens, lib, mime-types
+, openapi3
 , minio-hs, mono-traversable, mtl, neat-interpolation, network
 , network-uri, parser-combinators, postgresql-simple
 , postgresql-simple-postgresql-types, postgresql-types, process
@@ -37,7 +38,8 @@ mkDerivation {
     hasql-mapping hasql-pool hasql-postgresql-types hasql-transaction
     hspec http-client http-client-tls http-media http-types ihp-context
     ihp-hsx ihp-imagemagick ihp-log ihp-modal ihp-pagehead
-    ihp-pglistener inflections interpolate lens mime-types minio-hs
+    ihp-pglistener inflections interpolate lens mime-types openapi3
+    minio-hs
     mono-traversable mtl neat-interpolation network network-uri
     parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types process
@@ -60,7 +62,8 @@ mkDerivation {
     hasql-mapping hasql-pool hasql-postgresql-types hasql-transaction
     hspec http-client http-client-tls http-media http-types ihp-context
     ihp-hsx ihp-imagemagick ihp-log ihp-modal ihp-pagehead
-    ihp-pglistener inflections interpolate lens mime-types minio-hs
+    ihp-pglistener inflections interpolate lens mime-types openapi3
+    minio-hs
     mono-traversable mtl neat-interpolation network network-uri
     parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types process
