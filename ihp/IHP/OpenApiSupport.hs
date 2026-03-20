@@ -3,6 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
 module IHP.OpenApiSupport
@@ -17,28 +18,41 @@ module IHP.OpenApiSupport
     , defaultOpenApiInfo
     , buildOpenApi
     , buildOpenApiWithInfo
+    , SwaggerUiOptions (..)
+    , defaultSwaggerUiOptions
+    , swaggerUi
+    , swaggerUiWithOptions
     ) where
 
 import IHP.Prelude
 import IHP.RouterSupport
+import IHP.Router.Types (UnexpectedMethodException (..))
 import IHP.ViewSupport (JsonResponse)
 import IHP.ModelSupport
+import Data.Attoparsec.ByteString.Char8 (string)
 import Data.OpenApi (ToSchema (..), NamedSchema (..), Schema, Definitions, Referenced, declareNamedSchema, declareSchemaRef, toSchema, genericDeclareNamedSchema, defaultSchemaOptions)
 import Data.OpenApi.Declare (runDeclare)
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Key as JSON.Key
 import qualified Data.Aeson.KeyMap as JSON.KeyMap
+import qualified Data.ByteString.Char8 as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Map.Strict as Map
 import qualified Data.Typeable as Typeable
-import Network.Wai (defaultRequest)
+import Network.Wai (Request, Response, defaultRequest, requestMethod, responseBuilder, responseLBS)
 import qualified Control.Monad.State.Strict as State
 import Data.UUID (nil)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Data
 import Data.Semigroup (Semigroup (..))
-import Network.HTTP.Types.Method (StdMethod (..))
+import Network.HTTP.Types.Header (hContentType)
+import Network.HTTP.Types.Method (StdMethod (..), parseMethod)
+import Network.HTTP.Types.Status (status200)
 import qualified Control.Exception as Exception
+import qualified Text.Blaze.Html.Renderer.Utf8 as Blaze
+import qualified Text.Blaze.Html5 as Html5
+import qualified Text.Blaze.Html5.Attributes as Attr
 
 data OpenApiInfo = OpenApiInfo
     { openApiTitle :: Text
@@ -76,6 +90,34 @@ defaultOpenApiInfo = OpenApiInfo
     , openApiDescription = Nothing
     }
 
+data SwaggerUiOptions = SwaggerUiOptions
+    { swaggerUiPath :: ByteString
+    , swaggerUiOpenApiPath :: ByteString
+    , swaggerUiInfo :: OpenApiInfo
+    , swaggerUiTitle :: Maybe Text
+    , swaggerUiCssUrl :: Text
+    , swaggerUiBundleJsUrl :: Text
+    , swaggerUiStandalonePresetJsUrl :: Text
+    }
+    deriving (Eq, Show)
+
+-- | Default Swagger UI settings for an application.
+--
+-- This serves the generated OpenAPI JSON at @/api-docs/openapi.json@ and the
+-- Swagger UI at @/api-docs@.
+defaultSwaggerUiOptions :: forall application. Typeable.Typeable application => SwaggerUiOptions
+defaultSwaggerUiOptions =
+    let info = defaultOpenApiInfo @application
+    in SwaggerUiOptions
+        { swaggerUiPath = "/api-docs"
+        , swaggerUiOpenApiPath = "/openapi.json"
+        , swaggerUiInfo = info
+        , swaggerUiTitle = Nothing
+        , swaggerUiCssUrl = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"
+        , swaggerUiBundleJsUrl = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"
+        , swaggerUiStandalonePresetJsUrl = "https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"
+        }
+
 buildOpenApi :: forall application. (FrontController application, Typeable.Typeable application) => application -> JSON.Value
 buildOpenApi = buildOpenApiWithInfo (defaultOpenApiInfo @application)
 
@@ -103,6 +145,108 @@ buildOpenApiWithInfo info application =
 throwOpenApiGenerationException :: Text -> a
 throwOpenApiGenerationException = Exception.throw . OpenApiGenerationException
 {-# INLINE throwOpenApiGenerationException #-}
+
+-- | Mounts Swagger UI for the current front controller using 'defaultSwaggerUiOptions'.
+--
+-- This adds two undocumented routes:
+--
+-- - the Swagger UI HTML at @/api-docs@
+-- - the generated OpenAPI document at @/api-docs/openapi.json@
+swaggerUi
+    :: forall application.
+        ( FrontController application
+        , Typeable.Typeable application
+        , ?application :: application
+        )
+    => RouteDefinition
+swaggerUi = swaggerUiWithOptions (defaultSwaggerUiOptions @application)
+
+-- | Mounts Swagger UI and the generated OpenAPI JSON for the current front controller.
+--
+-- The JSON endpoint is derived from the same mounted router tree via
+-- 'buildOpenApiWithInfo', so the documentation stays aligned with the
+-- application routing.
+swaggerUiWithOptions
+    :: forall application.
+        ( FrontController application
+        , ?application :: application
+        )
+    => SwaggerUiOptions
+    -> RouteDefinition
+swaggerUiWithOptions options@SwaggerUiOptions { swaggerUiPath, swaggerUiOpenApiPath, swaggerUiInfo } =
+    let normalizedBasePath = normalizeSwaggerUiBasePath swaggerUiPath
+        normalizedOpenApiPath = normalizeSwaggerUiChildPath swaggerUiOpenApiPath
+        htmlResponse = responseBuilder status200 [(hContentType, "text/html; charset=utf-8")] (Blaze.renderHtmlBuilder (swaggerUiHtml options { swaggerUiPath = normalizedBasePath, swaggerUiOpenApiPath = normalizedOpenApiPath }))
+        application = ?application
+    in withPrefix normalizedBasePath
+        [ getResponseRoute normalizedOpenApiPath (\_ -> responseLBS status200 [(hContentType, "application/json")] (JSON.encode (buildOpenApiWithInfo swaggerUiInfo application)))
+        , getResponseRoute "" (\_ -> htmlResponse)
+        , getResponseRoute "/" (\_ -> htmlResponse)
+        ]
+
+getResponseRoute :: ByteString -> (Request -> Response) -> RouteDefinition
+getResponseRoute path toResponse = rawRoute do
+    string path
+    pure (\request respond -> handleGet request respond (toResponse request))
+
+handleGet :: Request -> (Response -> IO responseReceived) -> Response -> IO responseReceived
+handleGet request respond response =
+    case parseMethod (requestMethod request) of
+        Right GET -> respond response
+        Right HEAD -> respond response
+        Right method -> Exception.throw UnexpectedMethodException { allowedMethods = [GET, HEAD], method }
+        Left err -> Exception.throwIO (OpenApiGenerationException ("Invalid HTTP method: " <> cs err))
+
+normalizeSwaggerUiBasePath :: ByteString -> ByteString
+normalizeSwaggerUiBasePath path
+    | ByteString.null path = "/api-docs"
+    | ByteString.head path /= '/' = normalizeSwaggerUiBasePath ("/" <> path)
+    | ByteString.length path > 1 && ByteString.last path == '/' = ByteString.init path
+    | otherwise = path
+
+normalizeSwaggerUiChildPath :: ByteString -> ByteString
+normalizeSwaggerUiChildPath path
+    | ByteString.null path = "/openapi.json"
+    | ByteString.head path /= '/' = "/" <> path
+    | otherwise = path
+
+swaggerUiHtml :: SwaggerUiOptions -> Html5.Html
+swaggerUiHtml SwaggerUiOptions { swaggerUiOpenApiPath, swaggerUiInfo, swaggerUiTitle, swaggerUiCssUrl, swaggerUiBundleJsUrl, swaggerUiStandalonePresetJsUrl } =
+    let title = fromMaybe (swaggerUiInfo.openApiTitle <> " Swagger UI") swaggerUiTitle
+        openApiUrlLiteral = jsonStringLiteral (relativeSwaggerUiOpenApiUrl swaggerUiOpenApiPath)
+    in Html5.docTypeHtml do
+        Html5.head do
+            Html5.meta Html5.! Attr.charset "utf-8"
+            Html5.meta Html5.! Attr.name "viewport" Html5.! Attr.content "width=device-width, initial-scale=1"
+            Html5.title (Html5.toHtml title)
+            Html5.link Html5.! Attr.rel "stylesheet" Html5.! Attr.href (Html5.textValue swaggerUiCssUrl)
+            Html5.style "html { box-sizing: border-box; overflow-y: scroll; } *, *:before, *:after { box-sizing: inherit; } body { margin: 0; background: #fafafa; }"
+        Html5.body do
+            Html5.div mempty Html5.! Attr.id "swagger-ui"
+            Html5.script mempty Html5.! Attr.src (Html5.textValue swaggerUiBundleJsUrl)
+            Html5.script mempty Html5.! Attr.src (Html5.textValue swaggerUiStandalonePresetJsUrl)
+            Html5.script (Html5.preEscapedToHtml (swaggerUiBootScript openApiUrlLiteral))
+
+relativeSwaggerUiOpenApiUrl :: ByteString -> Text
+relativeSwaggerUiOpenApiUrl openApiPath =
+    "./" <> Text.dropWhile (== '/') (Text.decodeUtf8 openApiPath)
+
+swaggerUiBootScript :: Text -> Text
+swaggerUiBootScript openApiUrlLiteral =
+    Text.unlines
+        [ "window.onload = function () {"
+        , "  window.ui = SwaggerUIBundle({"
+        , "    url: " <> openApiUrlLiteral <> ","
+        , "    dom_id: '#swagger-ui',"
+        , "    deepLinking: true,"
+        , "    presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],"
+        , "    layout: 'BaseLayout'"
+        , "  });"
+        , "};"
+        ]
+
+jsonStringLiteral :: Text -> Text
+jsonStringLiteral = cs . LazyByteString.toStrict . JSON.encode
 
 openApiInfoValue :: OpenApiInfo -> JSON.Value
 openApiInfoValue OpenApiInfo { openApiTitle, openApiVersion, openApiDescription } = JSON.object
