@@ -16,6 +16,7 @@ import Text.Blaze.Html (Html)
 import qualified IHP.Controller.Context as Context
 import IHP.Controller.Layout
 import IHP.FlashMessages (consumeFlashMessagesMiddleware)
+import IHP.RouterSupport (validateOpenApiRenderedView)
 
 renderPlain :: (?request :: Request) => LByteString -> IO ()
 renderPlain text = respondAndExitWithHeaders $ responseLBS status200 [(hContentType, "text/plain")] text
@@ -115,7 +116,16 @@ polymorphicRender = PolymorphicRender Nothing Nothing
 
 
 {-# INLINE render #-}
-render :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ()
+render
+    :: forall view.
+        ( ViewSupport.View view
+        , Typeable view
+        , ?context :: ControllerContext
+        , ?request :: Request
+        , ?respond :: Respond
+        )
+    => view
+    -> IO ()
 render !view = do
     let !currentRequest = ?request
     renderPolymorphic PolymorphicRender
@@ -125,6 +135,7 @@ render !view = do
                             error "unreachable"
                     _ <- consumeFlashMessagesMiddleware next currentRequest ?respond
                     pure ()
-            , json = Just $ renderJson (ViewSupport.json view)
+            , json = Just do
+                    validateOpenApiRenderedView view
+                    renderJson (ViewSupport.json view)
             }
-

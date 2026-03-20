@@ -1,8 +1,19 @@
-{-# LANGUAGE AllowAmbiguousTypes, UndecidableInstances, LambdaCase, ScopedTypeVariables #-}
+{-# LANGUAGE AllowAmbiguousTypes, UndecidableInstances, LambdaCase, ScopedTypeVariables, GADTs #-}
 module IHP.RouterSupport (
 CanRoute (..)
 , HasPath (..)
 , AutoRoute (..)
+, RouteDefinition (..)
+, RouteDocumentation (..)
+, DocumentedRouteInfo (..)
+, OpenApiController (..)
+, documentRoute
+, ActionDoc (..)
+, actionDoc
+, setOpenApiSummary
+, setOpenApiDescription
+, setOpenApiTags
+, setOpenApiOperationId
 , runAction
 , get
 , post
@@ -17,6 +28,7 @@ CanRoute (..)
 , createAction
 , updateAction
 , urlTo
+, actionPrefixText
 , parseUUID
 , parseId
 , parseIntegerId
@@ -29,7 +41,10 @@ CanRoute (..)
 , getMethod
 , routeParam
 , withImplicits
+, rawRoute
+, validateOpenApiRenderedView
 , applyConstr
+, stripActionSuffixText
 ) where
 
 import Prelude hiding (take)
@@ -79,6 +94,10 @@ import IHP.Controller.Param
 import Data.Kind
 import qualified Data.TMap as TypeMap
 import IHP.Controller.Response (ResponseException(..))
+import Data.OpenApi (ToSchema)
+import qualified IHP.ViewSupport as ViewSupport
+import qualified Data.Vault.Lazy as Vault
+import System.IO.Unsafe (unsafePerformIO)
 
 -- | Binds @?request@ and @?respond@ from WAI arguments, then runs the given action.
 --
@@ -114,25 +133,182 @@ runAction' controller waiRequest waiRespond = do
             runAction controller
 {-# INLINE runAction' #-}
 
+data ActionDoc controller where
+    ActionDoc ::
+        forall controller view.
+        ( ViewSupport.View view
+        , Typeable.Typeable view
+        , ToSchema (ViewSupport.JsonResponse view)
+        )
+        => { actionDocName :: Text
+           , actionDocSummary :: Maybe Text
+           , actionDocDescription :: Maybe Text
+           , actionDocTags :: [Text]
+           , actionDocOperationId :: Maybe Text
+           , actionDocView :: Proxy view
+           } -> ActionDoc controller
+
+actionDoc :: forall view controller.
+    ( ViewSupport.View view
+    , Typeable.Typeable view
+    , ToSchema (ViewSupport.JsonResponse view)
+    )
+    => Text -> ActionDoc controller
+actionDoc actionName = ActionDoc
+    { actionDocName = actionName
+    , actionDocSummary = Nothing
+    , actionDocDescription = Nothing
+    , actionDocTags = []
+    , actionDocOperationId = Nothing
+    , actionDocView = Proxy @view
+    }
+{-# INLINE actionDoc #-}
+
+setOpenApiSummary :: Text -> ActionDoc controller -> ActionDoc controller
+setOpenApiSummary summary ActionDoc { actionDocName, actionDocDescription, actionDocTags, actionDocOperationId, actionDocView } = ActionDoc
+    { actionDocName
+    , actionDocSummary = Just summary
+    , actionDocDescription
+    , actionDocTags
+    , actionDocOperationId
+    , actionDocView
+    }
+{-# INLINE setOpenApiSummary #-}
+
+setOpenApiDescription :: Text -> ActionDoc controller -> ActionDoc controller
+setOpenApiDescription description ActionDoc { actionDocName, actionDocSummary, actionDocTags, actionDocOperationId, actionDocView } = ActionDoc
+    { actionDocName
+    , actionDocSummary
+    , actionDocDescription = Just description
+    , actionDocTags
+    , actionDocOperationId
+    , actionDocView
+    }
+{-# INLINE setOpenApiDescription #-}
+
+setOpenApiTags :: [Text] -> ActionDoc controller -> ActionDoc controller
+setOpenApiTags tags ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocOperationId, actionDocView } = ActionDoc
+    { actionDocName
+    , actionDocSummary
+    , actionDocDescription
+    , actionDocTags = tags
+    , actionDocOperationId
+    , actionDocView
+    }
+{-# INLINE setOpenApiTags #-}
+
+setOpenApiOperationId :: Text -> ActionDoc controller -> ActionDoc controller
+setOpenApiOperationId operationId ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocTags, actionDocView } = ActionDoc
+    { actionDocName
+    , actionDocSummary
+    , actionDocDescription
+    , actionDocTags
+    , actionDocOperationId = Just operationId
+    , actionDocView
+    }
+{-# INLINE setOpenApiOperationId #-}
+
+class AutoRoute controller => OpenApiController controller where
+    openApiActions :: [ActionDoc controller]
+
+data DocumentedRouteInfo where
+    AutoRouteControllerInfo ::
+        forall controller.
+        ( AutoRoute controller
+        , Data controller
+        , Typeable.Typeable controller
+        )
+        => { documentedActions :: Maybe [ActionDoc controller]
+           } -> DocumentedRouteInfo
+
+data RouteDocumentation
+    = UndocumentedRoute
+    | DocumentedRoute !DocumentedRouteInfo
+
+data RouteDefinition
+    = RouteLeaf
+        { routeParser :: Parser Application
+        , routeDocumentation :: RouteDocumentation
+        }
+    | RouteCollection [RouteDefinition]
+    | RoutePrefix ByteString [RouteDefinition]
+
+rawRoute :: Parser Application -> RouteDefinition
+rawRoute parser = RouteLeaf { routeParser = parser, routeDocumentation = UndocumentedRoute }
+{-# INLINE rawRoute #-}
+
+compileRouteDefinition :: RouteDefinition -> Parser Application
+compileRouteDefinition RouteLeaf { routeParser } = routeParser
+compileRouteDefinition (RouteCollection routes) = choice (map (\route -> compileRouteDefinition route <* endOfInput) routes)
+compileRouteDefinition (RoutePrefix prefix routes) = string prefix *> compileRouteDefinition (RouteCollection routes)
+{-# INLINE compileRouteDefinition #-}
+
 class FrontController application where
     controllers
         :: (?application :: application, ?request :: Request, ?respond :: Respond)
-        => [Parser Application]
+        => [RouteDefinition]
 
     router
         :: (?application :: application, ?request :: Request, ?respond :: Respond)
-        => [Parser Application] -> Parser Application
+        => [RouteDefinition] -> RouteDefinition
     router = defaultRouter
     {-# INLINABLE router #-}
 
 defaultRouter
     :: (?application :: application, ?request :: Request, ?respond :: Respond, FrontController application)
-    => [Parser Application] -> Parser Application
-defaultRouter additionalControllers = do
+    => [RouteDefinition] -> RouteDefinition
+defaultRouter additionalControllers =
     let allControllers = controllers <> additionalControllers
-    applications <- choice $ map (\r -> r <* endOfInput) allControllers
-    pure applications
+    in RouteCollection allControllers
 {-# INLINABLE defaultRouter #-}
+
+openApiExpectedViewTypeKey :: Vault.Key Text
+openApiExpectedViewTypeKey = unsafePerformIO Vault.newKey
+{-# NOINLINE openApiExpectedViewTypeKey #-}
+
+validateOpenApiRenderedView
+    :: forall view.
+        ( Typeable.Typeable view
+        , ?request :: Request
+        )
+    => view
+    -> IO ()
+validateOpenApiRenderedView _ =
+    case Vault.lookup openApiExpectedViewTypeKey ?request.vault of
+        Nothing -> pure ()
+        Just expectedViewTypeName ->
+            let renderedViewTypeName = cs (show (Typeable.typeRep (Proxy @view)))
+            in unless (renderedViewTypeName == expectedViewTypeName)
+                (error ("OpenAPI docs expect view " <> cs expectedViewTypeName <> ", but render produced " <> cs renderedViewTypeName))
+{-# INLINE validateOpenApiRenderedView #-}
+
+expectedViewTypeNameForAction :: forall controller. Data controller => RouteDocumentation -> controller -> Maybe Text
+expectedViewTypeNameForAction UndocumentedRoute _ = Nothing
+expectedViewTypeNameForAction (DocumentedRoute (AutoRouteControllerInfo { documentedActions = Nothing })) _ = Nothing
+expectedViewTypeNameForAction (DocumentedRoute (AutoRouteControllerInfo { documentedActions = Just docs })) action =
+    docs
+        |> find (\ActionDoc { actionDocName } -> actionDocName == cs (showConstr (toConstr action)))
+        |> fmap (\ActionDoc { actionDocView } -> cs (show (Typeable.typeRep actionDocView)))
+
+runActionWithRouteDocumentation
+    :: forall application controller.
+        ( Controller controller
+        , InitControllerContext application
+        , ?application :: application
+        , Typeable application
+        , Typeable controller
+        , Data controller
+        )
+    => RouteDocumentation
+    -> controller
+    -> Application
+runActionWithRouteDocumentation routeDocumentation action waiRequest waiRespond =
+    let expectedViewTypeName = expectedViewTypeNameForAction routeDocumentation action
+        waiRequest' = case expectedViewTypeName of
+            Just expected -> waiRequest { vault = Vault.insert openApiExpectedViewTypeKey expected waiRequest.vault }
+            Nothing -> waiRequest
+    in runAction' @application action waiRequest' waiRespond
+{-# INLINE runActionWithRouteDocumentation #-}
 
 -- | Returns the url to a given action.
 --
@@ -711,8 +887,8 @@ get :: (Controller action
     , ?application :: application
     , Typeable application
     , Typeable action
-    ) => ByteString -> action -> Parser Application
-get path action = do
+    ) => ByteString -> action -> RouteDefinition
+get path action = rawRoute do
     string path
     pure $ \waiRequest waiRespond ->
         case parseMethod (requestMethod waiRequest) of
@@ -739,8 +915,8 @@ post :: (Controller action
     , ?application :: application
     , Typeable application
     , Typeable action
-    ) => ByteString -> action -> Parser Application
-post path action = do
+    ) => ByteString -> action -> RouteDefinition
+post path action = rawRoute do
     string path
     pure $ \waiRequest waiRespond ->
         case parseMethod (requestMethod waiRequest) of
@@ -797,7 +973,7 @@ webSocketApp :: forall webSocketApp application.
     , ?application :: application
     , Typeable application
     , Typeable webSocketApp
-    ) => Parser Application
+    ) => RouteDefinition
 webSocketApp = webSocketAppWithCustomPath @webSocketApp typeName
     where
         typeName :: ByteString
@@ -813,7 +989,7 @@ webSocketAppWithHTTPFallback :: forall webSocketApp application.
     , Typeable application
     , Typeable webSocketApp
     , Controller webSocketApp
-    ) => Parser Application
+    ) => RouteDefinition
 webSocketAppWithHTTPFallback = webSocketAppWithCustomPathAndHTTPFallback @webSocketApp @application typeName
     where
         typeName :: ByteString
@@ -839,8 +1015,8 @@ webSocketAppWithCustomPath :: forall webSocketApp application.
     , ?application :: application
     , Typeable application
     , Typeable webSocketApp
-    ) => ByteString -> Parser Application
-webSocketAppWithCustomPath path = do
+    ) => ByteString -> RouteDefinition
+webSocketAppWithCustomPath path = rawRoute do
         Attoparsec.char '/'
         string path
         pure $ withImplicits (startWebSocketAppAndFailOnHTTP @webSocketApp @application (WS.initialState @webSocketApp))
@@ -853,8 +1029,8 @@ webSocketAppWithCustomPathAndHTTPFallback :: forall webSocketApp application.
     , Typeable application
     , Typeable webSocketApp
     , Controller webSocketApp
-    ) => ByteString -> Parser Application
-webSocketAppWithCustomPathAndHTTPFallback path = do
+    ) => ByteString -> RouteDefinition
+webSocketAppWithCustomPathAndHTTPFallback path = rawRoute do
         Attoparsec.char '/'
         string path
         let action = WS.initialState @webSocketApp
@@ -863,11 +1039,12 @@ webSocketAppWithCustomPathAndHTTPFallback path = do
 
 
 -- | Defines the start page for a router (when @\/@ is requested).
-startPage :: forall action application. (Controller action, InitControllerContext application, ?application::application, Typeable application, Typeable action) => action -> Parser Application
+startPage :: forall action application. (Controller action, InitControllerContext application, ?application::application, Typeable application, Typeable action) => action -> RouteDefinition
 startPage action = get (Text.encodeUtf8 (actionPrefixText @action)) action
 {-# INLINABLE startPage #-}
 
-withPrefix prefix routes = string prefix >> choice (map (\r -> r <* endOfInput) routes)
+withPrefix :: ByteString -> [RouteDefinition] -> RouteDefinition
+withPrefix = RoutePrefix
 {-# INLINABLE withPrefix #-}
 
 frontControllerToWAIApp :: forall app (autoRefreshApp :: Type). (FrontController app, WSApp autoRefreshApp, Typeable autoRefreshApp, InitControllerContext ()) => Middleware -> app -> Application -> Application
@@ -889,7 +1066,7 @@ frontControllerToWAIApp middleware application notFoundAction waiRequest waiResp
 
     routedAction :: Either String Application <-
         (do
-            res <- evaluate $ parseOnly (routes <* endOfInput) path
+            res <- evaluate $ parseOnly (compileRouteDefinition routes <* endOfInput) path
             case res of
                 Left s -> pure $ Left s
                 Right action -> do
@@ -901,22 +1078,61 @@ frontControllerToWAIApp middleware application notFoundAction waiRequest waiResp
         Right action -> (middleware action) waiRequest waiRespond
 {-# INLINABLE frontControllerToWAIApp #-}
 
-mountFrontController :: forall frontController. (?request :: Request, ?respond :: Respond, FrontController frontController) => frontController -> Parser Application
+mountFrontController :: forall frontController. (?request :: Request, ?respond :: Respond, FrontController frontController) => frontController -> RouteDefinition
 mountFrontController application = let ?application = application in router []
 {-# INLINABLE mountFrontController #-}
+
+buildAutoRouteDefinition :: forall controller application.
+    ( ?request :: Request
+    , ?respond :: Respond
+    , CanRoute controller
+    , Controller controller
+    , Data controller
+    , InitControllerContext application
+    , ?application :: application
+    , Typeable application
+    , Typeable controller
+    ) => RouteDocumentation -> RouteDefinition
+buildAutoRouteDefinition routeDocumentation = RouteLeaf
+    { routeParser = parseRouteWithAction @controller (runActionWithRouteDocumentation @application routeDocumentation)
+    , routeDocumentation
+    }
+{-# INLINABLE buildAutoRouteDefinition #-}
 
 parseRoute :: forall controller application.
     ( ?request :: Request
     , ?respond :: Respond
     , CanRoute controller
     , Controller controller
+    , Data controller
     , InitControllerContext application
     , ?application :: application
     , Typeable application
     , Typeable controller
-    ) => Parser Application
-parseRoute = parseRouteWithAction @controller (runAction' @application)
+    ) => RouteDefinition
+parseRoute = buildAutoRouteDefinition @controller @application UndocumentedRoute
 {-# INLINABLE parseRoute #-}
+
+documentRoute :: forall controller application.
+    ( ?request :: Request
+    , ?respond :: Respond
+    , CanRoute controller
+    , Controller controller
+    , AutoRoute controller
+    , OpenApiController controller
+    , Data controller
+    , InitControllerContext application
+    , ?application :: application
+    , Typeable application
+    , Typeable controller
+    ) => RouteDefinition
+documentRoute =
+    buildAutoRouteDefinition @controller @application
+        (DocumentedRoute
+            (AutoRouteControllerInfo
+                { documentedActions = Just (openApiActions @controller)
+                }))
+{-# INLINABLE documentRoute #-}
 
 parseUUIDOrTextId ::  ByteString -> Maybe Dynamic
 parseUUIDOrTextId queryVal = queryVal
@@ -932,15 +1148,16 @@ parseRouteWithId
             ?respond :: Respond,
             CanRoute controller,
             Controller controller,
+            Data controller,
             InitControllerContext application,
             ?application :: application,
             Typeable application,
             Typeable controller)
-        => Parser Application
+        => RouteDefinition
 parseRouteWithId = parseRoute @controller @application
 
-catchAll :: forall action application. (Controller action, InitControllerContext application, Typeable action, ?application :: application, Typeable application, Data action) => action -> Parser Application
-catchAll action = do
+catchAll :: forall action application. (Controller action, InitControllerContext application, Typeable action, ?application :: application, Typeable application, Data action) => action -> RouteDefinition
+catchAll action = rawRoute do
     string (Text.encodeUtf8 (actionPrefixText @action))
     _ <- takeByteString
     pure (runAction' @application action)

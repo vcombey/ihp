@@ -21,6 +21,7 @@ module IHP.ViewPrelude (
     module IHP.ViewSupport,
     module IHP.ModelSupport,
     module IHP.FrameworkConfig,
+    module IHP.OpenApiSupport,
     (!),
     module Data.Data,
     module Data.Aeson,
@@ -51,6 +52,7 @@ import IHP.ValidationSupport
 import IHP.RouterSupport
 import IHP.ModelSupport
 import IHP.FrameworkConfig
+import IHP.OpenApiSupport
 import Data.Data
 import Data.Aeson (ToJSON (..), FromJSON (..), KeyValue (..))
 import IHP.AutoRefresh.View
