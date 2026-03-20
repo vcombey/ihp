@@ -81,6 +81,7 @@ import Data.String.Conversions (ConvertibleStrings (convertString), cs)
 import qualified Text.Blaze.Html5 as Html5
 import qualified IHP.ErrorController as ErrorController
 import qualified Control.Exception as Exception
+import qualified Data.Aeson as JSON
 import qualified Network.URI.Encode as URI
 import qualified Data.Text.Encoding as Text
 import Data.Dynamic
@@ -98,6 +99,7 @@ import Data.OpenApi (ToSchema)
 import qualified IHP.ViewSupport as ViewSupport
 import qualified Data.Vault.Lazy as Vault
 import System.IO.Unsafe (unsafePerformIO)
+import Network.HTTP.Types.Status (status500)
 
 -- | Binds @?request@ and @?respond@ from WAI arguments, then runs the given action.
 --
@@ -138,6 +140,7 @@ data ActionDoc controller where
         forall controller view.
         ( ViewSupport.View view
         , Typeable.Typeable view
+        , JSON.ToJSON (ViewSupport.JsonResponse view)
         , ToSchema (ViewSupport.JsonResponse view)
         )
         => { actionDocName :: Text
@@ -146,11 +149,13 @@ data ActionDoc controller where
            , actionDocTags :: [Text]
            , actionDocOperationId :: Maybe Text
            , actionDocView :: Proxy view
+           , actionDocTypedJson :: view -> JSON.Value
            } -> ActionDoc controller
 
 actionDoc :: forall view controller.
     ( ViewSupport.View view
     , Typeable.Typeable view
+    , JSON.ToJSON (ViewSupport.JsonResponse view)
     , ToSchema (ViewSupport.JsonResponse view)
     )
     => Text -> ActionDoc controller
@@ -161,50 +166,55 @@ actionDoc actionName = ActionDoc
     , actionDocTags = []
     , actionDocOperationId = Nothing
     , actionDocView = Proxy @view
+    , actionDocTypedJson = JSON.toJSON . ViewSupport.jsonTyped
     }
 {-# INLINE actionDoc #-}
 
 setOpenApiSummary :: Text -> ActionDoc controller -> ActionDoc controller
-setOpenApiSummary summary ActionDoc { actionDocName, actionDocDescription, actionDocTags, actionDocOperationId, actionDocView } = ActionDoc
+setOpenApiSummary summary ActionDoc { actionDocName, actionDocDescription, actionDocTags, actionDocOperationId, actionDocView, actionDocTypedJson } = ActionDoc
     { actionDocName
     , actionDocSummary = Just summary
     , actionDocDescription
     , actionDocTags
     , actionDocOperationId
     , actionDocView
+    , actionDocTypedJson
     }
 {-# INLINE setOpenApiSummary #-}
 
 setOpenApiDescription :: Text -> ActionDoc controller -> ActionDoc controller
-setOpenApiDescription description ActionDoc { actionDocName, actionDocSummary, actionDocTags, actionDocOperationId, actionDocView } = ActionDoc
+setOpenApiDescription description ActionDoc { actionDocName, actionDocSummary, actionDocTags, actionDocOperationId, actionDocView, actionDocTypedJson } = ActionDoc
     { actionDocName
     , actionDocSummary
     , actionDocDescription = Just description
     , actionDocTags
     , actionDocOperationId
     , actionDocView
+    , actionDocTypedJson
     }
 {-# INLINE setOpenApiDescription #-}
 
 setOpenApiTags :: [Text] -> ActionDoc controller -> ActionDoc controller
-setOpenApiTags tags ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocOperationId, actionDocView } = ActionDoc
+setOpenApiTags tags ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocOperationId, actionDocView, actionDocTypedJson } = ActionDoc
     { actionDocName
     , actionDocSummary
     , actionDocDescription
     , actionDocTags = tags
     , actionDocOperationId
     , actionDocView
+    , actionDocTypedJson
     }
 {-# INLINE setOpenApiTags #-}
 
 setOpenApiOperationId :: Text -> ActionDoc controller -> ActionDoc controller
-setOpenApiOperationId operationId ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocTags, actionDocView } = ActionDoc
+setOpenApiOperationId operationId ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocTags, actionDocView, actionDocTypedJson } = ActionDoc
     { actionDocName
     , actionDocSummary
     , actionDocDescription
     , actionDocTags
     , actionDocOperationId = Just operationId
     , actionDocView
+    , actionDocTypedJson
     }
 {-# INLINE setOpenApiOperationId #-}
 
@@ -262,9 +272,20 @@ defaultRouter additionalControllers =
     in RouteCollection allControllers
 {-# INLINABLE defaultRouter #-}
 
-openApiExpectedViewTypeKey :: Vault.Key Text
-openApiExpectedViewTypeKey = unsafePerformIO Vault.newKey
-{-# NOINLINE openApiExpectedViewTypeKey #-}
+data DocumentedRenderExpectation = DocumentedRenderExpectation
+    { expectedViewTypeName :: Text
+    , expectedTypedJson :: Dynamic -> Maybe JSON.Value
+    }
+
+openApiRenderExpectationKey :: Vault.Key DocumentedRenderExpectation
+openApiRenderExpectationKey = unsafePerformIO Vault.newKey
+{-# NOINLINE openApiRenderExpectationKey #-}
+
+throwOpenApiRenderMismatch :: Text -> IO a
+throwOpenApiRenderMismatch message =
+    Exception.throwIO
+        (ResponseException (responseLBS status500 [(hContentType, "text/plain")] (cs message)))
+{-# INLINE throwOpenApiRenderMismatch #-}
 
 validateOpenApiRenderedView
     :: forall view.
@@ -272,23 +293,33 @@ validateOpenApiRenderedView
         , ?request :: Request
         )
     => view
+    -> JSON.Value
     -> IO ()
-validateOpenApiRenderedView _ =
-    case Vault.lookup openApiExpectedViewTypeKey ?request.vault of
+validateOpenApiRenderedView view actualJson =
+    case Vault.lookup openApiRenderExpectationKey ?request.vault of
         Nothing -> pure ()
-        Just expectedViewTypeName ->
+        Just DocumentedRenderExpectation { expectedViewTypeName, expectedTypedJson } ->
             let renderedViewTypeName = cs (show (Typeable.typeRep (Proxy @view)))
             in unless (renderedViewTypeName == expectedViewTypeName)
-                (error ("OpenAPI docs expect view " <> cs expectedViewTypeName <> ", but render produced " <> cs renderedViewTypeName))
+                (throwOpenApiRenderMismatch ("OpenAPI docs expect view " <> cs expectedViewTypeName <> ", but render produced " <> cs renderedViewTypeName))
+            >> case expectedTypedJson (toDyn view) of
+                Nothing ->
+                    throwOpenApiRenderMismatch ("OpenAPI docs could not validate the typed JSON for view " <> cs expectedViewTypeName)
+                Just expectedJson ->
+                    unless (actualJson == expectedJson)
+                        (throwOpenApiRenderMismatch ("OpenAPI docs expect the JSON generated from jsonTyped of view " <> cs expectedViewTypeName <> ", but render produced a different JSON value"))
 {-# INLINE validateOpenApiRenderedView #-}
 
-expectedViewTypeNameForAction :: forall controller. Data controller => RouteDocumentation -> controller -> Maybe Text
-expectedViewTypeNameForAction UndocumentedRoute _ = Nothing
-expectedViewTypeNameForAction (DocumentedRoute (AutoRouteControllerInfo { documentedActions = Nothing })) _ = Nothing
-expectedViewTypeNameForAction (DocumentedRoute (AutoRouteControllerInfo { documentedActions = Just docs })) action =
+documentedRenderExpectationForAction :: forall controller. Data controller => RouteDocumentation -> controller -> Maybe DocumentedRenderExpectation
+documentedRenderExpectationForAction UndocumentedRoute _ = Nothing
+documentedRenderExpectationForAction (DocumentedRoute (AutoRouteControllerInfo { documentedActions = Nothing })) _ = Nothing
+documentedRenderExpectationForAction (DocumentedRoute (AutoRouteControllerInfo { documentedActions = Just docs })) action =
     docs
         |> find (\ActionDoc { actionDocName } -> actionDocName == cs (showConstr (toConstr action)))
-        |> fmap (\ActionDoc { actionDocView } -> cs (show (Typeable.typeRep actionDocView)))
+        |> fmap (\ActionDoc { actionDocView, actionDocTypedJson } -> DocumentedRenderExpectation
+            { expectedViewTypeName = cs (show (Typeable.typeRep actionDocView))
+            , expectedTypedJson = fmap actionDocTypedJson . fromDynamic
+            })
 
 runActionWithRouteDocumentation
     :: forall application controller.
@@ -303,9 +334,9 @@ runActionWithRouteDocumentation
     -> controller
     -> Application
 runActionWithRouteDocumentation routeDocumentation action waiRequest waiRespond =
-    let expectedViewTypeName = expectedViewTypeNameForAction routeDocumentation action
-        waiRequest' = case expectedViewTypeName of
-            Just expected -> waiRequest { vault = Vault.insert openApiExpectedViewTypeKey expected waiRequest.vault }
+    let renderExpectation = documentedRenderExpectationForAction routeDocumentation action
+        waiRequest' = case renderExpectation of
+            Just expected -> waiRequest { vault = Vault.insert openApiRenderExpectationKey expected waiRequest.vault }
             Nothing -> waiRequest
     in runAction' @application action waiRequest' waiRespond
 {-# INLINE runActionWithRouteDocumentation #-}

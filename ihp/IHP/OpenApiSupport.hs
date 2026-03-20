@@ -2,7 +2,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_HADDOCK not-home #-}
 
@@ -13,6 +12,7 @@ module IHP.OpenApiSupport
     , toSchema
     , genericDeclareNamedSchema
     , defaultSchemaOptions
+    , OpenApiGenerationException (..)
     , OpenApiInfo (..)
     , defaultOpenApiInfo
     , buildOpenApi
@@ -23,7 +23,8 @@ import IHP.Prelude
 import IHP.RouterSupport
 import IHP.ViewSupport (JsonResponse)
 import IHP.ModelSupport
-import Data.OpenApi (ToSchema (..), NamedSchema (..), Schema, declareNamedSchema, toSchema, genericDeclareNamedSchema, defaultSchemaOptions)
+import Data.OpenApi (ToSchema (..), NamedSchema (..), Schema, Definitions, Referenced, declareNamedSchema, declareSchemaRef, toSchema, genericDeclareNamedSchema, defaultSchemaOptions)
+import Data.OpenApi.Declare (runDeclare)
 import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Key as JSON.Key
 import qualified Data.Aeson.KeyMap as JSON.KeyMap
@@ -35,7 +36,9 @@ import Data.UUID (nil)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Data
+import Data.Semigroup (Semigroup (..))
 import Network.HTTP.Types.Method (StdMethod (..))
+import qualified Control.Exception as Exception
 
 data OpenApiInfo = OpenApiInfo
     { openApiTitle :: Text
@@ -43,6 +46,28 @@ data OpenApiInfo = OpenApiInfo
     , openApiDescription :: Maybe Text
     }
     deriving (Eq, Show)
+
+data OpenApiGenerationException = OpenApiGenerationException Text
+    deriving (Eq, Show, Typeable.Typeable)
+
+instance Exception.Exception OpenApiGenerationException
+
+data OpenApiDocument = OpenApiDocument
+    { pathOperations :: PathOperations
+    , componentSchemas :: Definitions Schema
+    }
+
+instance Semigroup OpenApiDocument where
+    left <> right = OpenApiDocument
+        { pathOperations = Map.unionWith Map.union left.pathOperations right.pathOperations
+        , componentSchemas = left.componentSchemas <> right.componentSchemas
+        }
+
+instance Monoid OpenApiDocument where
+    mempty = OpenApiDocument
+        { pathOperations = mempty
+        , componentSchemas = mempty
+        }
 
 defaultOpenApiInfo :: forall application. Typeable.Typeable application => OpenApiInfo
 defaultOpenApiInfo = OpenApiInfo
@@ -61,13 +86,23 @@ buildOpenApiWithInfo info application =
         ?application = application
     in
         let routes = router []
-        in JSON.object
-            [ "openapi" JSON..= ("3.0.3" :: Text)
-            , "info" JSON..= openApiInfoValue info
-            , "paths" JSON..= openApiPathsValue (collectPaths "" routes)
-            ]
+        in case collectPaths "" routes of
+            Left errorMessage -> throwOpenApiGenerationException errorMessage
+            Right OpenApiDocument { pathOperations, componentSchemas } ->
+                JSON.object
+                    ( [ Just ("openapi" JSON..= ("3.0.3" :: Text))
+                      , Just ("info" JSON..= openApiInfoValue info)
+                      , Just ("paths" JSON..= openApiPathsValue pathOperations)
+                      , if componentSchemas == mempty then Nothing else Just ("components" JSON..= openApiComponentsValue componentSchemas)
+                      ]
+                        |> catMaybes
+                    )
     where
         dummyRespond _ = error "buildOpenApi: response callback should never be called"
+
+throwOpenApiGenerationException :: Text -> a
+throwOpenApiGenerationException = Exception.throw . OpenApiGenerationException
+{-# INLINE throwOpenApiGenerationException #-}
 
 openApiInfoValue :: OpenApiInfo -> JSON.Value
 openApiInfoValue OpenApiInfo { openApiTitle, openApiVersion, openApiDescription } = JSON.object
@@ -80,19 +115,19 @@ openApiInfoValue OpenApiInfo { openApiTitle, openApiVersion, openApiDescription 
 
 type PathOperations = Map.Map Text (Map.Map Text JSON.Value)
 
-collectPaths :: Text -> RouteDefinition -> PathOperations
+collectPaths :: Text -> RouteDefinition -> Either Text OpenApiDocument
 collectPaths currentPrefix = \case
-    RouteLeaf { routeDocumentation = UndocumentedRoute } -> mempty
+    RouteLeaf { routeDocumentation = UndocumentedRoute } -> Right mempty
     RouteLeaf { routeDocumentation = DocumentedRoute documentedRoute } -> collectDocumentedRoute currentPrefix documentedRoute
-    RouteCollection routes -> routes |> map (collectPaths currentPrefix) |> mconcat
+    RouteCollection routes -> mconcat <$> mapM (collectPaths currentPrefix) routes
     RoutePrefix routePrefix routes ->
         let prefixedPath = appendPathPrefix currentPrefix (Text.decodeUtf8 routePrefix)
-        in routes |> map (collectPaths prefixedPath) |> mconcat
+        in mconcat <$> mapM (collectPaths prefixedPath) routes
 
-collectDocumentedRoute :: Text -> DocumentedRouteInfo -> PathOperations
-collectDocumentedRoute currentPrefix (AutoRouteControllerInfo { documentedActions = Nothing }) = mempty
+collectDocumentedRoute :: Text -> DocumentedRouteInfo -> Either Text OpenApiDocument
+collectDocumentedRoute currentPrefix (AutoRouteControllerInfo { documentedActions = Nothing }) = Right mempty
 collectDocumentedRoute currentPrefix (AutoRouteControllerInfo { documentedActions = Just docs }) =
-    foldl' (insertActionOperation currentPrefix) mempty docs
+    foldl' (insertActionOperation currentPrefix) (Right mempty) docs
 
 insertActionOperation
     :: forall controller.
@@ -101,22 +136,32 @@ insertActionOperation
         , Typeable.Typeable controller
         )
     => Text
-    -> PathOperations
+    -> Either Text OpenApiDocument
     -> ActionDoc controller
-    -> PathOperations
-insertActionOperation currentPrefix paths doc@ActionDoc { actionDocName } =
-    let constructor = findControllerConstructor @controller actionDocName
-        actionPath = appendPathPrefix currentPrefix (actionPrefixText @controller <> stripActionSuffixText actionDocName)
-        parameters = deriveActionParameters @controller constructor
-        operation = actionDocOperationValue doc parameters
-        methods = allowedMethodsForAction @controller (Text.encodeUtf8 actionDocName)
-    in foldl' (insertMethod actionPath operation) paths methods
+    -> Either Text OpenApiDocument
+insertActionOperation currentPrefix pathState doc@ActionDoc { actionDocName } = do
+    OpenApiDocument { pathOperations, componentSchemas } <- pathState
+    constructor <- findControllerConstructor @controller actionDocName
+    hasCustomPath <- actionUsesCustomPath @controller constructor
+    if hasCustomPath
+        then pure OpenApiDocument { pathOperations, componentSchemas }
+        else do
+            let actionPath = appendPathPrefix currentPrefix (actionPrefixText @controller <> stripActionSuffixText actionDocName)
+            parameters <- deriveActionParameters @controller constructor
+            let (operation, operationSchemas) = actionDocOperationValue doc parameters
+            let methods = allowedMethodsForAction @controller (Text.encodeUtf8 actionDocName)
+            pure OpenApiDocument
+                { pathOperations = foldl' (insertMethod actionPath operation) pathOperations methods
+                , componentSchemas = componentSchemas <> operationSchemas
+                }
 
-findControllerConstructor :: forall controller. Data controller => Text -> Constr
+findControllerConstructor :: forall controller. Data controller => Text -> Either Text Constr
 findControllerConstructor actionName =
     dataTypeConstrs (dataTypeOf (undefined :: controller))
         |> find (\constructor -> cs (showConstr constructor) == actionName)
-        |> fromMaybe (error ("OpenAPI docs reference unknown action " <> cs actionName))
+        |> \case
+            Just constructor -> Right constructor
+            Nothing -> Left ("OpenAPI docs reference unknown action " <> actionName)
 
 insertMethod :: Text -> JSON.Value -> PathOperations -> StdMethod -> PathOperations
 insertMethod actionPath operation paths method = Map.alter updatePath actionPath paths
@@ -169,23 +214,34 @@ openApiPathsValue paths =
         |> JSON.KeyMap.fromList
         |> JSON.Object
 
-actionDocOperationValue :: forall controller. ActionDoc controller -> [QueryParameterDocumentation] -> JSON.Value
-actionDocOperationValue ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocTags, actionDocOperationId, actionDocView } parameters = JSON.object
-    ( [ Just ("parameters" JSON..= map queryParameterValue parameters)
-      , Just ("responses" JSON..= JSON.object ["200" JSON..= successResponseValue (responseSchemaValue actionDocView)])
-      , ("summary" JSON..=) <$> actionDocSummary
-      , ("description" JSON..=) <$> actionDocDescription
-      , if null actionDocTags then Nothing else Just ("tags" JSON..= actionDocTags)
-      , ("operationId" JSON..=) <$> actionDocOperationId
-      , Just ("x-ihp-action" JSON..= actionDocName)
-      ]
-        |> catMaybes
-    )
+openApiComponentsValue :: Definitions Schema -> JSON.Value
+openApiComponentsValue schemas = JSON.object
+    [ "schemas" JSON..= schemas
+    ]
 
-responseSchemaValue :: forall view. ToSchema (JsonResponse view) => Proxy view -> JSON.Value
-responseSchemaValue _ = JSON.toJSON (toSchema (Proxy @(JsonResponse view)))
+actionDocOperationValue :: forall controller. ActionDoc controller -> [QueryParameterDocumentation] -> (JSON.Value, Definitions Schema)
+actionDocOperationValue ActionDoc { actionDocName, actionDocSummary, actionDocDescription, actionDocTags, actionDocOperationId, actionDocView } parameters =
+    let SchemaDocumentation { documentedSchema, documentedDefinitions } = responseSchemaValue actionDocView
+        parameterDefinitions = parameters |> map (\QueryParameterDocumentation { parameterDefinitions } -> parameterDefinitions) |> mconcat
+    in
+        ( JSON.object
+            ( [ Just ("parameters" JSON..= map queryParameterValue parameters)
+              , Just ("responses" JSON..= JSON.object ["200" JSON..= successResponseValue documentedSchema])
+              , ("summary" JSON..=) <$> actionDocSummary
+              , ("description" JSON..=) <$> actionDocDescription
+              , if null actionDocTags then Nothing else Just ("tags" JSON..= actionDocTags)
+              , ("operationId" JSON..=) <$> actionDocOperationId
+              , Just ("x-ihp-action" JSON..= actionDocName)
+              ]
+                |> catMaybes
+            )
+        , documentedDefinitions <> parameterDefinitions
+        )
 
-successResponseValue :: JSON.Value -> JSON.Value
+responseSchemaValue :: forall view. ToSchema (JsonResponse view) => Proxy view -> SchemaDocumentation
+responseSchemaValue _ = declareSchemaDocumentation (Proxy @(JsonResponse view))
+
+successResponseValue :: Referenced Schema -> JSON.Value
 successResponseValue schema = JSON.object
     [ "description" JSON..= ("Successful response" :: Text)
     , "content" JSON..= JSON.object
@@ -198,7 +254,8 @@ successResponseValue schema = JSON.object
 data QueryParameterDocumentation = QueryParameterDocumentation
     { parameterName :: Text
     , parameterRequired :: Bool
-    , parameterSchema :: JSON.Value
+    , parameterSchema :: Referenced Schema
+    , parameterDefinitions :: Definitions Schema
     , parameterExplode :: Maybe Bool
     }
 
@@ -213,6 +270,19 @@ queryParameterValue QueryParameterDocumentation { parameterName, parameterRequir
       ]
         |> catMaybes
     )
+
+data SchemaDocumentation = SchemaDocumentation
+    { documentedSchema :: Referenced Schema
+    , documentedDefinitions :: Definitions Schema
+    }
+
+declareSchemaDocumentation :: forall schema. ToSchema schema => Proxy schema -> SchemaDocumentation
+declareSchemaDocumentation proxy =
+    let (definitions, schema) = runDeclare (declareSchemaRef proxy) mempty
+    in SchemaDocumentation
+        { documentedSchema = schema
+        , documentedDefinitions = definitions
+        }
 
 queryParameterDocumentation :: forall field. Data field => Text -> Maybe QueryParameterDocumentation
 queryParameterDocumentation parameterName =
@@ -236,28 +306,37 @@ directParameterDocumentation parameterName =
         ]
 
 requiredParameter :: forall a. ToSchema a => Text -> QueryParameterDocumentation
-requiredParameter parameterName = QueryParameterDocumentation
-    { parameterName
-    , parameterRequired = True
-    , parameterSchema = JSON.toJSON (toSchema (Proxy @a))
-    , parameterExplode = Nothing
-    }
+requiredParameter parameterName =
+    let SchemaDocumentation { documentedSchema, documentedDefinitions } = declareSchemaDocumentation (Proxy @a)
+    in QueryParameterDocumentation
+        { parameterName
+        , parameterRequired = True
+        , parameterSchema = documentedSchema
+        , parameterDefinitions = documentedDefinitions
+        , parameterExplode = Nothing
+        }
 
 optionalParameter :: forall a. ToSchema a => Text -> QueryParameterDocumentation
-optionalParameter parameterName = QueryParameterDocumentation
-    { parameterName
-    , parameterRequired = False
-    , parameterSchema = JSON.toJSON (toSchema (Proxy @a))
-    , parameterExplode = Nothing
-    }
+optionalParameter parameterName =
+    let SchemaDocumentation { documentedSchema, documentedDefinitions } = declareSchemaDocumentation (Proxy @a)
+    in QueryParameterDocumentation
+        { parameterName
+        , parameterRequired = False
+        , parameterSchema = documentedSchema
+        , parameterDefinitions = documentedDefinitions
+        , parameterExplode = Nothing
+        }
 
 listParameter :: forall a. ToSchema [a] => Text -> QueryParameterDocumentation
-listParameter parameterName = QueryParameterDocumentation
-    { parameterName
-    , parameterRequired = False
-    , parameterSchema = JSON.toJSON (toSchema (Proxy @[a]))
-    , parameterExplode = Just False
-    }
+listParameter parameterName =
+    let SchemaDocumentation { documentedSchema, documentedDefinitions } = declareSchemaDocumentation (Proxy @[a])
+    in QueryParameterDocumentation
+        { parameterName
+        , parameterRequired = False
+        , parameterSchema = documentedSchema
+        , parameterDefinitions = documentedDefinitions
+        , parameterExplode = Just False
+        }
 
 wrappedIdParameterDocumentation :: forall field. Data field => Text -> Maybe QueryParameterDocumentation
 wrappedIdParameterDocumentation parameterName
@@ -328,7 +407,16 @@ deriveWrappedIdDummyValue constructor =
                 Left errorMessage -> State.lift (Left errorMessage)
     in fst <$> State.runStateT (fromConstrM nextField constructor :: State.StateT () (Either Text) field) ()
 
-deriveActionParameters :: forall controller. Data controller => Constr -> [QueryParameterDocumentation]
+buildDummyAction :: forall controller. Data controller => Constr -> Either Text controller
+buildDummyAction constructor =
+    let nextField :: forall field. Data field => State.StateT () (Either Text) field
+        nextField = State.lift (dummyValueForFieldType @field)
+    in fst <$> State.runStateT (fromConstrM nextField constructor :: State.StateT () (Either Text) controller) ()
+
+actionUsesCustomPath :: forall controller. (AutoRoute controller, Data controller) => Constr -> Either Text Bool
+actionUsesCustomPath constructor = isJust . customPathTo <$> buildDummyAction @controller constructor
+
+deriveActionParameters :: forall controller. Data controller => Constr -> Either Text [QueryParameterDocumentation]
 deriveActionParameters constr =
     let initialState = (map cs (constrFields constr), [])
         nextField :: forall field. Data field => State.StateT ([Text], [QueryParameterDocumentation]) (Either Text) field
@@ -353,10 +441,10 @@ deriveActionParameters constr =
     in case State.runStateT
             (fromConstrM nextField constr :: State.StateT ([Text], [QueryParameterDocumentation]) (Either Text) controller)
             initialState of
-        Left errorMessage -> error (cs errorMessage)
-        Right (_, ([], parameters)) -> parameters
+        Left errorMessage -> Left errorMessage
+        Right (_, ([], parameters)) -> Right parameters
         Right (_, (remainingFields, _)) ->
-            error (cs ("OpenAPI field derivation did not consume all fields for action " <> cs (showConstr constr) <> ": " <> cs (show remainingFields) :: Text))
+            Left ("OpenAPI field derivation did not consume all fields for action " <> cs (showConstr constr) <> ": " <> cs (show remainingFields) :: Text)
 
 instance {-# OVERLAPPABLE #-} (KnownSymbol table, ToSchema (PrimaryKey table)) => ToSchema (Id' table) where
     declareNamedSchema _ = declareNamedSchema (Proxy @(PrimaryKey table))

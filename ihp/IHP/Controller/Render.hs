@@ -136,6 +136,7 @@ render !view = do
                     _ <- consumeFlashMessagesMiddleware next currentRequest ?respond
                     pure ()
             , json = Just do
-                    validateOpenApiRenderedView view
-                    renderJson (ViewSupport.json view)
+                    let jsonValue = ViewSupport.json view
+                    validateOpenApiRenderedView view jsonValue
+                    renderJson jsonValue
             }
