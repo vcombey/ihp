@@ -107,6 +107,7 @@ common shared-properties
             , wai-cors
             , lens
             , random
+            , openapi3
             , hspec
             , cereal
             , cereal-text
@@ -227,6 +228,7 @@ library
         , IHP.RouterSupport
         , IHP.Router.Types
         , IHP.Router.UrlGenerator
+        , IHP.OpenApiSupport
         , IHP.Prelude
         , IHP.ErrorController
         , IHP.ScriptSupport
@@ -303,6 +305,7 @@ test-suite tests
         Test.ModelSupportSpec
         Test.QueryBuilderSpec
         Test.RouterSupportSpec
+        Test.OpenApiSupportSpec
         Test.ViewSupportSpec
         Test.FileStorage.ControllerFunctionsSpec
         Test.Controller.CookieSpec
