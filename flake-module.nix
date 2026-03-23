@@ -404,6 +404,8 @@ ihpFlake:
                     exec env IHP_STATIC=${ihpFlake.inputs.self.packages.${system}.ihp-static} ${ghcCompiler.ihp-ide}/bin/RunDevServer
                 '';
 
+                process.manager.implementation = "process-compose";
+
                 processes.ihp.exec = "start";
 
                 # Disabled for now
@@ -412,9 +414,6 @@ ihpFlake:
                 env.DATABASE_URL = "postgres:///app?host=${config.devenv.shells.default.env.PGHOST}";
                 env.PGDATABASE = "app";
 
-                # Disabled for now
-                # As the devenv postgres uses a different location for the socket
-                # this would break lots of known commands such as `make db`
                 services.postgres.enable = true;
                 services.postgres.settings = {
                     logging_collector = true;
@@ -445,10 +444,6 @@ ihpFlake:
                     }
                 ];
 
-                # Explicit shutdown command to work around devenv-tasks v2 not
-                # propagating signals to child processes (#2481)
-                processes.postgres.process-compose.shutdown.command = "pg_ctl stop -D \"$PGDATA\" -m fast";
-                processes.postgres.process-compose.shutdown.timeout_seconds = 15;
 
                 # Used in the Makefile https://github.com/digitallyinduced/ihp-boilerplate/blob/master/Makefile
                 env.IHP = ihpFlake.inputs.self.packages.${system}.ihp-env-var-backwards-compat;
@@ -462,8 +457,12 @@ ihpFlake:
                 env.IHP_HOOGLE_PORT = if cfg.withHoogle then "8002" else "";
 
                 # Auto-start Hoogle search server when withHoogle is enabled
+                # Disable CSP security headers: Hoogle v5.0.18.4 sends `upgrade-insecure-requests`
+                # even over plain HTTP, which causes Safari to try loading CSS/JS over HTTPS and fail.
+                # Fixed upstream (github.com/ndmitchell/hoogle/issues/432) but not yet released.
+                # Since Hoogle only runs on localhost for development, these headers aren't needed.
                 processes.hoogle = lib.mkIf cfg.withHoogle {
-                    exec = "hoogle server --local -p 8002";
+                    exec = "hoogle server --local -p 8002 --no-security-headers";
                 };
 
                 scripts.deploy-to-nixos.exec = ''
