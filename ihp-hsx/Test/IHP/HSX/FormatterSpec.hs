@@ -108,3 +108,33 @@ tests = do
                 , "    ></button>"
                 , "|]"
                 ])
+
+        it "is idempotent for newline-separated splices and raw script blocks" do
+            let input = Text.unlines
+                    [ "module Example where"
+                    , "view = [hsx|"
+                    , "    <head>"
+                    , "        {metaTags}"
+                    , "        {stylesheets}"
+                    , "        <script src={assetPath \"/bootstrap-ui.js\"}></script>"
+                    , "        <script>"
+                    , "            document.addEventListener('DOMContentLoaded', function () {"
+                    , "                if (window.ClipboardJS) {"
+                    , "                    new window.ClipboardJS('[data-clipboard-text]');"
+                    , "                }"
+                    , "            });"
+                    , "        </script>"
+                    , "        {"
+                    , "            if null items"
+                    , "                then renderEmpty"
+                    , "                else forEach items renderItem"
+                    , "        }"
+                    , "    </head>"
+                    , "|]"
+                    ]
+            firstPass <- formatSource (defaultFormatOptions "Example.hs") input
+            case firstPass of
+                Left errorMessage -> expectationFailure (Text.unpack errorMessage)
+                Right formatted -> do
+                    secondPass <- formatSource (defaultFormatOptions "Example.hs") formatted
+                    secondPass `shouldBe` Right formatted
