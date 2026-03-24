@@ -63,9 +63,10 @@ renderElementBlock config currentIndent name attributes children closingStyle =
                     let openTag = renderStartTagBlock config currentIndent name attributes False
                         nextIndent = currentIndent <> indentUnit config
                         childLines = Text.intercalate "\n" (map (renderBlockNode config nextIndent) children)
+                        closeTagInline = "</" <> name <> ">"
                         closeTag = currentIndent <> "</" <> name <> ">"
                     in if null children
-                        then openTag <> closeTag
+                        then openTag <> closeTagInline
                         else Text.intercalate "\n" [openTag, childLines, closeTag]
 
 renderStartTagBlock :: FormatConfig -> Text -> Text -> [QuoteAttribute] -> Bool -> Text
@@ -73,11 +74,11 @@ renderStartTagBlock config currentIndent name attributes isSelfClosing =
     case renderInlineAttributes config attributes of
         Just inlineAttributes
             | Text.length (name <> inlineAttributes) <= maxWidth config - Text.length currentIndent ->
-                currentIndent <> "<" <> name <> inlineAttributes <> if isSelfClosing then "/>" else ">"
+                currentIndent <> "<" <> name <> inlineAttributes <> closingSuffix name isSelfClosing
         _ ->
             let attrIndent = currentIndent <> indentUnit config
                 attributeLines = map (renderBlockAttribute config attrIndent) attributes
-                closingLine = currentIndent <> if isSelfClosing then "/>" else ">"
+                closingLine = currentIndent <> closingSuffix name isSelfClosing
             in Text.intercalate "\n" ([currentIndent <> "<" <> name] <> attributeLines <> [closingLine])
 
 renderInlineElement :: FormatConfig -> Text -> [QuoteAttribute] -> [QuoteNode] -> ClosingStyle -> Maybe Text
@@ -89,10 +90,10 @@ renderInlineElement config name attributes children closingStyle = do
     let openTag = "<" <> name <> inlineAttributes
     case closingStyle of
         VoidLeaf ->
-            let candidate = openTag <> "/>"
+            let candidate = openTag <> closingSuffix name True
             in if Text.length candidate <= maxWidth config then Just candidate else Nothing
         SelfClosing ->
-            let candidate = openTag <> "/>"
+            let candidate = openTag <> closingSuffix name True
             in if Text.length candidate <= maxWidth config then Just candidate else Nothing
         ExplicitClosing -> do
             inlineChildren <- traverse (renderInlineNode config) children
@@ -232,6 +233,12 @@ stripCommonIndent value =
 
 isSingleLineText :: Text -> Bool
 isSingleLineText value = not ("\n" `Text.isInfixOf` Text.strip value)
+
+closingSuffix :: Text -> Bool -> Text
+closingSuffix name isSelfClosing
+    | not isSelfClosing = ">"
+    | "!" `Text.isPrefixOf` name = ">"
+    | otherwise = "/>"
 
 stripBraces :: Text -> Text
 stripBraces value =

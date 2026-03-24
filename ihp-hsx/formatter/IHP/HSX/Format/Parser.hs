@@ -111,8 +111,8 @@ hsxSpreadAttribute = do
 hsxNodeAttribute :: Parser QuoteAttribute
 hsxNodeAttribute = do
     key <- hsxAttributeName
-    space
-    optionalValue <- optional do
+    optionalValue <- optional . try $ do
+        space
         _ <- char '='
         space
         hsxQuotedValue <|> hsxSplicedValue
