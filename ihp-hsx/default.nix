@@ -8,6 +8,7 @@ mkDerivation {
   pname = "ihp-hsx";
   version = "1.5.0";
   src = ./.;
+  isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
     base blaze-html blaze-markup bytestring bytestring-strict-builder
