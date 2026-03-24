@@ -128,15 +128,42 @@ library ihp-hsx-lucid2
         , IHP.HSX.HaskellParser
         , IHP.HSX.HsExpToTH
 
+executable hsxfmt
+    import: common-extensions, common-flags, common-depends
+    hs-source-dirs:
+        app/hsxfmt
+        , formatter
+    main-is: Main.hs
+    other-modules:
+        IHP.HSX.Format
+        , IHP.HSX.Format.Backend
+        , IHP.HSX.Format.Locate
+        , IHP.HSX.Format.Parser
+        , IHP.HSX.Format.Pretty
+        , IHP.HSX.Format.Types
+    default-language: GHC2021
+    build-depends:
+        , ihp-hsx-parser
+        , process
+
 test-suite ihp-hsx-tests
     import: common-extensions, common-flags, common-depends
     type:                exitcode-stdio-1.0
-    hs-source-dirs:      Test
+    hs-source-dirs:
+        Test
+        , formatter
     main-is:             Main.hs
     other-modules:
         IHP.HSX.ParserSpec
         IHP.HSX.QQSpec
         IHP.HSX.CustomHsxCases
+        , IHP.HSX.FormatterSpec
+        , IHP.HSX.Format
+        , IHP.HSX.Format.Backend
+        , IHP.HSX.Format.Locate
+        , IHP.HSX.Format.Parser
+        , IHP.HSX.Format.Pretty
+        , IHP.HSX.Format.Types
     default-language:    GHC2021
     build-depends:
         , ihp-hsx
@@ -147,6 +174,7 @@ test-suite ihp-hsx-tests
         , template-haskell
         , lucid2
         , mtl
+        , process
 
 benchmark ihp-hsx-parser-bench
     import: common-extensions, common-flags, common-depends
