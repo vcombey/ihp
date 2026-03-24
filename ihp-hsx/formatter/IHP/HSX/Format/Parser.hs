@@ -116,7 +116,6 @@ hsxNodeAttribute = do
         _ <- char '='
         space
         hsxQuotedValue <|> hsxSplicedValue
-    space
     pure $ case optionalValue of
         Nothing -> BareAttribute key
         Just value -> StaticAttribute key value
