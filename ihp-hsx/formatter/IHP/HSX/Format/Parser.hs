@@ -64,15 +64,19 @@ hsxTagContent = do
 hsxTagChildren :: Text -> [QuoteAttribute] -> Parser QuoteNode
 hsxTagChildren name attributes = do
     children <- case name of
-        "script" -> parseRawTextChildren name Text.strip
-        "style" -> parseRawTextChildren name Text.strip
+        "script" -> parseRawTextChildren name
+        "style" -> parseRawTextChildren name
         _ -> space >> collectChildren name []
     pure (Element name attributes children ExplicitClosing)
 
-parseRawTextChildren :: Text -> (Text -> Text) -> Parser [QuoteNode]
-parseRawTextChildren name transformText = do
+parseRawTextChildren :: Text -> Parser [QuoteNode]
+parseRawTextChildren name = do
     body <- scanUntil ("</" <> name <> ">")
-    pure [RawTextNode (transformText body)]
+    let normalizedBody = normalizeRawText body
+    pure do
+        if Text.null normalizedBody
+            then []
+            else [RawTextNode normalizedBody]
 
 collectChildren :: Text -> [QuoteNode] -> Parser [QuoteNode]
 collectChildren name !acc = do
@@ -106,7 +110,7 @@ hsxSpreadAttribute = do
     _ <- string "..."
     space
     value <- scanBracedExpression 0 []
-    pure (SpreadAttribute (Text.strip value))
+    pure (SpreadAttribute (normalizeEmbeddedBlock value))
 
 hsxNodeAttribute :: Parser QuoteAttribute
 hsxNodeAttribute = do
@@ -129,7 +133,7 @@ hsxSplicedValue :: Parser QuoteAttributeValue
 hsxSplicedValue = do
     _ <- char '{'
     value <- scanBracedExpression 0 []
-    pure (ExpressionValue (Text.strip value))
+    pure (ExpressionValue (normalizeEmbeddedBlock value))
 
 hsxNoRenderCommentOrSplice :: Parser QuoteNode
 hsxNoRenderCommentOrSplice = do
@@ -156,7 +160,9 @@ hsxSpaceThenChild = do
             mc2 <- optional (lookAhead (string "{-"))
             case mc2 of
                 Just _ -> hsxNoRenderComment
-                Nothing -> pure (buildTextNode sp)
+                Nothing
+                    | Text.any (== '\n') sp -> hsxSplicedNode
+                    | otherwise -> pure (buildTextNode sp)
         Just _ -> do
             rest <- takeWhileP Nothing (\c -> c /= '{' && c /= '}' && c /= '<' && c /= '>')
             pure (buildTextNode (sp <> rest))
@@ -171,7 +177,7 @@ hsxSplicedNode :: Parser QuoteNode
 hsxSplicedNode = do
     _ <- char '{'
     expression <- scanBracedExpression 0 []
-    pure (SpliceNode (Text.strip expression))
+    pure (SpliceNode (normalizeEmbeddedBlock expression))
 
 scanBracedExpression :: Int -> [Text] -> Parser Text
 scanBracedExpression !depth !acc = do
@@ -206,7 +212,7 @@ hsxAttributeName = do
     pure name
 
 stripTextNodeWhitespaces :: [QuoteNode] -> [QuoteNode]
-stripTextNodeWhitespaces = stripLastTextNodeWhitespaces . stripFirstTextNodeWhitespaces
+stripTextNodeWhitespaces = dropEmptyTextNodes . stripLastTextNodeWhitespaces . stripFirstTextNodeWhitespaces
 
 stripLastTextNodeWhitespaces :: [QuoteNode] -> [QuoteNode]
 stripLastTextNodeWhitespaces [] = []
@@ -218,6 +224,40 @@ stripFirstTextNodeWhitespaces :: [QuoteNode] -> [QuoteNode]
 stripFirstTextNodeWhitespaces [] = []
 stripFirstTextNodeWhitespaces (TextNode text : rest) = TextNode (Text.stripStart text) : rest
 stripFirstTextNodeWhitespaces nodes = nodes
+
+dropEmptyTextNodes :: [QuoteNode] -> [QuoteNode]
+dropEmptyTextNodes [] = []
+dropEmptyTextNodes (TextNode text : rest)
+    | Text.null text = dropEmptyTextNodes rest
+    | otherwise = TextNode text : dropEmptyTextNodes rest
+dropEmptyTextNodes (node : rest) = node : dropEmptyTextNodes rest
+
+normalizeRawText :: Text -> Text
+normalizeRawText = stripCommonIndent . stripOuterBlankLines
+
+normalizeEmbeddedBlock :: Text -> Text
+normalizeEmbeddedBlock value
+    | Text.any (== '\n') value = stripCommonIndent (stripOuterBlankLines value)
+    | otherwise = Text.strip value
+
+stripOuterBlankLines :: Text -> Text
+stripOuterBlankLines =
+    Text.unlines
+        . reverse
+        . dropWhile (Text.all isSpace)
+        . reverse
+        . dropWhile (Text.all isSpace)
+        . Text.lines
+
+stripCommonIndent :: Text -> Text
+stripCommonIndent value =
+    let lines' = Text.lines value
+        indents = map (Text.length . Text.takeWhile isSpace) (filter (not . Text.all isSpace) lines')
+    in case indents of
+        [] -> Text.strip value
+        _ ->
+            let smallestIndent = minimum indents
+            in Text.intercalate "\n" (map (Text.drop smallestIndent) lines')
 
 voidTags :: Set Text
 voidTags = Set.fromList

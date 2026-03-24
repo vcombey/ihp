@@ -36,12 +36,28 @@ defaultFormatOptions sourcePath =
 formatSource :: FormatOptions -> Text -> IO (Either Text Text)
 formatSource options input = do
     let pragmas = collectLanguagePragmas input
-    formattedQuotes <- traverse (formatQuote options pragmas input) (locateQuotes input)
-    case sequence formattedQuotes of
+    rewritten <- rewriteQuotesToFixedPoint options pragmas input 0
+    case rewritten of
         Left errorMessage -> pure (Left errorMessage)
-        Right replacements -> do
-            let rewritten = applyReplacements input replacements
-            Backend.runSourceBackend options.backend options.sourcePath rewritten
+        Right stableSource ->
+            Backend.runSourceBackend options.backend options.sourcePath stableSource
+
+rewriteQuotesToFixedPoint :: FormatOptions -> [Text] -> Text -> Int -> IO (Either Text Text)
+rewriteQuotesToFixedPoint options pragmas input iteration = do
+    rewritten <- rewriteQuotes options pragmas input
+    case rewritten of
+        Left errorMessage -> pure (Left errorMessage)
+        Right output
+            | output == input -> pure (Right output)
+            | iteration >= 3 -> pure (Right output)
+            | otherwise -> rewriteQuotesToFixedPoint options pragmas output (iteration + 1)
+
+rewriteQuotes :: FormatOptions -> [Text] -> Text -> IO (Either Text Text)
+rewriteQuotes options pragmas input = do
+    formattedQuotes <- traverse (formatQuote options pragmas input) (locateQuotes input)
+    pure do
+        replacements <- sequence formattedQuotes
+        Right (applyReplacements input replacements)
 
 formatQuote :: FormatOptions -> [Text] -> Text -> QuoteRegion -> IO (Either Text (QuoteRegion, Text))
 formatQuote options pragmas input quoteRegion@QuoteRegion { bodyStartIndex, bodyEndIndex, linePrefix } = do
