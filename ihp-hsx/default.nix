@@ -1,22 +1,27 @@
 { mkDerivation, base, blaze-html, blaze-markup, bytestring
 , bytestring-strict-builder
 , containers, deepseq, ghc, hspec, lib, lucid2, megaparsec, mtl
-, string-conversions, tasty-bench, template-haskell, text
+, process, string-conversions, tasty-bench, template-haskell, text
 , transformers, unordered-containers
 }:
 mkDerivation {
   pname = "ihp-hsx";
   version = "1.6.0";
   src = ./.;
+  isExecutable = true;
   libraryHaskellDepends = [
     base blaze-html blaze-markup bytestring bytestring-strict-builder
     containers ghc lucid2
     megaparsec string-conversions template-haskell text transformers
     unordered-containers
   ];
+  executableHaskellDepends = [
+    base bytestring containers ghc megaparsec process
+    string-conversions template-haskell text unordered-containers
+  ];
   testHaskellDepends = [
     base blaze-markup bytestring bytestring-strict-builder containers
-    hspec lucid2 megaparsec mtl
+    hspec lucid2 megaparsec mtl process
     string-conversions template-haskell text unordered-containers
   ];
   benchmarkHaskellDepends = [
