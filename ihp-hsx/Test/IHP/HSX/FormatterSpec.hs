@@ -59,3 +59,52 @@ tests = do
                 , "    </script>"
                 , "|]"
                 ])
+
+        it "formats bare attributes alongside data attributes" do
+            let input = Text.unlines
+                    [ "module Example where"
+                    , "view = [hsx|<form method=\"POST\" novalidate action={CreateSessionAction} data-login-form><input hidden data-client-id={clientId}/></form>|]"
+                    ]
+            result <- formatSource (defaultFormatOptions "Example.hs") input
+            result `shouldBe` Right (Text.unlines
+                [ "module Example where"
+                , "view = [hsx|"
+                , "    <form method=\"POST\" novalidate action={CreateSessionAction} data-login-form>"
+                , "        <input hidden data-client-id={clientId}/>"
+                , "    </form>"
+                , "|]"
+                ])
+
+        it "keeps doctype tags non-self-closing" do
+            let input = Text.unlines
+                    [ "module Example where"
+                    , "view = [hsx|<!DOCTYPE html><html><body></body></html>|]"
+                    ]
+            result <- formatSource (defaultFormatOptions "Example.hs") input
+            result `shouldBe` Right (Text.unlines
+                [ "module Example where"
+                , "view = [hsx|"
+                , "    <!DOCTYPE html>"
+                , "    <html>"
+                , "        <body></body>"
+                , "    </html>"
+                , "|]"
+                ])
+
+        it "renders empty explicit tags with multiline attributes without stray indent text" do
+            let input = Text.unlines
+                    [ "module Example where"
+                    , "view = [hsx|<button class=\"btn btn-primary btn-lg btn-block\" data-client-id={clientId} data-action={actionName} aria-describedby=\"button-help-text\"></button>|]"
+                    ]
+            result <- formatSource (defaultFormatOptions "Example.hs") input
+            result `shouldBe` Right (Text.unlines
+                [ "module Example where"
+                , "view = [hsx|"
+                , "    <button"
+                , "        class=\"btn btn-primary btn-lg btn-block\""
+                , "        data-client-id={clientId}"
+                , "        data-action={actionName}"
+                , "        aria-describedby=\"button-help-text\""
+                , "    ></button>"
+                , "|]"
+                ])
