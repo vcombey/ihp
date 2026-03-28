@@ -7,37 +7,74 @@
   var autoRefreshSessions = {};
   var autoRefreshPaused = false;
   var inflightRequests = 0;
+  var autoRefreshReloadTimer = null;
+  var autoRefreshReconnectStateKey = 'ihp:auto-refresh:reconnect';
+  var autoRefreshReloadDelayMs = 1000;
+  var autoRefreshReloadWindowMs = 15000;
+  var autoRefreshReloadMaxAttempts = 3;
+  var autoRefreshOnlineReloadRegistered = false;
+
+  function shouldPreserveFieldValue(fromEl, toEl) {
+    return !(
+      (fromEl && fromEl.hasAttribute && fromEl.hasAttribute('data-auto-refresh-allow-server-value')) ||
+      (toEl && toEl.hasAttribute && toEl.hasAttribute('data-auto-refresh-allow-server-value'))
+    );
+  }
+
+  function syncFieldValue(fromEl, toEl) {
+    var tag = fromEl.tagName;
+    var shouldPreserve = shouldPreserveFieldValue(fromEl, toEl);
+
+    if (tag === 'INPUT') {
+      var type = (fromEl.getAttribute('type') || '').toLowerCase();
+
+      if (type === 'checkbox' || type === 'radio') {
+        if (shouldPreserve) {
+          toEl.checked = fromEl.checked;
+        }
+      } else if (type !== 'file' && shouldPreserve) {
+        toEl.value = fromEl.value;
+      }
+    } else if (tag === 'TEXTAREA') {
+      if (shouldPreserve) {
+        toEl.value = fromEl.value;
+      }
+    } else if (tag === 'SELECT') {
+      if (shouldPreserve) {
+        toEl.value = fromEl.value;
+      }
+    } else if (tag === 'OPTION') {
+      toEl.selected = fromEl.selected;
+    }
+  }
 
   var morphdomOptions = {
     getNodeKey: function (el) {
       if (el.id) {
         return el.id;
       }
-      if (el.form && el.name) {
-        return el.name + '_' + el.form.action;
-      }
-      if (el instanceof HTMLFormElement) {
-        return 'form#' + el.action;
-      }
       if (el instanceof HTMLScriptElement) {
         return el.src;
       }
-      return null;
+      return undefined;
     },
-    onBeforeElChildrenUpdated: function (fromEl, toEl) {
-      if (fromEl.tagName === 'TEXTAREA' || fromEl.tagName === 'INPUT') {
-        toEl.checked = fromEl.checked;
-        toEl.value = fromEl.value;
-      } else if (fromEl.tagName === 'OPTION') {
-        toEl.selected = fromEl.selected;
+    onBeforeElUpdated: function (fromEl, toEl) {
+      if (fromEl.tagName === 'INPUT') {
+        var type = (fromEl.getAttribute('type') || '').toLowerCase();
+        if (type === 'file') {
+          return false;
+        }
       }
+
+      syncFieldValue(fromEl, toEl);
+      return true;
     },
   };
 
   function childrenOnlyMorphdomOptions() {
     return {
       getNodeKey: morphdomOptions.getNodeKey,
-      onBeforeElChildrenUpdated: morphdomOptions.onBeforeElChildrenUpdated,
+      onBeforeElUpdated: morphdomOptions.onBeforeElUpdated,
       childrenOnly: true,
     };
   }
@@ -50,8 +87,150 @@
     return target && target.length > 0 ? target : null;
   }
 
+  function getRequestHeader(event, headerName) {
+    return (
+      event &&
+      event.detail &&
+      event.detail.requestConfig &&
+      event.detail.requestConfig.headers &&
+      event.detail.requestConfig.headers[headerName]
+    );
+  }
+
+  function isPreloadedRequest(event) {
+    return getRequestHeader(event, 'HX-Preloaded') === 'true';
+  }
+
   function getSessionKey(config) {
     return config.target ? 'target:' + config.target : 'body';
+  }
+
+  function clearAutoRefreshMeta() {
+    var metas = document.head.querySelectorAll('meta[property="ihp-auto-refresh-id"]');
+    Array.prototype.forEach.call(metas, function (meta) {
+      if (meta.parentNode) {
+        meta.parentNode.removeChild(meta);
+      }
+    });
+  }
+
+  function isBoostedPageSwap(event) {
+    return !!(
+      event &&
+      event.detail &&
+      event.detail.boosted &&
+      event.detail.shouldSwap !== false
+    );
+  }
+
+  function hasAutoRefreshMeta() {
+    return !!document.head.querySelector('meta[property="ihp-auto-refresh-id"]');
+  }
+
+  function readAutoRefreshReconnectState() {
+    try {
+      var rawState = window.sessionStorage.getItem(autoRefreshReconnectStateKey);
+      if (!rawState) {
+        return { count: 0, startedAt: 0 };
+      }
+
+      var parsedState = JSON.parse(rawState);
+      if (
+        !parsedState ||
+        typeof parsedState.count !== 'number' ||
+        typeof parsedState.startedAt !== 'number'
+      ) {
+        return { count: 0, startedAt: 0 };
+      }
+
+      if (Date.now() - parsedState.startedAt > autoRefreshReloadWindowMs) {
+        return { count: 0, startedAt: 0 };
+      }
+
+      return parsedState;
+    } catch (_error) {
+      return { count: 0, startedAt: 0 };
+    }
+  }
+
+  function writeAutoRefreshReconnectState(state) {
+    try {
+      if (!state || state.count <= 0) {
+        window.sessionStorage.removeItem(autoRefreshReconnectStateKey);
+        return;
+      }
+
+      window.sessionStorage.setItem(
+        autoRefreshReconnectStateKey,
+        JSON.stringify(state),
+      );
+    } catch (_error) {}
+  }
+
+  function resetAutoRefreshReconnectState() {
+    writeAutoRefreshReconnectState({ count: 0, startedAt: 0 });
+  }
+
+  function registerAutoRefreshReconnectAttempt() {
+    var currentState = readAutoRefreshReconnectState();
+    var now = Date.now();
+    var nextState;
+
+    if (currentState.count <= 0 || now - currentState.startedAt > autoRefreshReloadWindowMs) {
+      nextState = { count: 1, startedAt: now };
+    } else {
+      nextState = {
+        count: currentState.count + 1,
+        startedAt: currentState.startedAt,
+      };
+    }
+
+    writeAutoRefreshReconnectState(nextState);
+    return nextState.count <= autoRefreshReloadMaxAttempts;
+  }
+
+  function unregisterAutoRefreshOnlineReload() {
+    if (!autoRefreshOnlineReloadRegistered) {
+      return;
+    }
+
+    window.removeEventListener('online', scheduleAutoRefreshReload);
+    autoRefreshOnlineReloadRegistered = false;
+  }
+
+  function cancelAutoRefreshReload() {
+    if (autoRefreshReloadTimer) {
+      window.clearTimeout(autoRefreshReloadTimer);
+      autoRefreshReloadTimer = null;
+    }
+    unregisterAutoRefreshOnlineReload();
+  }
+
+  function scheduleAutoRefreshReload() {
+    if (autoRefreshReloadTimer || !hasAutoRefreshMeta()) {
+      return;
+    }
+
+    if (navigator.onLine === false) {
+      if (!autoRefreshOnlineReloadRegistered) {
+        window.addEventListener('online', scheduleAutoRefreshReload);
+        autoRefreshOnlineReloadRegistered = true;
+      }
+      return;
+    }
+
+    unregisterAutoRefreshOnlineReload();
+
+    if (!registerAutoRefreshReconnectAttempt()) {
+      return;
+    }
+
+    autoRefreshReloadTimer = window.setTimeout(function () {
+      autoRefreshReloadTimer = null;
+      if (hasAutoRefreshMeta()) {
+        window.location.reload();
+      }
+    }, autoRefreshReloadDelayMs);
   }
 
   function replaceAutoRefreshMeta(meta, fallbackTarget) {
@@ -95,6 +274,49 @@
         meta.parentNode.removeChild(meta);
       }
     });
+  }
+
+  function expectedMetaTarget(fallbackTarget) {
+    if (fallbackTarget === null) {
+      return null;
+    }
+    if (fallbackTarget && fallbackTarget.id) {
+      return '#' + fallbackTarget.id;
+    }
+    return undefined;
+  }
+
+  function removeAutoRefreshMeta(metaTarget) {
+    var existing = document.head.querySelectorAll('meta[property="ihp-auto-refresh-id"]');
+    Array.prototype.forEach.call(existing, function (node) {
+      if (getMetaTarget(node) === metaTarget && node.parentNode) {
+        node.parentNode.removeChild(node);
+      }
+    });
+  }
+
+  function syncAutoRefreshMeta(root, fallbackTarget) {
+    var metaTarget = expectedMetaTarget(fallbackTarget);
+    if (metaTarget !== undefined) {
+      var metas = root ? root.querySelectorAll('meta[property="ihp-auto-refresh-id"]') : [];
+      var hasMatchingMeta = false;
+
+      Array.prototype.forEach.call(metas, function (meta) {
+        var incomingTarget = getMetaTarget(meta);
+        if (incomingTarget === null && metaTarget !== null) {
+          incomingTarget = metaTarget;
+        }
+        if (incomingTarget === metaTarget) {
+          hasMatchingMeta = true;
+        }
+      });
+
+      if (!hasMatchingMeta) {
+        removeAutoRefreshMeta(metaTarget);
+      }
+    }
+
+    harvestAutoRefreshMeta(root, fallbackTarget);
   }
 
   function readAutoRefreshConfigs() {
@@ -146,14 +368,8 @@
     }
 
     if (session.socket) {
-      session.isClosing = true;
-
-      // Closing a socket while CONNECTING causes noisy browser errors
-      // ("WebSocket is closed before the connection is established").
-      // Let it finish opening and close it in onopen instead.
-      if (session.socket.readyState === WebSocket.OPEN) {
-        session.socket.close();
-      }
+      session.expectedClose = true;
+      session.socket.close();
     }
     delete autoRefreshSessions[key];
   }
@@ -214,11 +430,20 @@
       ? document.querySelector(session.targetSelector)
       : null;
 
-    harvestAutoRefreshMeta(dom, fallbackTarget);
+    syncAutoRefreshMeta(dom, fallbackTarget);
     autoRefreshView();
 
     applyHtmlUpdate(dom, session);
     afterMorphdomUpdate();
+  }
+
+  function harvestAutoRefreshMetaFromHtml(html, fallbackTarget) {
+    if (!html) {
+      return;
+    }
+
+    var dom = new DOMParser().parseFromString(html, 'text/html');
+    syncAutoRefreshMeta(dom, fallbackTarget);
   }
 
   function openAutoRefreshSession(config, key) {
@@ -227,30 +452,35 @@
       targetSelector: config.target || null,
       socket: null,
       pendingHtml: null,
-      isClosing: false,
+      expectedClose: false,
     };
 
     session.socket = new WebSocket(socketHost());
 
     session.socket.onopen = function () {
-      if (session.isClosing || autoRefreshSessions[key] !== session) {
-        session.socket.close();
-        return;
-      }
+      cancelAutoRefreshReload();
+      resetAutoRefreshReconnectState();
       session.socket.send(session.sessionId);
     };
 
     session.socket.onmessage = function (event) {
-      if (session.isClosing || autoRefreshSessions[key] !== session) {
-        return;
-      }
       handleIncomingHtml(event.data, session);
+    };
+
+    session.socket.onerror = function () {
+      scheduleAutoRefreshReload();
     };
 
     session.socket.onclose = function () {
       if (autoRefreshSessions[key] === session) {
         delete autoRefreshSessions[key];
       }
+
+      if (session.expectedClose) {
+        return;
+      }
+
+      scheduleAutoRefreshReload();
     };
 
     return session;
@@ -261,6 +491,8 @@
 
     if (!configs || configs.length === 0) {
       closeAllSessions();
+      cancelAutoRefreshReload();
+      resetAutoRefreshReconnectState();
       return;
     }
 
@@ -313,12 +545,41 @@
   }
 
   if (window.htmx) {
-    document.addEventListener('htmx:beforeRequest', function () {
+    document.addEventListener('htmx:beforeSwap', function (event) {
+      var target =
+        event && event.detail && event.detail.target
+          ? event.detail.target
+          : event.target;
+      var responseText =
+        event &&
+        event.detail &&
+        event.detail.xhr &&
+        typeof event.detail.xhr.responseText === 'string'
+          ? event.detail.xhr.responseText
+          : null;
+
+      if (isBoostedPageSwap(event)) {
+        clearAutoRefreshMeta();
+        closeAllSessions();
+      }
+
+      harvestAutoRefreshMetaFromHtml(responseText, target);
+    });
+
+    document.addEventListener('htmx:beforeRequest', function (event) {
+      if (isPreloadedRequest(event)) {
+        return;
+      }
+
       inflightRequests += 1;
       autoRefreshPaused = true;
     });
 
-    document.addEventListener('htmx:afterRequest', function () {
+    document.addEventListener('htmx:afterRequest', function (event) {
+      if (isPreloadedRequest(event)) {
+        return;
+      }
+
       inflightRequests = Math.max(0, inflightRequests - 1);
       autoRefreshPaused = inflightRequests > 0;
       if (!autoRefreshPaused) {
@@ -333,7 +594,8 @@
           : event.target;
 
       harvestAutoRefreshMeta(target, target);
-      autoRefreshView();
+      window.setTimeout(autoRefreshView, 100);
     });
   }
 })();
+

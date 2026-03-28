@@ -234,6 +234,17 @@
         });
     }
 
+    function resetLoadingLinks(root) {
+        selectAll(root, '[data-loading-link]').forEach(function (element) {
+            if (!(element instanceof HTMLElement)) {
+                return;
+            }
+
+            element.classList.remove('is-loading');
+            element.removeAttribute('aria-disabled');
+        });
+    }
+
     function dismissFormAlerts(form) {
         if (!form) {
             return;
@@ -244,6 +255,97 @@
                 alert.classList.add('dismiss');
             }
         });
+    }
+
+    function flashAlertClass(kind) {
+        return kind === 'success'
+            ? 'alert alert-success alert-dismissible fade show'
+            : 'alert alert-danger alert-dismissible fade show';
+    }
+
+    function renderFlashMessage(message) {
+        if (!message || typeof message.message !== 'string') {
+            return null;
+        }
+
+        var alert = document.createElement('div');
+        alert.className = flashAlertClass(message.kind);
+        alert.setAttribute('role', 'alert');
+
+        var body = document.createElement('div');
+        body.textContent = message.message;
+        alert.appendChild(body);
+
+        var dismissButton = document.createElement('button');
+        dismissButton.type = 'button';
+        dismissButton.className = 'btn-close';
+        dismissButton.setAttribute('data-bs-dismiss', 'alert');
+        dismissButton.setAttribute('aria-label', message.dismissLabel || 'Close');
+        dismissButton.setAttribute('data-posthog-id', 'flash-dismiss-' + (message.kind || 'error'));
+        alert.appendChild(dismissButton);
+
+        return alert;
+    }
+
+    function replaceFlashMessages(messages) {
+        var container = document.getElementById('flash-messages-container');
+        if (!(container instanceof HTMLElement)) {
+            return;
+        }
+
+        container.replaceChildren();
+
+        if (!Array.isArray(messages) || messages.length === 0) {
+            return;
+        }
+
+        var grid = document.createElement('div');
+        grid.className = 'd-grid gap-2';
+
+        messages.forEach(function (message) {
+            var alert = renderFlashMessage(message);
+            if (alert) {
+                grid.appendChild(alert);
+            }
+        });
+
+        if (grid.childElementCount > 0) {
+            container.appendChild(grid);
+        }
+    }
+
+    function flashMessagesFromEventDetail(detail) {
+        if (!detail) {
+            return [];
+        }
+
+        if (Array.isArray(detail.messages)) {
+            return detail.messages;
+        }
+
+        if (detail.value && Array.isArray(detail.value.messages)) {
+            return detail.value.messages;
+        }
+
+        return [];
+    }
+
+    function flashMessagesFromResponseHeader(xhr) {
+        if (!xhr || typeof xhr.getResponseHeader !== 'function') {
+            return [];
+        }
+
+        var raw = xhr.getResponseHeader('X-Gitoku-Flash');
+        if (!raw) {
+            return [];
+        }
+
+        try {
+            var payload = JSON.parse(raw);
+            return Array.isArray(payload.messages) ? payload.messages : [];
+        } catch (_error) {
+            return [];
+        }
     }
 
     function initCompatibility(root, options) {
@@ -302,6 +404,42 @@
         dispatchIhpUnload();
     });
 
+    document.addEventListener('click', function (event) {
+        var target = event.target;
+        var element =
+            target && target.closest ? target.closest('[data-loading-link]') : null;
+        var href;
+
+        if (!(element instanceof HTMLAnchorElement)) {
+            return;
+        }
+
+        if (event.defaultPrevented || event.button !== 0) {
+            return;
+        }
+
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+            return;
+        }
+
+        href = element.getAttribute('href');
+        if (!href || href === '#') {
+            return;
+        }
+
+        if (element.classList.contains('is-loading')) {
+            event.preventDefault();
+            return;
+        }
+
+        element.classList.add('is-loading');
+        element.setAttribute('aria-disabled', 'true');
+    });
+
+    window.addEventListener('pageshow', function () {
+        resetLoadingLinks(document);
+    });
+
     document.addEventListener('DOMContentLoaded', function () {
         initCompatibility(document, { includeScrollIntoView: true });
         dispatchIhpLoad();
@@ -311,7 +449,6 @@
         document.addEventListener('htmx:beforeSwap', function (event) {
             dispatchIhpUnload();
 
-            // Match legacy transitionToNewPage behavior for HTMX-driven page navigation.
             if (isBoostedPageSwap(event)) {
                 clearTrackedTimers();
             }
@@ -333,6 +470,19 @@
             var trigger = event && event.detail ? event.detail.elt : null;
             var form = trigger && trigger.closest ? trigger.closest('form') : null;
             dismissFormAlerts(form);
+        });
+
+        document.addEventListener('htmx:afterRequest', function (event) {
+            var xhr = event && event.detail ? event.detail.xhr : null;
+            var messages = flashMessagesFromResponseHeader(xhr);
+            if (messages.length > 0) {
+                replaceFlashMessages(messages);
+            }
+        });
+
+        document.addEventListener('gitoku:flash', function (event) {
+            var detail = event && event.detail ? event.detail : null;
+            replaceFlashMessages(flashMessagesFromEventDetail(detail));
         });
     }
 
@@ -358,8 +508,6 @@
             }
         } else if (tag === 'TEXTAREA') {
             toEl.value = fromEl.value;
-        } else if (tag === 'SELECT') {
-            toEl.value = fromEl.value;
         }
     }
 
@@ -374,17 +522,77 @@
         return undefined;
     }
 
+    function resolveLiveTarget(target) {
+        if (!target) {
+            return target;
+        }
+        if (target === document.body) {
+            return document.body;
+        }
+        if (target.id) {
+            return document.getElementById(target.id) || target;
+        }
+        if (document.body.contains(target)) {
+            return target;
+        }
+        return target;
+    }
+
+    function findSingleRootElement(fragment) {
+        if (!fragment || fragment.nodeType !== 11) {
+            return null;
+        }
+
+        var root = null;
+        for (var i = 0; i < fragment.childNodes.length; i++) {
+            var node = fragment.childNodes[i];
+            if (node.nodeType === Node.COMMENT_NODE) {
+                continue;
+            }
+            if (node.nodeType === Node.TEXT_NODE && node.textContent.trim() === '') {
+                continue;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) {
+                return null;
+            }
+            if (root) {
+                return null;
+            }
+            root = node;
+        }
+
+        return root;
+    }
+
+    function wrapToMatchTarget(target, content) {
+        var wrapper = document.createElement(target.tagName);
+        for (var i = 0; i < target.attributes.length; i++) {
+            var attr = target.attributes[i];
+            wrapper.setAttribute(attr.name, attr.value);
+        }
+        wrapper.appendChild(content);
+        return wrapper;
+    }
+
+    function shouldReuseRoot(target, root) {
+        return root.tagName === target.tagName && (!target.id || root.id === target.id);
+    }
+
     // HTMX gives us a fragment; wrap it to match the target element for morphdom.
-    // morphdom expects a real element, not a bare document fragment.
+    // If the fragment already contains a single matching root element, reuse it
+    // directly instead of nesting duplicate roots.
     function toSwapNode(target, fragment) {
         if (fragment && fragment.nodeType === 11) {
-            var wrapper = document.createElement(target.tagName);
-            for (var i = 0; i < target.attributes.length; i++) {
-                var attr = target.attributes[i];
-                wrapper.setAttribute(attr.name, attr.value);
+            var root = findSingleRootElement(fragment);
+            if (root && shouldReuseRoot(target, root)) {
+                return root;
             }
-            wrapper.appendChild(fragment);
-            return wrapper;
+
+            return wrapToMatchTarget(target, fragment);
+        }
+
+        if (fragment && fragment.nodeType === Node.ELEMENT_NODE && !shouldReuseRoot(target, fragment)) {
+            return wrapToMatchTarget(target, fragment);
         }
         return fragment;
     }
@@ -416,21 +624,18 @@
             isInlineSwap: function (swapStyle) {
                 return swapStyle === 'morphdom';
             },
-            handleSwap: function (swapStyle, target, fragment, settleInfo) {
+            handleSwap: function (swapStyle, target, fragment) {
                 if (swapStyle !== 'morphdom') return;
                 // Swap using morphdom instead of the default innerHTML strategy.
                 morphdomSwap(target, fragment);
-                // morphdom swaps bypass HTMX's normal processing, so re-process manually.
-                // This is required to rebind hx-get/hx-post/etc on freshly swapped nodes.
-                if (settleInfo && settleInfo.tasks) {
-                    settleInfo.tasks.push(function () {
-                        htmx.process(target);
-                    });
-                } else {
-                    htmx.process(target);
-                }
+                // Re-process the live DOM node, not the pre-morphdom target
+                // reference, otherwise later HTMX interactions can stop working.
+                window.setTimeout(function () {
+                    htmx.process(resolveLiveTarget(target));
+                }, 0);
                 return true;
             },
         });
     }
 })();
+
