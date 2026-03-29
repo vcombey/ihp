@@ -3,7 +3,7 @@ module Test.Controller.RenderSpec where
 import IHP.Prelude
 import Test.Hspec
 import IHP.Controller.Render (renderFragment, respondHtmlFragment)
-import IHP.Controller.Response (ResponseException (..), responseHeadersVaultKey)
+import IHP.Controller.Response (EarlyReturnException (..), responseHeadersVaultKey)
 import IHP.AutoRefresh (autoRefreshStateVaultKey)
 import IHP.AutoRefresh.Types (AutoRefreshState (..))
 import IHP.ViewPrelude
@@ -73,18 +73,23 @@ buildRequest autoRefreshSession = do
 
 captureResponse
     :: Wai.Request
-    -> ((?context :: ControllerContext, ?request :: Wai.Request) => IO ())
+    -> ((?context :: ControllerContext, ?request :: Wai.Request, ?respond :: Wai.Response -> IO Wai.ResponseReceived) => IO a)
     -> IO Wai.Response
 captureResponse request action = do
+    responseRef <- newIORef Nothing
     let ?request = request
+    let ?respond response = do
+            writeIORef responseRef (Just response)
+            pure Wai.responseReceived
     context <- newControllerContext
     let ?context = context
 
-    result <- Exception.try action :: IO (Either ResponseException ())
-    case result of
-        Left (ResponseException response) -> pure response
-        Right _ -> do
-            expectationFailure "Expected action to terminate via ResponseException"
+    _ <- Exception.try action :: IO (Either EarlyReturnException a)
+    maybeResponse <- readIORef responseRef
+    case maybeResponse of
+        Just response -> pure response
+        Nothing -> do
+            expectationFailure "Expected action to send a response"
             error "unreachable"
 
 parseSessionId :: String -> UUID

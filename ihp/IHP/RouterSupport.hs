@@ -58,7 +58,7 @@ import Data.List (find, isPrefixOf)
 import Control.Monad (unless, join)
 import Control.Applicative ((<|>), empty)
 import Text.Read (readMaybe)
-import Control.Exception.Safe (SomeException, fromException)
+import Control.Exception.Safe (SomeException, catch, throwIO)
 import Control.Exception (evaluate)
 import qualified IHP.ModelSupport as ModelSupport
 import IHP.FrameworkConfig
@@ -73,8 +73,6 @@ import Data.Data
 import qualified Control.Monad.State.Strict as State
 import qualified Data.Text as Text
 import Network.HTTP.Types.URI
-import Network.HTTP.Types.Status (status400)
-import Network.HTTP.Types.Header (hContentType)
 import qualified Data.List as List
 import Unsafe.Coerce
 import IHP.HaskellSupport hiding (get)
@@ -82,9 +80,9 @@ import qualified Data.Typeable as Typeable
 import qualified Data.ByteString.Char8 as ByteString
 import Data.String.Conversions (ConvertibleStrings (convertString), cs)
 import qualified Text.Blaze.Html5 as Html5
-import qualified IHP.ErrorController as ErrorController
 import qualified Control.Exception as Exception
 import qualified Data.Aeson as JSON
+import qualified IHP.ErrorController as ErrorController
 import qualified Network.URI.Encode as URI
 import qualified Data.Text.Encoding as Text
 import Data.Dynamic
@@ -98,12 +96,12 @@ import IHP.Controller.Context
 import IHP.Controller.Param
 import Data.Kind
 import qualified Data.TMap as TypeMap
-import IHP.Controller.Response (ResponseException(..))
 import Data.OpenApi (ToSchema)
 import qualified IHP.ViewSupport as ViewSupport
 import qualified Data.Vault.Lazy as Vault
 import System.IO.Unsafe (unsafePerformIO)
 import Network.HTTP.Types.Status (status500)
+import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
 
 -- | Binds @?request@ and @?respond@ from WAI arguments, then runs the given action.
 --
@@ -124,19 +122,15 @@ runAction'
        , Typeable controller
        )
      => controller -> Application
-runAction' controller waiRequest waiRespond = do
-    (context, maybeException) <- setupActionContext @application (Typeable.typeOf controller) waiRequest waiRespond
-    let ?context = context
-    let ?respond = waiRespond
-    let ?request = context.request
-    case maybeException of
-        Just exception ->
-            case fromException exception of
-                Just (ResponseException response) -> waiRespond response
-                Nothing -> ErrorController.displayException exception controller " while calling initContext"
-        Nothing -> do
-            let ?modelContext = ?request.modelContext
-            runAction controller
+runAction' controller waiRequest waiRespond =
+    earlyReturnMiddleware (\request respond -> do
+        context <- setupActionContext @application (Typeable.typeOf controller) request respond
+        let ?context = context
+        let ?respond = respond
+        let ?request = context.request
+        let ?modelContext = ?request.modelContext
+        runAction controller
+        ) waiRequest waiRespond
 {-# INLINE runAction' #-}
 
 data ActionDoc controller where
@@ -264,6 +258,12 @@ compileControllerRoute ControllerRouteMap { routeParser } = routeParser
 compileControllerRoute ControllerRouteParser { routeParser } = routeParser
 {-# INLINE compileControllerRoute #-}
 
+-- | Catches exceptions from routing and rethrows them wrapped in
+-- 'RouterException' so the error handler middleware can distinguish
+-- routing failures from action failures.
+wrapRouterException :: IO a -> IO a
+wrapRouterException action = action `catch` \(e :: SomeException) -> throwIO (ErrorController.RouterException e)
+
 class FrontController application where
     controllers
         :: (?application :: application, ?request :: Request, ?respond :: Respond)
@@ -313,16 +313,16 @@ openApiRenderExpectationKey :: Vault.Key DocumentedRenderExpectation
 openApiRenderExpectationKey = unsafePerformIO Vault.newKey
 {-# NOINLINE openApiRenderExpectationKey #-}
 
-throwOpenApiRenderMismatch :: Text -> IO a
+throwOpenApiRenderMismatch :: (?request :: Request, ?respond :: Respond) => Text -> IO a
 throwOpenApiRenderMismatch message =
-    Exception.throwIO
-        (ResponseException (responseLBS status500 [(hContentType, "text/plain")] (cs message)))
+    respondAndExit (responseLBS status500 [(hContentType, "text/plain")] (cs message))
 {-# INLINE throwOpenApiRenderMismatch #-}
 
 validateOpenApiRenderedView
     :: forall view.
         ( Typeable.Typeable view
         , ?request :: Request
+        , ?respond :: Respond
         )
     => view
     -> JSON.Value
@@ -850,9 +850,9 @@ instance {-# OVERLAPPABLE #-} (AutoRoute controller, Controller controller) => C
         pure (toApp action)
       ) <|> (do
         (constr, allowedMethods) <- routeMatchParser @controller
-        pure $ \waiRequest waiRespond -> do
+        pure $ \waiRequest waiRespond -> wrapRouterException do
             case applyAction @controller constr (queryString waiRequest) of
-                Left e -> waiRespond $ responseLBS status400 [(hContentType, "text/plain")] (cs $ show e)
+                Left e -> Exception.throw e
                 Right action -> do
                     case parseMethod (requestMethod waiRequest) of
                         Right method -> do
@@ -1153,11 +1153,6 @@ withPrefix prefix routes = ControllerRouteParser
 
 frontControllerToWAIApp :: forall app (autoRefreshApp :: Type). (FrontController app, WSApp autoRefreshApp, Typeable autoRefreshApp, InitControllerContext ()) => Middleware -> app -> Application -> Application
 frontControllerToWAIApp middleware application notFoundAction waiRequest waiRespond = do
-    let
-        -- Use lazy pattern to defer vault lookup until environment is actually needed
-        -- This is needed for tests that don't have frameworkConfig in the vault
-        ~environment = waiRequest.frameworkConfig.environment
-
     let ?request = waiRequest
     let ?respond = waiRespond
 
@@ -1181,10 +1176,9 @@ frontControllerToWAIApp middleware application notFoundAction waiRequest waiResp
         Just handler -> (middleware (handler application)) waiRequest waiRespond
         Nothing -> do
             -- Slow path: Attoparsec for custom/dynamic route parsers only
-            let handleException :: SomeException -> IO (Either String Application)
-                handleException exception = pure $ Right $ ErrorController.handleRouterException environment exception
-
-                customParsers = concatMap getRouteParsers allRoutes
+            -- Wrap any exceptions during routing in RouterException so the error handler
+            -- middleware can distinguish them from action exceptions
+            let customParsers = concatMap getRouteParsers allRoutes
 
             routedAction :: Either String Application <-
                 (do
@@ -1193,7 +1187,7 @@ frontControllerToWAIApp middleware application notFoundAction waiRequest waiResp
                         Left s -> pure $ Left s
                         Right action -> pure $ Right action
                     )
-                `Exception.catch` handleException
+                |> wrapRouterException
             case routedAction of
                 Left _ -> notFoundAction waiRequest waiRespond
                 Right action -> (middleware action) waiRequest waiRespond
@@ -1258,14 +1252,15 @@ buildAutoRouteMap = HashMap.fromList
           allowedMethods = allowedMethodsForAction @controller actionName
           handler app waiRequest waiRespond =
               let ?application = app
-              in case parseMethod (requestMethod waiRequest) of
-                  Left err -> error ("Invalid HTTP method: " <> ByteString.unpack err)
-                  Right method -> do
-                      unless (allowedMethods |> includes method)
-                          (Exception.throw UnexpectedMethodException { allowedMethods, method })
-                      case applyAction @controller constr (queryString waiRequest) of
-                          Left e -> waiRespond $ responseLBS status400 [(hContentType, "text/plain")] (cs $ show e)
-                          Right action -> runAction' @application action waiRequest waiRespond
+              in wrapRouterException do
+                  case parseMethod (requestMethod waiRequest) of
+                      Left err -> error ("Invalid HTTP method: " <> ByteString.unpack err)
+                      Right method -> do
+                          unless (allowedMethods |> includes method)
+                              (Exception.throw UnexpectedMethodException { allowedMethods, method })
+                          case applyAction @controller constr (queryString waiRequest) of
+                              Left e -> Exception.throw e
+                              Right action -> runAction' @application action waiRequest waiRespond
     ]
     where
         prefix :: ByteString

@@ -8,13 +8,15 @@
 module IHP.ViewPrelude (
     module IHP.Prelude,
     module IHP.View.TimeAgo,
-    stringValue,
     module IHP.View.Form,
     module IHP.View.Types,
     hsx,
+    uncheckedHsx,
+    customHsx,
     toHtml,
     preEscapedToHtml,
     preEscapedTextValue,
+    stringValue,
     module IHP.ValidationSupport,
     pathTo,
     urlTo,
@@ -22,7 +24,6 @@ module IHP.ViewPrelude (
     module IHP.ModelSupport,
     module IHP.FrameworkConfig,
     module IHP.OpenApiSupport,
-    (!),
     module Data.Data,
     module Data.Aeson,
     module IHP.AutoRefresh.View,
@@ -42,11 +43,9 @@ module IHP.ViewPrelude (
 
 import IHP.Prelude
 import IHP.ViewSupport
-import Text.Blaze (stringValue, (!))
-import Text.Blaze.Html5 (preEscapedToHtml, preEscapedTextValue)
 import IHP.View.Form
-import IHP.HSX.QQ (hsx)
-import IHP.HSX.ToHtml
+import IHP.HSX.MarkupQQ (hsx, uncheckedHsx, customHsx)
+import IHP.HSX.Markup (ToHtml(..), preEscapedToHtml, preEscapedTextValue, stringValue)
 import IHP.View.TimeAgo
 import IHP.ValidationSupport
 import IHP.RouterSupport
