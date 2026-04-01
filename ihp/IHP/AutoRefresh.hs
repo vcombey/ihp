@@ -29,6 +29,7 @@ import qualified IHP.PGListener as PGListener
 import qualified Hasql.Session as HasqlSession
 import qualified IHP.Log as Log
 import qualified Data.Vault.Lazy as Vault
+import qualified Network.WebSockets as Websocket
 import System.IO.Unsafe (unsafePerformIO)
 import Network.Wai
 import qualified Data.TMap as TypeMap
@@ -138,6 +139,9 @@ instance WSApp AutoRefreshWSApp where
 
         autoRefreshServer <- getOrCreateAutoRefreshServer
         availableSessions <- getAvailableSessions autoRefreshServer
+        unless (sessionId `elem` availableSessions) do
+            Websocket.sendClose ?connection ("Auto refresh session unavailable" :: Text)
+
         when (sessionId `elem` availableSessions) do
             AutoRefreshSession { renderView, event } <- getSessionById autoRefreshServer sessionId
 
