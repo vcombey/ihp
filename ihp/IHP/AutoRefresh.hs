@@ -20,6 +20,7 @@ import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Maybe as Maybe
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding.Error as TextEncodingError
 import IHP.WebSocket
 import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
 import qualified IHP.PGListener as PGListener
@@ -248,7 +249,7 @@ getClientAutoRefreshSessionsHeader :: Request -> Text
 getClientAutoRefreshSessionsHeader request =
     request.requestHeaders
         |> lookup "X-IHP-Auto-Refresh-Sessions"
-        |> fmap Text.decodeUtf8With Text.lenientDecode
+        |> fmap (Text.decodeUtf8With TextEncodingError.lenientDecode)
         |> fromMaybe ""
 
 parseSessionIds :: Int -> Text -> [UUID]
