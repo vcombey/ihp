@@ -100,7 +100,8 @@ import Data.OpenApi (ToSchema)
 import qualified IHP.ViewSupport as ViewSupport
 import qualified Data.Vault.Lazy as Vault
 import System.IO.Unsafe (unsafePerformIO)
-import Network.HTTP.Types.Status (status500)
+import Network.HTTP.Types.Header (hContentType)
+import Network.HTTP.Types.Status (status400, status500)
 import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
 
 -- | Binds @?request@ and @?respond@ from WAI arguments, then runs the given action.
