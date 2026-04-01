@@ -18,6 +18,7 @@ import IHP.ModelSupport
 import qualified Control.Exception as Exception
 import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Maybe as Maybe
+import qualified Data.List as List
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as TextEncodingError
@@ -249,7 +250,7 @@ getAvailableSessions autoRefreshServer = do
             [cookieText, headerText]
                 |> map (parseSessionIds uuidCharCount)
                 |> concat
-                |> ordNub
+                |> List.nub
     requestedSessionIds
         |> filter (\id -> id `elem` allSessionIds)
         |> pure
