@@ -28,7 +28,7 @@ respondHtml (Markup builder) =
 -- | Like 'respondHtml', but always prepends 'autoRefreshMeta' to the response body.
 --
 -- Intended for fragment-style responses (e.g. HTMX) where a full layout is not rendered.
-respondHtmlFragment :: (?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => Markup -> IO a
+respondHtmlFragment :: (?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => Markup -> IO ResponseReceived
 respondHtmlFragment html = do
     frozenContext <- Context.freeze ?context
     let ?context = frozenContext
@@ -153,7 +153,7 @@ renderHtmlOrJson
 renderHtmlOrJson = render
 
 -- | Render a view fragment without layout and respond with 'autoRefreshMeta' prepended.
-renderFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO a
+renderFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
 renderFragment !view = renderHtmlFragment view >>= respondHtmlFragment
 {-# INLINE renderFragment #-}
 
