@@ -19,6 +19,7 @@ import qualified Control.Exception as Exception
 import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Maybe as Maybe
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import IHP.WebSocket
 import IHP.Controller.Context
 import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
@@ -130,7 +131,6 @@ instance WSApp AutoRefreshWSApp where
 
         autoRefreshServer <- getOrCreateAutoRefreshServer
         availableSessions <- getAvailableSessions autoRefreshServer
-
         when (sessionId `elem` availableSessions) do
             AutoRefreshSession { renderView, event } <- getSessionById autoRefreshServer sessionId
 
@@ -196,7 +196,6 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
     subscribedTables <- (.subscribedTables) <$> (autoRefreshServer |> readIORef)
 
     let subscriptionRequired = touchedTables |> filter (\table -> subscribedTables |> Set.notMember table)
-
     -- In development, always re-run trigger SQL for all touched tables because
     -- `make db` drops and recreates the database, destroying triggers that were
     -- previously installed. The trigger SQL is idempotent so re-running is safe.
@@ -236,14 +235,31 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
 getAvailableSessions :: (?request :: Request) => IORef AutoRefreshServer -> IO [UUID]
 getAvailableSessions autoRefreshServer = do
     allSessions <- (.sessions) <$> readIORef autoRefreshServer
-    text <- fromMaybe "" <$> getSession "autoRefreshSessions"
+    cookieText <- fromMaybe "" <$> getSession "autoRefreshSessions"
+    let headerText = getClientAutoRefreshSessionsHeader ?request
     let uuidCharCount = Text.length (UUID.toText UUID.nil)
     let allSessionIds = map (.id) allSessions
+    let requestedSessionIds =
+            [cookieText, headerText]
+                |> map (parseSessionIds uuidCharCount)
+                |> concat
+                |> ordNub
+    requestedSessionIds
+        |> filter (\id -> id `elem` allSessionIds)
+        |> pure
+
+getClientAutoRefreshSessionsHeader :: Request -> Text
+getClientAutoRefreshSessionsHeader request =
+    request.requestHeaders
+        |> lookup "X-IHP-Auto-Refresh-Sessions"
+        |> fmap Text.decodeUtf8With Text.lenientDecode
+        |> fromMaybe ""
+
+parseSessionIds :: Int -> Text -> [UUID]
+parseSessionIds uuidCharCount text =
     text
         |> Text.chunksOf uuidCharCount
         |> mapMaybe UUID.fromText
-        |> filter (\id -> id `elem` allSessionIds)
-        |> pure
 
 -- | Returns a session for a given session id. Errors in case the session does not exist.
 getSessionById :: IORef AutoRefreshServer -> UUID -> IO AutoRefreshSession
