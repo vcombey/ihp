@@ -13,6 +13,7 @@ import qualified Data.Text as Text
 import qualified Data.UUID as UUID
 import qualified Data.Vault.Lazy as Vault
 import qualified Network.Wai as Wai
+import Network.Wai.Internal (ResponseReceived (..))
 import Wai.Request.Params.Middleware (RequestBody (..), requestBodyVaultKey)
 
 data FragmentView = FragmentView
@@ -78,13 +79,13 @@ captureResponse
 captureResponse request action = do
     responseRef <- newIORef Nothing
     let ?request = request
-    let ?respond response = do
+    let ?respond = \response -> do
             writeIORef responseRef (Just response)
-            pure Wai.responseReceived
+            pure ResponseReceived
     context <- newControllerContext
     let ?context = context
 
-    _ <- Exception.try action :: IO (Either EarlyReturnException a)
+    _ <- Exception.try (() <$ action) :: IO (Either EarlyReturnException ())
     maybeResponse <- readIORef responseRef
     case maybeResponse of
         Just response -> pure response
