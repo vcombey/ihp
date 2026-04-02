@@ -105,9 +105,44 @@
     return config.target ? 'target:' + config.target : 'body';
   }
 
+  function isTargetWithinSwap(targetSelector, swapTarget) {
+    if (!swapTarget) {
+      return true;
+    }
+
+    if (targetSelector === null || targetSelector === undefined) {
+      return true;
+    }
+
+    var target = document.querySelector(targetSelector);
+    if (!target) {
+      return true;
+    }
+
+    return target === swapTarget || swapTarget.contains(target);
+  }
+
   function clearAutoRefreshMeta() {
     var metas = document.head.querySelectorAll('meta[property="ihp-auto-refresh-id"]');
     Array.prototype.forEach.call(metas, function (meta) {
+      if (meta.parentNode) {
+        meta.parentNode.removeChild(meta);
+      }
+    });
+  }
+
+  function clearAutoRefreshMetaForTarget(swapTarget) {
+    if (!swapTarget) {
+      clearAutoRefreshMeta();
+      return;
+    }
+
+    var metas = document.head.querySelectorAll('meta[property="ihp-auto-refresh-id"]');
+    Array.prototype.forEach.call(metas, function (meta) {
+      if (!isTargetWithinSwap(getMetaTarget(meta), swapTarget)) {
+        return;
+      }
+
       if (meta.parentNode) {
         meta.parentNode.removeChild(meta);
       }
@@ -349,9 +384,17 @@
     return configs;
   }
 
-  function socketHost() {
+  function serializedAutoRefreshSessionIds() {
+    return readAutoRefreshConfigs()
+      .map(function (config) {
+        return config.sessionId;
+      })
+      .join('');
+  }
+
+  function socketHost(serializedSessionIds) {
     var socketProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    return (
+    var url = (
       socketProtocol +
       '://' +
       window.location.hostname +
@@ -359,6 +402,10 @@
       document.location.port +
       '/AutoRefreshWSApp'
     );
+    if (serializedSessionIds) {
+      url += '?autoRefreshSessions=' + encodeURIComponent(serializedSessionIds);
+    }
+    return url;
   }
 
   function closeSession(key) {
@@ -376,6 +423,26 @@
 
   function closeAllSessions() {
     Object.keys(autoRefreshSessions).forEach(function (key) {
+      closeSession(key);
+    });
+  }
+
+  function closeSessionsForTarget(swapTarget) {
+    if (!swapTarget) {
+      closeAllSessions();
+      return;
+    }
+
+    Object.keys(autoRefreshSessions).forEach(function (key) {
+      var session = autoRefreshSessions[key];
+      if (!session) {
+        return;
+      }
+
+      if (!isTargetWithinSwap(session.targetSelector, swapTarget)) {
+        return;
+      }
+
       closeSession(key);
     });
   }
@@ -455,12 +522,22 @@
       expectedClose: false,
     };
 
-    session.socket = new WebSocket(socketHost());
+    session.socket = new WebSocket(
+      socketHost(serializedAutoRefreshSessionIds()),
+    );
 
     session.socket.onopen = function () {
       cancelAutoRefreshReload();
       resetAutoRefreshReconnectState();
       session.socket.send(session.sessionId);
+      document.dispatchEvent(
+        new CustomEvent('ihp:auto-refresh-session-open', {
+          detail: {
+            targetSelector: session.targetSelector,
+            sessionId: session.sessionId,
+          },
+        }),
+      );
     };
 
     session.socket.onmessage = function (event) {
@@ -480,6 +557,7 @@
         return;
       }
 
+      window.setTimeout(autoRefreshView, 100);
       scheduleAutoRefreshReload();
     };
 
@@ -559,8 +637,8 @@
           : null;
 
       if (isBoostedPageSwap(event)) {
-        clearAutoRefreshMeta();
-        closeAllSessions();
+        clearAutoRefreshMetaForTarget(target);
+        closeSessionsForTarget(target);
       }
 
       harvestAutoRefreshMetaFromHtml(responseText, target);
@@ -573,6 +651,19 @@
 
       inflightRequests += 1;
       autoRefreshPaused = true;
+    });
+
+    document.addEventListener('htmx:configRequest', function (event) {
+      if (!event || !event.detail || !event.detail.headers) {
+        return;
+      }
+
+      var sessionIds = serializedAutoRefreshSessionIds();
+      if (!sessionIds) {
+        return;
+      }
+
+      event.detail.headers['X-IHP-Auto-Refresh-Sessions'] = sessionIds;
     });
 
     document.addEventListener('htmx:afterRequest', function (event) {
@@ -598,4 +689,3 @@
     });
   }
 })();
-
