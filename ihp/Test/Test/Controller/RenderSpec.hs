@@ -3,17 +3,17 @@ module Test.Controller.RenderSpec where
 import IHP.Prelude
 import Test.Hspec
 import IHP.Controller.Render (renderFragment, respondHtmlFragment)
-import IHP.Controller.Response (ResponseException (..), responseHeadersVaultKey)
+import IHP.Controller.Response (responseHeadersVaultKey)
 import IHP.AutoRefresh (autoRefreshStateVaultKey)
 import IHP.AutoRefresh.Types (AutoRefreshState (..))
 import IHP.ViewPrelude
 import IHP.Test.Mocking (responseBody)
-import qualified Control.Exception as Exception
 import qualified Data.Text as Text
 import qualified Data.UUID as UUID
 import qualified Data.Vault.Lazy as Vault
 import qualified Network.Wai as Wai
-import Wai.Request.Params.Middleware (RequestBody (..), requestBodyVaultKey)
+import Network.Wai.Internal (ResponseReceived (..))
+import Wai.Request.Params.Middleware (RequestBody (..), Respond, requestBodyVaultKey)
 
 data FragmentView = FragmentView
 
@@ -73,18 +73,23 @@ buildRequest autoRefreshSession = do
 
 captureResponse
     :: Wai.Request
-    -> ((?context :: ControllerContext, ?request :: Wai.Request) => IO ())
+    -> ((?context :: ControllerContext, ?request :: Wai.Request, ?respond :: Respond) => IO ResponseReceived)
     -> IO Wai.Response
 captureResponse request action = do
+    responseRef <- newIORef Nothing
     let ?request = request
+    let ?respond = \response -> do
+            writeIORef responseRef (Just response)
+            pure ResponseReceived
     context <- newControllerContext
     let ?context = context
 
-    result <- Exception.try action :: IO (Either ResponseException ())
-    case result of
-        Left (ResponseException response) -> pure response
-        Right _ -> do
-            expectationFailure "Expected action to terminate via ResponseException"
+    _ <- action
+    maybeResponse <- readIORef responseRef
+    case maybeResponse of
+        Just response -> pure response
+        Nothing -> do
+            expectationFailure "Expected action to send a response"
             error "unreachable"
 
 parseSessionId :: String -> UUID
