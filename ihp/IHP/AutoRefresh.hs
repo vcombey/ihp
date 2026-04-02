@@ -104,30 +104,50 @@ autoRefresh runAction = do
                                 action ?theAction
                                 ) waiRequest waiRespond
 
+                    -- Pre-register the session before sending the response so the browser websocket
+                    -- can authenticate immediately when the fragment/page HTML arrives.
+                    event <- MVar.newEmptyMVar
+                    lastPing <- getCurrentTime
+                    let placeholderSession =
+                            AutoRefreshSession
+                                { id
+                                , renderView
+                                , event
+                                , tables = mempty
+                                , lastResponse = ""
+                                , lastPing
+                                }
+                    modifyIORef' autoRefreshServer (\server -> server { sessions = placeholderSession : server.sessions })
+                    let removeSession = modifyIORef' autoRefreshServer (\server -> server { sessions = filter (\session -> session.id /= id) server.sessions })
+
                     -- We save the allowed session ids to the session cookie to only grant a client access
                     -- to sessions it initially opened itself
                     --
                     -- Otherwise you might try to guess session UUIDs to access other peoples auto refresh sessions
-                    setSession "autoRefreshSessions" (map UUID.toText (id:availableSessions) |> Text.intercalate "")
+                    let serializedAvailableSessions = map UUID.toText (id:availableSessions) |> Text.intercalate ""
+                    setSession "autoRefreshSessions" serializedAvailableSessions
 
-                    withTableReadTracker do
-                        (result, capturedResponse) <- captureResponseBody ?respond \respond -> do
-                            let ?respond = respond
-                            runAction
+                    withTableReadTracker
+                        (do
+                            (result, capturedResponse) <- captureResponseBody ?respond \respond -> do
+                                let ?respond = respond
+                                runAction
 
-                        -- After the action completes, set up the auto refresh session
-                        tables <- readIORef ?touchedTables
-                        lastPing <- getCurrentTime
-                        case capturedResponse of
-                            Just lastResponse -> do
-                                event <- MVar.newEmptyMVar
-                                let session = AutoRefreshSession { id, renderView, event, tables, lastResponse, lastPing }
-                                modifyIORef' autoRefreshServer (\s -> s { sessions = session:s.sessions } )
-                                async (gcSessions autoRefreshServer)
-                                registerNotificationTrigger ?touchedTables autoRefreshServer
-                            Nothing -> pure () -- Response wasn't a builder type, can't do auto refresh
+                            -- After the action completes, set up the auto refresh session
+                            tables <- readIORef ?touchedTables
+                            lastPing <- getCurrentTime
+                            case capturedResponse of
+                                Just lastResponse -> do
+                                    updateSession autoRefreshServer id (\session -> session { tables, lastResponse, lastPing })
+                                    totalSessions <- length . (.sessions) <$> readIORef autoRefreshServer
+                                    Log.info ("AutoRefresh register session=" <> tshow id <> " path=" <> cs ?request.rawPathInfo)
+                                    async (gcSessions autoRefreshServer)
+                                    registerNotificationTrigger ?touchedTables autoRefreshServer
+                                Nothing -> removeSession
 
-                        pure result
+                            pure result
+                        )
+                        `Exception.onException` removeSession
 
 data AutoRefreshWSApp = AwaitingSessionID | AutoRefreshActive { sessionId :: UUID }
 instance WSApp AutoRefreshWSApp where
@@ -135,14 +155,20 @@ instance WSApp AutoRefreshWSApp where
 
     run = do
         sessionId <- receiveData @UUID
-        setState AutoRefreshActive { sessionId }
 
         autoRefreshServer <- getOrCreateAutoRefreshServer
         availableSessions <- getAvailableSessions autoRefreshServer
+        Log.info
+            ( "AutoRefresh websocket session="
+                <> tshow sessionId
+                <> " available="
+                <> tshow (sessionId `elem` availableSessions)
+            )
         unless (sessionId `elem` availableSessions) do
             Websocket.sendClose ?connection ("Auto refresh session unavailable" :: Text)
 
         when (sessionId `elem` availableSessions) do
+            setState AutoRefreshActive { sessionId }
             AutoRefreshSession { renderView, event } <- getSessionById autoRefreshServer sessionId
 
             let handleOtherException :: SomeException -> IO ()
@@ -248,10 +274,11 @@ getAvailableSessions autoRefreshServer = do
     allSessions <- (.sessions) <$> readIORef autoRefreshServer
     cookieText <- fromMaybe "" <$> getSession "autoRefreshSessions"
     let headerText = getClientAutoRefreshSessionsHeader ?request
+    let queryText = getClientAutoRefreshSessionsQuery ?request
     let uuidCharCount = Text.length (UUID.toText UUID.nil)
     let allSessionIds = map (.id) allSessions
     let requestedSessionIds =
-            [cookieText, headerText]
+            [cookieText, headerText, queryText]
                 |> map (parseSessionIds uuidCharCount)
                 |> concat
                 |> List.nub
@@ -263,6 +290,14 @@ getClientAutoRefreshSessionsHeader :: Request -> Text
 getClientAutoRefreshSessionsHeader request =
     request.requestHeaders
         |> lookup "X-IHP-Auto-Refresh-Sessions"
+        |> fmap (Text.decodeUtf8With TextEncodingError.lenientDecode)
+        |> fromMaybe ""
+
+getClientAutoRefreshSessionsQuery :: Request -> Text
+getClientAutoRefreshSessionsQuery request =
+    request.queryString
+        |> lookup "autoRefreshSessions"
+        |> join
         |> fmap (Text.decodeUtf8With TextEncodingError.lenientDecode)
         |> fromMaybe ""
 

@@ -33,7 +33,7 @@ respondHtmlFragment html = do
     frozenContext <- Context.freeze ?context
     let ?context = frozenContext
     let Markup builder = autoRefreshMeta <> html
-    respondAndExit $ responseBuilder status200 [(hContentType, "text/html; charset=utf-8"), (hConnection, "keep-alive")] builder
+    respondWith $ responseBuilder status200 [(hContentType, "text/html; charset=utf-8"), (hConnection, "keep-alive")] builder
 {-# INLINE respondHtmlFragment #-}
 
 respondSvg :: (?request :: Request, ?respond :: Respond) => Markup -> IO ResponseReceived
