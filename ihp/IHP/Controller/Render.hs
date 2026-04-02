@@ -42,9 +42,10 @@ respondSvg (Markup builder) =
 -- Intended for fragment-style responses (e.g. HTMX) where a full layout is not rendered.
 respondHtmlFragment :: (?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => Markup -> IO ResponseReceived
 respondHtmlFragment html = do
-        frozenContext <- Context.freeze ?context
-        let ?context = frozenContext
-        respondHtml (autoRefreshMeta <> html)
+    frozenContext <- Context.freeze ?context
+    let ?context = frozenContext
+    let Markup builder = autoRefreshMeta <> html
+    respondWith $ responseBuilder status200 [(hContentType, "text/html; charset=utf-8"), (hConnection, "keep-alive")] builder
 {-# INLINE respondHtmlFragment #-}
 
 renderHtml :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request) => view -> IO Markup
