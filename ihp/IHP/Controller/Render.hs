@@ -122,7 +122,6 @@ polymorphicRender = PolymorphicRender Nothing Nothing
 render
     :: forall view.
         ( ViewSupport.View view
-        , Typeable view
         , ?context :: ControllerContext
         , ?request :: Request
         , ?respond :: Respond
@@ -131,18 +130,13 @@ render
     -> IO ResponseReceived
 render !view = do
     let !currentRequest = ?request
-    renderPolymorphic PolymorphicRender
-        { html = Just (renderHtmlView currentRequest view)
-        , json = Just do
-                let jsonValue = ViewSupport.json view
-                validateOpenApiRenderedView view jsonValue
-                renderJson jsonValue
-        }
+    renderHtmlView currentRequest view
 
 {-# INLINE renderHtmlOrJson #-}
 renderHtmlOrJson
     :: forall view.
         ( ViewSupport.View view
+        , ViewSupport.JsonView view
         , Typeable view
         , ?context :: ControllerContext
         , ?request :: Request
@@ -150,7 +144,15 @@ renderHtmlOrJson
         )
     => view
     -> IO ResponseReceived
-renderHtmlOrJson = render
+renderHtmlOrJson !view = do
+    let !currentRequest = ?request
+    renderPolymorphic PolymorphicRender
+        { html = Just (renderHtmlView currentRequest view)
+        , json = Just do
+                let jsonValue = ViewSupport.json view
+                validateOpenApiRenderedView view jsonValue
+                renderJson jsonValue
+        }
 
 -- | Render a view fragment without layout and respond with 'autoRefreshMeta' prepended.
 renderFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived

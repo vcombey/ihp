@@ -97,6 +97,7 @@ instance ToSchema CreateSessionRequest
 instance View BandView where
     html BandView{..} = [hsx||]
 
+instance JsonView BandView where
     type JsonResponse BandView = BandPayload
 
     jsonTyped BandView{..} =
@@ -109,6 +110,7 @@ instance View BandView where
 instance View LegacyJsonView where
     html LegacyJsonView = [hsx||]
 
+instance JsonView LegacyJsonView where
     json LegacyJsonView =
         JSON.object
             [ "legacy" JSON..= True
@@ -117,6 +119,7 @@ instance View LegacyJsonView where
 instance View WrongJsonShapeView where
     html WrongJsonShapeView{..} = [hsx||]
 
+instance JsonView WrongJsonShapeView where
     type JsonResponse WrongJsonShapeView = BandPayload
 
     jsonTyped WrongJsonShapeView{..} =
@@ -134,6 +137,7 @@ instance View WrongJsonShapeView where
 instance View DocumentedCustomPathView where
     html DocumentedCustomPathView{..} = [hsx||]
 
+instance JsonView DocumentedCustomPathView where
     type JsonResponse DocumentedCustomPathView = BandPayload
 
     jsonTyped DocumentedCustomPathView{..} =
@@ -146,15 +150,16 @@ instance View DocumentedCustomPathView where
 instance View AckView where
     html AckView = [hsx||]
 
+instance JsonView AckView where
     type JsonResponse AckView = AckPayload
 
     jsonTyped AckView = AckPayload{ok = True}
 
 instance Controller DocumentedController where
-    action ShowBandAction{..} = render BandView{..}
-    action LegacyJsonAction = render LegacyJsonView
-    action WrongJsonAction = render LegacyJsonView
-    action WrongJsonShapeAction{..} = render WrongJsonShapeView{..}
+    action ShowBandAction{..} = renderHtmlOrJson BandView{..}
+    action LegacyJsonAction = renderHtmlOrJson LegacyJsonView
+    action WrongJsonAction = renderHtmlOrJson LegacyJsonView
+    action WrongJsonShapeAction{..} = renderHtmlOrJson WrongJsonShapeView{..}
 
 instance Controller CustomRouteController where
     action ListCustomAction = renderPlain "ListCustomAction"
@@ -168,8 +173,8 @@ instance Controller CrudNamedApiController where
         requestBodyResult <- decodeActionRequestBody @CreateSessionRequest
         case requestBodyResult of
             Left _ -> renderPlain "Invalid JSON"
-            Right (_ :: CreateSessionRequest) -> render AckView
-    action ShowApiSessionAction = render AckView
+            Right (_ :: CreateSessionRequest) -> renderHtmlOrJson AckView
+    action ShowApiSessionAction = renderHtmlOrJson AckView
 
 instance AutoRoute DocumentedController where
     autoRoute = autoRouteWithIdType (parseIntegerId @(Id Band))
@@ -279,7 +284,7 @@ config = do
 tests :: Spec
 tests = aroundAll (withMockContextAndApp RootApplication config) do
     describe "JSON rendering" do
-        it "renders typed jsonTyped values through render" $ withContextAndApp \application -> do
+        it "renders typed jsonTyped values through renderHtmlOrJson" $ withContextAndApp \application -> do
             let expected =
                     JSON.object
                         [ "bandId" JSON..= (12 :: Integer)

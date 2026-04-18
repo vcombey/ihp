@@ -11,6 +11,7 @@ module IHP.ViewSupport
 , Layout
 , Html
 , View (..)
+, JsonView (..)
 , currentViewId
 , forEach
 , isActivePath
@@ -46,7 +47,7 @@ import qualified Data.ByteString as ByteString
 import IHP.Router.UrlGenerator (HasPath(..))
 import Network.Wai
 import IHP.HSX.MarkupQQ (hsx)
-import IHP.HSX.Markup (ApplyAttribute(..))
+import IHP.HSX.Markup (ApplyAttribute(..), AttributeValue(..))
 import qualified Data.Sequences as Sequences
 import qualified IHP.View.CSSFramework as CSSFramework ()
 import IHP.View.Types
@@ -63,6 +64,9 @@ class View theView where
     -- Renders the view as html
     html :: (?context :: ControllerContext, ?view :: theView, ?request :: Request) => theView -> Markup
 
+-- | Implement this for views that can be rendered as JSON.
+-- Use 'renderHtmlOrJson' in your controller to dispatch based on the Accept header.
+class JsonView theView where
     type JsonResponse theView :: Type
     type JsonResponse theView = JSON.Value
 
@@ -229,6 +233,9 @@ liveReloadWebsocketUrl = ?request.frameworkConfig.ideBaseUrl
 
 instance InputValue (PrimaryKey table) => ApplyAttribute (Id' table) where
     applyAttribute attr attr' value = applyAttribute attr attr' (inputValue value)
+
+instance {-# OVERLAPPABLE #-} HasPath action => AttributeValue action where
+    attributeValue = attributeValue . pathTo
 
 
 -- | Adds a cache buster to a asset path
