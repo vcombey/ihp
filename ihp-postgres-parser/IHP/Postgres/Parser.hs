@@ -256,7 +256,7 @@ parseDDL = optional Char.space >> (manyTill statement eof)
 
 statement = do
     Char.space
-    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createSequence
+    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createPolicyFallback <|> try createSchema <|> try createView <|> try createSequence
     let alter = do
             lexeme "ALTER"
             alterTable <|> alterType <|> alterSequence
@@ -521,6 +521,29 @@ dollarQuoteTag = do
         pure (Text.cons firstCharacter remainingCharacters)
     char '$'
     pure ("$" <> maybe "" id tag <> "$")
+
+createSchema = do
+    lexeme "CREATE"
+    lexeme "SCHEMA"
+    raw <- cs <$> someTill anySingle (char ';')
+    pure UnknownStatement { raw = Text.stripEnd ("CREATE SCHEMA " <> raw) }
+
+createView = do
+    lexeme "CREATE"
+    orReplace <- isJust <$> optional do
+        lexeme "OR"
+        lexeme "REPLACE"
+    recursive <- isJust <$> optional (lexeme "RECURSIVE")
+    lexeme "VIEW"
+    raw <- cs <$> someTill anySingle (char ';')
+    let prefix = "CREATE " <> (if orReplace then "OR REPLACE " else "") <> (if recursive then "RECURSIVE " else "") <> "VIEW "
+    pure UnknownStatement { raw = Text.stripEnd (prefix <> raw) }
+
+createPolicyFallback = do
+    lexeme "CREATE"
+    lexeme "POLICY"
+    raw <- cs <$> someTill anySingle (char ';')
+    pure UnknownStatement { raw = Text.stripEnd ("CREATE POLICY " <> raw) }
 
 createTable = do
     lexeme "CREATE"
