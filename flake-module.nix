@@ -458,7 +458,9 @@ ihpFlake:
                             IHP_RELATION_SUPPORT = if cfg.relationSupport then "1" else "0";
                             src = builtins.path { path = config.ihp.projectPath; name = "source"; };
                             nativeBuildInputs = with pkgs; [
-                                (ghcCompiler.ghcWithPackages (p: cfg.haskellPackages p ++ cfg.devHaskellPackages p ++ [p.ihp-ide p.ihp-schema-compiler]))
+                                (ghcCompiler.ghcWithPackages (p: cfg.haskellPackages p ++ cfg.devHaskellPackages p))
+                                ghcCompiler.ihp-ide
+                                ghcCompiler.ihp-schema-compiler
                                 gnumake
                                 postgresql_18
                             ];
