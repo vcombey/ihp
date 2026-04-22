@@ -71,7 +71,7 @@ parseDDL = optional space >> (manyTill statement eof)
 
 statement = do
     space
-    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createSequence
+    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createPolicyFallback <|> try createSchema <|> try createView <|> try createSequence
     let alter = do
             lexeme "ALTER"
             alterTable <|> alterType <|> alterSequence
@@ -92,6 +92,29 @@ createExtension = do
         lexeme "public"
     char ';'
     pure CreateExtension { name, ifNotExists = True }
+
+createSchema = do
+    lexeme "CREATE"
+    lexeme "SCHEMA"
+    raw <- cs <$> someTill anySingle (char ';')
+    pure UnknownStatement { raw = Text.stripEnd ("CREATE SCHEMA " <> raw) }
+
+createView = do
+    lexeme "CREATE"
+    orReplace <- isJust <$> optional do
+        lexeme "OR"
+        lexeme "REPLACE"
+    recursive <- isJust <$> optional (lexeme "RECURSIVE")
+    lexeme "VIEW"
+    raw <- cs <$> someTill anySingle (char ';')
+    let prefix = "CREATE " <> (if orReplace then "OR REPLACE " else "") <> (if recursive then "RECURSIVE " else "") <> "VIEW "
+    pure UnknownStatement { raw = Text.stripEnd (prefix <> raw) }
+
+createPolicyFallback = do
+    lexeme "CREATE"
+    lexeme "POLICY"
+    raw <- cs <$> someTill anySingle (char ';')
+    pure UnknownStatement { raw = Text.stripEnd ("CREATE POLICY " <> raw) }
 
 createTable = do
     lexeme "CREATE"
@@ -780,7 +803,7 @@ alterTable = do
     let alter = do
             lexeme "ALTER"
             alterColumn tableName
-    enableRowLevelSecurity tableName <|> add <|> drop <|> rename <|> alter
+    enableRowLevelSecurity tableName <|> forceRowLevelSecurity tableName <|> add <|> drop <|> rename <|> alter
 
 alterType = do
     lexeme "TYPE"
@@ -840,6 +863,14 @@ enableRowLevelSecurity tableName = do
     char ';'
     pure EnableRowLevelSecurity { tableName }
 
+forceRowLevelSecurity tableName = do
+    lexeme "FORCE"
+    lexeme "ROW"
+    lexeme "LEVEL"
+    lexeme "SECURITY"
+    char ';'
+    pure UnknownStatement { raw = Text.stripEnd ("ALTER TABLE " <> tableName <> " FORCE ROW LEVEL SECURITY") }
+
 createPolicy = do
     lexeme "CREATE"
     lexeme "POLICY"
@@ -891,10 +922,14 @@ commentStatement = do
     pure Comment { content }
 
 qualifiedIdentifier = do
-    optional $ try do
-        lexeme "public"
+    schemaOrIdentifier <- identifier
+    maybeIdentifier <- optional $ try do
         char '.'
-    identifier
+        space
+        identifier
+    case maybeIdentifier of
+        Just identifier -> pure identifier
+        Nothing -> pure schemaOrIdentifier
 
 addColumn tableName = do
     lexeme "COLUMN"
