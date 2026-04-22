@@ -172,7 +172,7 @@ CABAL_EOF
 
     prodGhcOptions = "-funbox-strict-fields -fconstraint-solver-iterations=100 -fdicts-strict -with-rtsopts=\"${rtsFlags}\"";
 
-    appSrc = filter { root = pkgs.nix-gitignore.gitignoreSource [] projectPath; include = [filter.isDirectory "Makefile" (filter.matchExt "hs")]; exclude = ["static" "Frontend"]; name = "${appName}-source"; };
+    appSrc = filter { root = pkgs.nix-gitignore.gitignoreSource [] projectPath; include = [filter.isDirectory "Makefile" (filter.matchExt "hs")]; exclude = [ (filter.inDirectory "static") (filter.inDirectory "Frontend") (filter.inDirectory "frontend") ]; name = "${appName}-source"; };
 
     scriptDir = projectPath + "/Application/Script";
 
