@@ -26,6 +26,21 @@ spec = do
         it "should parse an CREATE EXTENSION with schema suffix" do
             parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True }
 
+        it "should parse CREATE SCHEMA statements from pg_dump" do
+            parseSql "CREATE SCHEMA private;" `shouldBe` UnknownStatement { raw = "CREATE SCHEMA private" }
+
+        it "should parse non-public schema prefixes from pg_dump" do
+            parseSql "CREATE TABLE private.users ();" `shouldBe` StatementCreateTable (table "users")
+
+        it "should parse FORCE ROW LEVEL SECURITY statements from pg_dump" do
+            parseSql "ALTER TABLE ONLY private.users FORCE ROW LEVEL SECURITY;" `shouldBe` UnknownStatement { raw = "ALTER TABLE users FORCE ROW LEVEL SECURITY" }
+
+        it "should parse CREATE VIEW statements from pg_dump" do
+            parseSql "CREATE VIEW public.users AS SELECT id FROM private.users;" `shouldBe` UnknownStatement { raw = "CREATE VIEW public.users AS SELECT id FROM private.users" }
+
+        it "should preserve complex CREATE POLICY statements from pg_dump" do
+            parseSql "CREATE POLICY \"Users can see their rows\" ON private.users AS PERMISSIVE FOR ALL TO public USING (true);" `shouldBe` UnknownStatement { raw = "CREATE POLICY \"Users can see their rows\" ON private.users AS PERMISSIVE FOR ALL TO public USING (true)" }
+
         it "should parse a line comment" do
             parseSql "-- Comment value" `shouldBe` Comment { content = " Comment value" }
 
