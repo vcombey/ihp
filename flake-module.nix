@@ -445,7 +445,9 @@ ihpFlake:
                             name = "${config.ihp.appName}-integration-tests";
                             src = builtins.path { path = config.ihp.projectPath; name = "source"; };
                             nativeBuildInputs = with pkgs; [
-                                (ghcCompiler.ghcWithPackages (p: cfg.haskellPackages p ++ cfg.devHaskellPackages p ++ [p.ihp-ide p.ihp-schema-compiler]))
+                                (ghcCompiler.ghcWithPackages (p: cfg.haskellPackages p ++ cfg.devHaskellPackages p))
+                                ghcCompiler.ihp-ide
+                                ghcCompiler.ihp-schema-compiler
                                 gnumake
                                 postgresql
                             ];
