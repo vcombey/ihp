@@ -244,6 +244,18 @@ ihpFlake:
             ihp = ihpFlake.inputs.self;
             ghcCompiler = cfg.ghcCompiler;
             ihpLib = ihpFlake.inputs.self.packages.${system}.ihp-env-var-backwards-compat;
+            postgresPackage =
+                let cfg = config.devenv.shells.default.services.postgres; in
+                    if cfg.extensions != null
+                    then
+                        if builtins.hasAttr "withPackages" cfg.package
+                        then cfg.package.withPackages cfg.extensions
+                        else
+                            builtins.throw ''
+                                Cannot add extensions to the PostgreSQL package.
+                                `services.postgres.package` is missing the `withPackages` attribute. Did you already add extensions to the package?
+                            ''
+                    else cfg.package;
             # Auto-detect whether a build-time PostgreSQL is needed (e.g. ihp-typed-sql)
             buildWithPostgres = builtins.any (p: (p.pname or "") == "ihp-typed-sql") (cfg.haskellPackages ghcCompiler);
             mkProdServer = { optimized, optimizationLevel }: import "${ihp}/NixSupport/default.nix" {
@@ -449,7 +461,7 @@ ihpFlake:
                                 ghcCompiler.ihp-ide
                                 ghcCompiler.ihp-schema-compiler
                                 gnumake
-                                postgresql
+                                postgresPackage
                             ];
                             buildPhase = ''
                                 export IHP_LIB=${ihpLib}
@@ -464,6 +476,8 @@ ihpFlake:
                                 pg_ctl -D "$PGDATA" -l "$TMPDIR/pg.log" start
 
                                 createdb -h "$PGHOST" app
+                                psql -v ON_ERROR_STOP=1 -h "$PGHOST" app < ${self'.packages.ihp-schema}/IHPSchema.sql
+                                psql -v ON_ERROR_STOP=1 -h "$PGHOST" app < ${self'.packages.schema}/Schema.sql
                                 export DATABASE_URL="postgresql:///app?host=$PGHOST"
 
                                 # typedSql describes each [typedSql| … |] query against
