@@ -196,6 +196,7 @@ createFormContext record =
         { model = record
         , formAction = ""
         , formMethod = "POST"
+        , formEnctype = Nothing
         , cssFramework = theCSSFramework
         , formId = ""
         , formClass = if isNew record then "new-form" else "edit-form"
@@ -211,6 +212,7 @@ buildForm formContext inner = [hsx|
         <form
             method={formContext.formMethod}
             action={formContext.formAction}
+            enctype={formContext.formEnctype}
             id={formContext.formId}
             class={formContext.formClass}
             data-disable-javascript-submission={formContext.disableJavascriptSubmission}

@@ -182,7 +182,7 @@ Put the export in `.envrc` if you want it for every dev shell.
 
 The `render` function now only renders HTML. Previously it used Accept header negotiation to serve both HTML and JSON, but the JSON path was unused in practice.
 
-If you had a `View` instance that defined `json`, move it to a separate `JsonView` instance and use `renderHtmlOrJson`:
+If you had a `View` instance that defined `json`, keep it on the `View` instance and use `renderHtmlOrJson` for actions that should still negotiate HTML vs JSON. `json` can return a typed payload by setting the view's `JsonResponse` associated type:
 
 ```haskell
 -- Before
@@ -196,10 +196,10 @@ action ShowPostAction { postId } = do
 
 -- After
 instance View ShowView where
-    html ShowView { .. } = [hsx|...|]
+    type JsonResponse ShowView = Post
 
-instance JsonView ShowView where
-    json ShowView { .. } = toJSON post
+    html ShowView { .. } = [hsx|...|]
+    json ShowView { .. } = post
 
 action ShowPostAction { postId } = do
     post <- fetch postId

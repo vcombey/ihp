@@ -1,7 +1,9 @@
-{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, TypeFamilies, ConstrainedClassMethods, ScopedTypeVariables, FunctionalDependencies, AllowAmbiguousTypes #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances, TypeFamilies, ConstrainedClassMethods, ScopedTypeVariables, FunctionalDependencies, AllowAmbiguousTypes, RankNTypes, DefaultSignatures, MultiParamTypeClasses, TypeApplications #-}
 
 module IHP.ControllerSupport
 ( Action'
+, ControllerAction'
+, RunControllerAction (..)
 , (|>)
 , getRequestBody
 , getRequestPath
@@ -36,6 +38,7 @@ import Prelude
 import Data.IORef (IORef, modifyIORef', readIORef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
+import Data.Kind (Type)
 import Data.Maybe (fromMaybe)
 import Control.Exception.Safe (SomeException, fromException, try, throwIO)
 import qualified Control.Exception as Exception
@@ -103,7 +106,7 @@ runAction controller = do
 
     let ?modelContext = authenticatedModelContext
     beforeAction
-    action controller
+    runControllerAction @controller (action controller)
 
 -- | Bind implicit parameters and run 'initContext' for a controller action.
 -- Used by 'runActionWithNewContext' and WebSocket handlers.
@@ -257,7 +260,7 @@ jumpToAction :: forall action. (Controller action, ?context :: ControllerContext
 jumpToAction theAction = do
     let ?theAction = theAction
     beforeAction @action
-    action theAction
+    runControllerAction @action (action theAction)
 
 getRequestBody :: (?request :: Request) => IO LBS.ByteString
 getRequestBody =
