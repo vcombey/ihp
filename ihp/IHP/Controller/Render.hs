@@ -110,6 +110,7 @@ renderHtmlOrJson !view = do
 renderHtmlOrJsonWithStatusCode
     :: forall view.
         ( ViewSupport.View view
+        , ViewSupport.JsonView view
         , Data.Aeson.ToJSON (ViewSupport.JsonResponse view)
         , Typeable view
         , ?context :: ControllerContext
