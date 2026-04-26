@@ -90,22 +90,48 @@ parseHeader line text =
             then Right trimmed
             else Left (ParseError line ("routes: invalid controller name: " <> quoted trimmed))
 
--- | Parse one route line: METHOD(|METHOD)* /path(?name&name)* ActionRef
+-- | Parse one route line:
+--
+-- @
+-- METHOD(|METHOD)* /path(?name&name)* ActionRef
+-- /path(?name&name)* ActionRef
+-- @
+--
+-- When the method column is omitted, methods are inferred from the action
+-- constructor name.
 parseRouteLine :: (Int, Text) -> Either ParseError Route
 parseRouteLine (line, text) = do
     let trimmed = Text.strip text
-    (methodsField, rest1) <- splitFirstToken line trimmed
-    methods <- parseMethods line methodsField
-    (pathAndQueryField, rest2) <- splitFirstToken line (Text.strip rest1)
-    (path, queryParams) <- parsePathAndQuery line pathAndQueryField
-    action <- parseActionRef line (Text.strip rest2)
-    pure Route
-        { routeMethods     = methods
-        , routePath        = path
-        , routeQueryParams = queryParams
-        , routeAction      = action
-        , routeLine        = line
-        }
+    (firstField, rest1) <- splitFirstToken line trimmed
+    if looksLikePath firstField
+        then do
+            (path, queryParams) <- parsePathAndQuery line firstField
+            action <- parseActionRef line (Text.strip rest1)
+            pure Route
+                { routeMethods     = inferMethodsFromActionName (actionName action)
+                , routePath        = path
+                , routeQueryParams = queryParams
+                , routeAction      = action
+                , routeLine        = line
+                }
+        else do
+            methods <- parseMethods line firstField
+            (pathAndQueryField, rest2) <- splitFirstToken line (Text.strip rest1)
+            (path, queryParams) <- parsePathAndQuery line pathAndQueryField
+            action <- parseActionRef line (Text.strip rest2)
+            pure Route
+                { routeMethods     = methods
+                , routePath        = path
+                , routeQueryParams = queryParams
+                , routeAction      = action
+                , routeLine        = line
+                }
+
+looksLikePath :: Text -> Bool
+looksLikePath text =
+    case Text.uncons text of
+        Just ('/', _) -> True
+        _ -> False
 
 -- | Split a line at the first whitespace, returning (first word, remainder).
 splitFirstToken :: Int -> Text -> Either ParseError (Text, Text)
