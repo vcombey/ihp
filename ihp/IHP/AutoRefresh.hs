@@ -65,7 +65,7 @@ autoRefresh runAction = do
 
             case autoRefreshState of
                 Just (AutoRefreshEnabled {}) -> do
-                    -- When this function calls the 'action ?theAction' in the other case
+                    -- When this function calls the current controller action in the other case
                     -- we will evaluate this branch
                     runAction
                 _ -> do
@@ -87,7 +87,7 @@ autoRefresh runAction = do
                                 let ?request = originalRequest
                                 let ?context = ?request
                                 let ?respond = respond
-                                action ?theAction
+                                runControllerAction (action ?theAction)
                                 ) waiRequest waiRespond
 
                     -- We save the allowed session ids to the session cookie to only grant a client access
