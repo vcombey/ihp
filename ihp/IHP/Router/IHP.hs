@@ -18,10 +18,11 @@ This module is the IHP-specific shim that composes on top:
 
   * 'routes' \/ 'routesDec' — IHP-flavoured quoter. Emits everything
     'IHP.Router.DSL.TH.genericEmit' produces, plus a 'CanRoute'
-    instance per controller (whose @toControllerRoute@ wraps
-    @\<ctrlLower>Trie runAction'@ in a 'ControllerRouteTrie') and, for
-    lowercase-header blocks, a @webRoutes :: [ControllerRoute app]@
-    binding ready for @FrontController.controllers@.
+    instance per monomorphic classic controller (whose @toControllerRoute@
+    wraps @\<ctrlLower>Trie runAction'@ in a 'ControllerRouteTrie') and,
+    for lowercase-header blocks, a @webRoutes :: [ControllerRoute app]@
+    binding ready for @FrontController.controllers@. Lowercase bindings
+    can also mount typed GADT actions and polymorphic framework controllers.
   * 'instance UrlCapture (Id' table)' — IHP's primary-key-driven
     capture. Lives here (not in @ihp-router@) because it needs
     'IHP.ModelSupport.PrimaryKey'.
@@ -148,8 +149,8 @@ ihpRoutesDec = routesDec
 -- | Emit the IHP-flavoured declarations on top of whatever 'genericEmit'
 -- produces:
 --
---   * one @instance CanRoute Ctrl@ per controller, whose
---     @toControllerRoute@ wraps @\<ctrlLower>Trie runAction'@ in a
+--   * one @instance CanRoute Ctrl@ per monomorphic classic controller,
+--     whose @toControllerRoute@ wraps @\<ctrlLower>Trie runAction'@ in a
 --     'ControllerRouteTrie';
 --   * for a lowercase-header block: a top-level
 --     @webRoutes :: [ControllerRoute app]@ binding.
@@ -161,12 +162,15 @@ ihpEmit ParsedBlock { pbHeader, pbGroups } = do
             | any (ciIsGadt . fst) pbGroups ->
                 fail "routes: typed GADT action routes must use a lowercase binding header, e.g. [routes|webRoutes ...|], because parseRoute cannot mount an indexed action family"
             | otherwise -> pure ()
-    canRouteDecs <- traverse (\(ctrl, _) -> emitCanRoute ctrl) (filter (not . ciIsGadt . fst) pbGroups)
+    canRouteDecs <- traverse (\(ctrl, _) -> emitCanRoute ctrl) (filter shouldEmitCanRoute pbGroups)
     actionMethodDecs <- traverse (\(ctrl, routes) -> emitHasActionMethods ctrl routes) (filter (ciIsGadt . fst) pbGroups)
     bindingDecs <- case pbHeader of
         HeaderLowercase name -> emitNamedBinding name pbGroups
         _                    -> pure []
     pure (canRouteDecs <> actionMethodDecs <> bindingDecs)
+  where
+    shouldEmitCanRoute (ctrl, _) =
+        not (ciIsGadt ctrl) && null (ciTypeVars ctrl)
 
 ---------------------------------------------------------------------------
 -- IHP-specific TH names (resolved at splice use-site)
@@ -274,9 +278,8 @@ emitNamedBinding bindingTxt groups = do
     gadtEntries <- traverse (uncurry (emitGadtControllerRoute appTyVarName)) gadtGroups
     gadtCtx <- concat <$> traverse (uncurry gadtControllerConstraints) gadtGroups
     let
-        parseRouteName = TH.mkName "parseRoute"
         entries =
-            [ TH.AppTypeE (TH.VarE parseRouteName) (controllerAppliedType c)
+            [ classicControllerRouteExp appTy c
             | c <- classicCtrls
             ] <> gadtEntries
         bindingExp = TH.ListE entries
@@ -287,9 +290,8 @@ emitNamedBinding bindingTxt groups = do
         initContextTy  = TH.AppT (TH.ConT (TH.mkName "InitControllerContext")) appTy
         typeableAppTy  = TH.AppT (TH.ConT ''Typeable) appTy
         perCtrl ctrl =
-            let ctrlTy = controllerAppliedType ctrl
+            let ctrlTy = controllerAppliedTypeForBinding appTy ctrl
              in [ TH.AppT (TH.ConT (TH.mkName "Controller")) ctrlTy
-                , TH.AppT (TH.ConT (TH.mkName "CanRoute")) ctrlTy
                 , TH.AppT (TH.ConT ''Typeable) ctrlTy
                 ]
         ctx = implicitReqTy : implicitResTy : implicitAppTy
@@ -304,9 +306,25 @@ emitNamedBinding bindingTxt groups = do
         [ TH.SigD valName bindingTy
         , TH.FunD valName [TH.Clause [] (TH.NormalB bindingExp) []]
         ]
-  where
+    where
     classicCtrls = [ctrl | (ctrl, _) <- groups, not (ciIsGadt ctrl)]
     gadtGroups = [(ctrl, routesForController) | (ctrl, routesForController) <- groups, ciIsGadt ctrl]
+
+controllerAppliedTypeForBinding :: TH.Type -> ControllerInfo -> TH.Type
+controllerAppliedTypeForBinding appTy ControllerInfo{ciTypeName, ciTypeVars} =
+    foldl TH.AppT (TH.ConT ciTypeName) (replicate (length ciTypeVars) appTy)
+
+classicControllerRouteExp :: TH.Type -> ControllerInfo -> TH.Exp
+classicControllerRouteExp appTy ctrl =
+    TH.AppE
+        (TH.ConE controllerRouteTrieCon)
+        ( TH.AppE
+            (TH.VarE (trieValueName (ciTypeName ctrl)))
+            ( TH.AppTypeE
+                (TH.AppTypeE (TH.VarE runActionPrimeFn) appTy)
+                (controllerAppliedTypeForBinding appTy ctrl)
+            )
+        )
 
 emitGadtControllerRoute :: Name -> ControllerInfo -> [ValidatedRoute] -> Q TH.Exp
 emitGadtControllerRoute appTyVarName _ctrl routesForController = do
