@@ -40,7 +40,7 @@ module IHP.Router.IHP
 
 import Prelude
 import Data.Dynamic (toDyn)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.OpenApi (ToSchema)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -392,9 +392,16 @@ routeParameterExps route =
         ]
 
     queryParameterExps =
-        [ routeParameterDocExp urlName innerType 'QueryParameter (kind == QFRequired)
-        | (urlName, _fieldName, kind, innerType) <- vrQueryFields route
+        [ routeParameterDocExp urlName (queryParameterSchemaType route fieldName kind innerType) 'QueryParameter (kind == QFRequired)
+        | (urlName, fieldName, kind, innerType) <- vrQueryFields route
         ]
+
+queryParameterSchemaType :: ValidatedRoute -> Text -> QueryFieldKind -> TH.Type -> TH.Type
+queryParameterSchemaType route fieldName kind innerType =
+    case kind of
+        QFList -> fromMaybe innerType (lookup fieldName (coFieldsOrder (vrCon route)))
+        QFRequired -> innerType
+        QFOptional -> innerType
 
 routeParameterDocExp :: Text -> TH.Type -> Name -> Bool -> TH.Exp
 routeParameterDocExp name valueType location required =
@@ -447,8 +454,10 @@ gadtRouteConstraints ctrl route = do
                 VSLiteral _ -> []
             ]
         queryConstraints =
-            [ queryValueConstraints innerType <> dummyValueConstraint fieldType
-            | (_urlName, fieldName, _kind, innerType) <- vrQueryFields route
+            [ queryValueConstraints innerType
+                <> schemaValueConstraints (queryParameterSchemaType route fieldName kind innerType)
+                <> dummyValueConstraint fieldType
+            | (_urlName, fieldName, kind, innerType) <- vrQueryFields route
             , fieldType <- maybeToList (lookup fieldName (coFieldsOrder (vrCon route)))
             ]
         fieldDummyConstraints =
@@ -469,6 +478,12 @@ queryValueConstraints :: TH.Type -> [TH.Type]
 queryValueConstraints valueType =
     [ TH.AppT (TH.ConT ''UrlCapture) valueType
     , TH.AppT (TH.ConT ''ToSchema) valueType
+    , TH.AppT (TH.ConT ''Typeable) valueType
+    ]
+
+schemaValueConstraints :: TH.Type -> [TH.Type]
+schemaValueConstraints valueType =
+    [ TH.AppT (TH.ConT ''ToSchema) valueType
     , TH.AppT (TH.ConT ''Typeable) valueType
     ]
 
