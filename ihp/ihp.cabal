@@ -171,7 +171,6 @@ library
         , IHP.AuthSupport.Authentication
         , IHP.AuthSupport.Lockable
         , IHP.Controller.Param
-        , IHP.Controller.ActionDefinition
         , IHP.Controller.TypedAction
         , IHP.Controller.FileUpload
         , IHP.Controller.Redirect
@@ -297,7 +296,6 @@ library
           IHP.PGListener
     autogen-modules: Paths_ihp
     other-modules:
-        IHP.OpenApiSupport.ActionDoc
         Paths_ihp
 
 source-repository head
