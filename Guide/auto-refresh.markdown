@@ -158,8 +158,8 @@ Keep this script order:
 4. `ihp-auto-refresh-htmx.js`
 5. `app.js`
 
-Use `/ihp-auto-refresh.js` for full-page morphing without HTMX.  
-Use `/ihp-auto-refresh-htmx.js` when HTMX controls fragment swaps.  
+Use `/ihp-auto-refresh.js` for full-page morphing without HTMX.
+Use `/ihp-auto-refresh-htmx.js` when HTMX controls fragment swaps.
 Do not include both scripts on the same page.
 Also do not include both `/helpers.js` and `/helpers-htmx.js` on the same page.
 
