@@ -9,5 +9,6 @@ packages:
     ihp-postgres-parser/
     ihp-schema-compiler/
     wai-asset-path/
+    wai-early-return/
     wai-flash-messages/
     wai-request-params/
