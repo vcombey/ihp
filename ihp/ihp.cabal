@@ -198,6 +198,7 @@ library
         , IHP.RequestVault.Helper
         , IHP.RequestVault.ModelContext
         , IHP.ControllerPrelude
+        , IHP.TypedControllerPrelude
         , IHP.ControllerSupport
         , IHP.Environment
         , IHP.FetchRelated
