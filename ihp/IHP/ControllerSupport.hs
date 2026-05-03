@@ -101,12 +101,9 @@ runAction controller = do
     let ?theAction = controller
     let ?request = ?context
 
-    -- Exceptions are now caught by the error handler middleware
-    authenticatedModelContext <- prepareRLSIfNeeded ?modelContext
-
-    let ?modelContext = authenticatedModelContext
-    beforeAction
-    runControllerAction @controller (action controller)
+        let ?modelContext = authenticatedModelContext
+        beforeAction
+        runControllerAction @controller (action controller)
 
 -- | Bind implicit parameters and run 'initContext' for a controller action.
 -- Used by 'runActionWithNewContext' and WebSocket handlers.
