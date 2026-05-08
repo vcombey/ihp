@@ -775,7 +775,7 @@ parseFunctionSetting :: Parser FunctionOption
 parseFunctionSetting = do
     symbol' "SET"
     settingName <- qualifiedIdentifier
-    symbol "="
+    symbol "=" <|> symbol' "TO"
     settingValue <- Text.strip . cs <$> someTill anySingle (lookAhead functionOptionBoundary)
     space
     pure (FunctionSettingOption FunctionSetting { settingName, settingValue })
