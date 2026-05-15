@@ -14,7 +14,6 @@ import Data.Aeson qualified as JSON
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.OpenApi qualified as OpenApi
-import Data.Proxy (Proxy (..))
 import Data.Text qualified as Text
 import Data.Vector qualified as Vector
 import IHP.TypedControllerPrelude hiding (request)
@@ -63,7 +62,8 @@ instance JSON.ToJSON ApiError
 instance ToSchema ApiError
 
 data NullablePayload = NullablePayload
-    { nullableText :: !(Maybe Text)
+    { requiredText :: !Text
+    , nullableText :: !(Maybe Text)
     , nullableError :: !(Maybe ApiError)
     }
     deriving (Eq, Show, Generic)
@@ -463,6 +463,11 @@ tests = aroundAll (withMockContextAndApp RootApplication config) do
         it "marks Maybe fields as nullable in generic OpenAPI schemas" $ \_ -> do
             let schema = JSON.toJSON (OpenApi.toSchema (Proxy :: Proxy NullablePayload))
             let Just properties = lookupValue "properties" schema
+            lookupValue "required" schema `shouldBe` Just (JSON.Array (Vector.fromList [JSON.String "requiredText"]))
+
+            let Just requiredText = lookupValue "requiredText" properties
+            lookupValue "type" requiredText `shouldBe` Just (JSON.String "string")
+            lookupValue "nullable" requiredText `shouldBe` Nothing
 
             let Just nullableText = lookupValue "nullableText" properties
             lookupValue "type" nullableText `shouldBe` Just (JSON.String "string")
