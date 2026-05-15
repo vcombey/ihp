@@ -39,6 +39,15 @@ let
                 then localPackage name
                 else fastBuild super.${name};
 
+            # OpenAPI 3.0 represents Maybe fields as optional + nullable.
+            # Upstream openapi3 currently drops nullable for Maybe in generic
+            # record fields, which makes generated clients reject explicit null.
+            patchedOpenapi3 = fastBuild (final.haskell.lib.overrideCabal super.openapi3 (old: {
+                patches = (old.patches or []) ++ [
+                    "${flakeRoot}/patches/openapi3-maybe-nullable.patch"
+                ];
+            }));
+
             # For quick testing during development, you can use callCabal2nix directly
             # (slower eval due to IFD, but no generated files needed):
             #   localPackageIFD = name: fastBuild (super.callCabal2nix name (filteredSrc name) {});
@@ -84,6 +93,7 @@ let
             # session decryption + optional Set-Cookie) are shipped by the pinned
             # nixpkgs at 1.0.0, so we consume them from the default set verbatim
             # for a cache hit instead of the previous hackagePackage forks.
+            openapi3 = patchedOpenapi3;
 
             # HsOpenSSL 0.11.7.10 fails to compile against openssl 3.6.1+ on Linux
             # because the C compiler escalates `-Wpointer-sign` to an error (the
