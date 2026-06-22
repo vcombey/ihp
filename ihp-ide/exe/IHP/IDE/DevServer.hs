@@ -19,14 +19,15 @@ import Data.String.Conversions (cs)
 import qualified IHP.Telemetry as Telemetry
 import qualified IHP.Version as Version
 
-import qualified IHP.Log.Types as Log
-import qualified IHP.Log as Log
-import Data.Default (def, Default (..))
+import System.Log.FastLogger (FastLogger, toLogStr, LogType'(..), withFastLogger, defaultBufSize)
 import qualified IHP.IDE.CodeGen.MigrationGenerator as MigrationGenerator
 import Main.Utf8 (withUtf8)
 import qualified IHP.FrameworkConfig as FrameworkConfig
 import qualified Control.Concurrent.Chan.Unagi as Queue
 import IHP.IDE.FileWatcher
+import IHP.IDE.GhciSupport (ghciArguments)
+import qualified IHP.IDE.SplitMode as SplitMode
+import qualified IHP.IDE.WorkerSignal as WorkerSignal
 import qualified System.Environment as Env
 import qualified System.Directory.OsPath as Directory
 import qualified Control.Exception.Safe as Exception
@@ -79,7 +80,9 @@ mainWithOptions wrapWithDirenv = withUtf8 do
         IO.hSetBuffering IO.stderr IO.LineBuffering
 
         databaseNeedsMigration <- newIORef False
-        portConfig <- findAvailablePortConfig
+        -- Honors the PORT env var when set (e.g. Claude Code preview, reverse
+        -- proxies, fixed-port multi-app setups); otherwise scans from port 8000.
+        portConfig <- portConfigFromEnvironment
 
         -- Start the dev server in Debug mode by setting the env var DEBUG=1
         -- Like: $ DEBUG=1 devenv up
@@ -90,17 +93,25 @@ mainWithOptions wrapWithDirenv = withUtf8 do
         -- ensuring seamless transitions during app restarts (no connection refused errors)
         appSocket <- createListeningSocket portConfig.appPort
 
-        bracket (Log.newLogger def) (\logger -> logger.cleanup) \logger -> do
+        withFastLogger (LogStdout defaultBufSize) \rawLogger -> do
+            let logger msg = rawLogger (msg <> "\n")
             (ghciInChan, ghciOutChan) <- Queue.newChan
             liveReloadClients <- newIORef mempty
             lastSchemaCompilerError <- newIORef Nothing
             let ?context = Context { portConfig, isDebugMode, logger, ghciInChan, ghciOutChan, wrapWithDirenv, liveReloadClients, lastSchemaCompilerError, appSocket }
 
             -- Print IHP Version when in debug mode
-            when isDebugMode (Log.debug ("IHP Version: " <> Version.ihpVersion))
+            when isDebugMode (logger (toLogStr ("IHP Version: " <> Version.ihpVersion)))
 
             ghciIsLoadingVar <- newIORef False
             reloadGhciVar :: MVar () <- newEmptyMVar
+
+            -- One-shot: if the project already has jobs at boot, write
+            -- build/RunJobs.hs so the worker process can load it. The file
+            -- watcher below re-checks on every change, so this also kicks in
+            -- when the user scaffolds their first job after `devenv up`.
+            initialHasJobs <- SplitMode.hasJobs
+            when initialHasJobs SplitMode.generateRunJobsModule
 
             withStatusServer ghciIsLoadingVar \startStatusServer stopStatusServer statusServerStandardOutput statusServerErrorOutput statusServerClients -> do
                 -- Compile Schema before loading the app
@@ -150,22 +161,31 @@ fileWatcherParams liveReloadClients databaseNeedsMigration reloadGhciVar startSt
             -- Use tryPutMVar to avoid blocking if a reload is already pending.
             -- This handles the case where multiple file changes happen in quick succession.
             void $ tryPutMVar reloadGhciVar ()
+            signalWorker
         , onSchemaChanged = do
             concurrently_ (tryCompileSchema reloadGhciVar startStatusServer) (updateDatabaseIsOutdated databaseNeedsMigration)
+            -- Schema regeneration touches build/Generated/Types.hs which the worker
+            -- depends on; tell it to reload too.
+            signalWorker
         , onAssetChanged = notifyAssetChange liveReloadClients
         }
+  where
+    -- Fire and forget — sendReload handles its own retry/backoff. We don't want
+    -- the file watcher to block on a slow worker.
+    --
+    -- We re-check 'hasJobs' on every signal (rather than caching at boot) so
+    -- that scaffolding the first job after `devenv up` correctly activates
+    -- the worker process. The check is a small recursive scan and runs off
+    -- the watcher thread.
+    signalWorker = void $ Concurrent.forkIO $ Exception.handleAny
+        (\_ -> pure ())
+        do
+            currentHasJobs <- SplitMode.hasJobs
+            when currentHasJobs do
+                SplitMode.generateRunJobsModule
+                WorkerSignal.sendReload SplitMode.workerSocketPath
 
-ghciArguments :: [String]
-ghciArguments =
-    [ "-threaded"
-    , "-fomit-interface-pragmas"
-    , "-j"
-    , "-O0"
-    , "-package-env -" -- Do not load `~/.ghc/arch-os-version/environments/name file`, global packages interfere with our packages
-    , "-ignore-dot-ghci" -- Ignore the global ~/.ghc/ghci.conf That file sometimes causes trouble (specifically `:set +c +s`)
-    , "-ghci-script", ".ghci" -- Because the previous line ignored default ghci config file locations, we have to manual load our .ghci
-    , "+RTS", "-A64m", "-n4m", "-H256m", "--nonmoving-gc", "-Iw60", "-N4"
-    ]
+-- 'ghciArguments' is shared with the dev worker — see 'IHP.IDE.GhciSupport'.
 
 withGHCI :: (?context :: Context) => Concurrent.ThreadId -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a) -> IO a
 withGHCI mainThreadId callback = do
@@ -298,15 +318,23 @@ withLoadedApp inputHandle outputHandle errorHandle logLine callback = do
 
     pure result
 
-withRunningApp :: (?context :: Context) => Socket.PortNumber -> Handle -> Handle -> Handle -> Process.ProcessHandle -> (OutputLine -> IO ()) -> (MVar () -> IO a) -> IO a
+withRunningApp :: (?context :: Context) => Socket.PortNumber -> Handle -> Handle -> Handle -> Process.ProcessHandle -> (OutputLine -> IO ()) -> (MVar [ByteString] -> IO a) -> IO a
 withRunningApp appPort inputHandle outputHandle errorHandle processHandle logLine callback = do
     outputVar :: MVar ByteString.Builder <- newMVar ""
     serverStarted :: MVar () <- newEmptyMVar
     serverStopped :: MVar () <- newEmptyMVar
-    appCrashed :: MVar () <- newEmptyMVar
+    -- Carries the captured crash message (the exception lines), so a startup
+    -- crash can be surfaced as the prominent error instead of being buried in
+    -- the build log.
+    appCrashed :: MVar [ByteString] <- newEmptyMVar
     let onMatch line = case line of
             line | "Server started" `isInfixOf` line -> putMVar serverStarted ()
-            line | "[[IHP_APP_CRASHED]]" `isInfixOf` line -> void $ tryPutMVar appCrashed ()
+            line | "[[IHP_APP_CRASHED]]" `isInfixOf` line -> do
+                -- The handler wrapped around the app's `main` (see startApp) prints
+                -- the exception between [[IHP_APP_CRASHED_BEGIN]] and [[IHP_APP_CRASHED]].
+                -- Pull those lines out of the accumulated output so we can show them.
+                accumulatedOutput <- readMVar outputVar
+                void $ tryPutMVar appCrashed (extractCrashMessage (cs (ByteString.toLazyByteString accumulatedOutput)))
             _ -> pure ()
 
     let startApp = do
@@ -317,7 +345,7 @@ withRunningApp appPort inputHandle outputHandle errorHandle processHandle logLin
             socketFd <- Socket.unsafeFdSocket ?context.appSocket
             sendGhciCommand inputHandle $ "System.Environment.setEnv \"IHP_SOCKET_FD\" \"" <> cs (show socketFd) <> "\""
             sendGhciCommand inputHandle "stopVar :: ClassyPrelude.MVar () <- ClassyPrelude.newEmptyMVar"
-            sendGhciCommand inputHandle "app <- ClassyPrelude.async (ClassyPrelude.race_ (ClassyPrelude.takeMVar stopVar) (main `ClassyPrelude.catch` \\(e :: SomeException) -> IHP.Prelude.putStrLn (tshow e) >> IHP.Prelude.putStrLn \"[[IHP_APP_CRASHED]]\"))"
+            sendGhciCommand inputHandle "app <- ClassyPrelude.async (ClassyPrelude.race_ (ClassyPrelude.takeMVar stopVar) (main `ClassyPrelude.catch` \\(e :: SomeException) -> IHP.Prelude.putStrLn \"[[IHP_APP_CRASHED_BEGIN]]\" >> IHP.Prelude.putStrLn (tshow e) >> IHP.Prelude.putStrLn \"[[IHP_APP_CRASHED]]\"))"
     let stopApp = do
             sendGhciCommand inputHandle "ClassyPrelude.putMVar stopVar ()"
             sendGhciCommand inputHandle "ClassyPrelude.cancel app"
@@ -328,11 +356,25 @@ withRunningApp appPort inputHandle outputHandle errorHandle processHandle logLin
             putMVar serverStopped ()
 
     let waitForServerStart = do
-            -- Wait up to 60 seconds for "Server started" message
-            -- If the app crashes during startup, "Server started" will never be printed
-            maybeStarted <- timeout (60 * 1000000) (takeMVar serverStarted)
-            case maybeStarted of
-                Just () -> callback appCrashed
+            -- Wait up to 60 seconds for the "Server started" message.
+            -- If the app crashes during startup (e.g. a missing env var), react to the
+            -- crash right away instead of waiting out the full timeout — and surface the
+            -- crash message as the prominent error rather than the misleading timeout.
+            --
+            -- Use readMVar (not takeMVar) so the losing branch of the race never drains
+            -- the signal: if "Server started" and a crash land near-simultaneously and the
+            -- race reports the start, appCrashed stays full so the callback below still
+            -- observes the crash instead of blocking forever on an emptied MVar.
+            outcome <- timeout (60 * 1000000) (race (readMVar serverStarted) (readMVar appCrashed))
+            case outcome of
+                Just (Left ()) -> callback appCrashed
+                Just (Right crashMessage) -> do
+                    let reportedMessage = if null crashMessage
+                            then ["App crashed during startup. Check the output below for details."]
+                            else crashMessage
+                    forM_ reportedMessage (logLine . ErrorOutput)
+                    -- Throw exception to trigger bracket cleanup and return to status server
+                    Exception.throwString "App crashed during startup"
                 Nothing -> do
                     logLine (ErrorOutput "App startup timed out after 60 seconds. Check for runtime errors above.")
                     -- Throw exception to trigger bracket cleanup and return to status server
@@ -377,10 +419,14 @@ refresh inputHandle outputHandle errorHandle logOutput = do
 
 receiveAppOutput :: (?context :: Context) => OutputLine -> IO ()
 receiveAppOutput line = do
-    case line of
-        StandardOutput output -> ByteString.putStrLn output
-        ErrorOutput output -> ByteString.putStrLn output
-    Queue.writeChan ?context.ghciInChan line
+    let output = case line of
+            StandardOutput output -> output
+            ErrorOutput output -> output
+    -- The crash markers are an internal detail used to detect and capture runtime
+    -- crashes — don't echo them to the console or the browser status page.
+    unless ("[[IHP_APP_CRASHED" `isInfixOf` output) do
+        ByteString.putStrLn output
+        Queue.writeChan ?context.ghciInChan line
 
 checkDatabaseIsOutdated :: IO Bool
 checkDatabaseIsOutdated = do
@@ -396,7 +442,7 @@ updateDatabaseIsOutdated databaseNeedsMigrationRef = do
             writeIORef databaseNeedsMigrationRef databaseNeedsMigration
 
     case result of
-        Left exception -> Log.error (tshow exception)
+        Left exception -> ?context.logger (toLogStr (tshow exception))
         Right _ -> pure ()
 
 tryCompileSchema :: (?context :: Context) => MVar () -> MVar () -> IO ()
@@ -405,7 +451,7 @@ tryCompileSchema reloadGhciVar startStatusServer = do
 
     case result of
         Left exception -> do
-            Log.error (tshow exception)
+            ?context.logger (toLogStr (tshow exception))
             receiveAppOutput (ErrorOutput (cs $ displayException exception))
 
             writeIORef ?context.lastSchemaCompilerError (Just exception)

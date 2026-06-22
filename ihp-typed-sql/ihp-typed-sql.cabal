@@ -1,6 +1,6 @@
 cabal-version:       2.2
 name:                ihp-typed-sql
-version:             1.5.0
+version:             1.6.0
 synopsis:            Compile-time typed SQL quasiquoter for IHP
 description:         A quasiquoter that infers Haskell types from PostgreSQL at compile time.
 license:             MIT
@@ -37,7 +37,7 @@ common shared-properties
         , TemplateHaskell
         , OverloadedRecordDot
         , DeepSubsumption
-    ghc-options: -Werror=incomplete-patterns -Werror=unused-imports
+    ghc-options: -Werror=incomplete-patterns -Werror=unused-imports -Werror=missing-home-modules
 
 library
     import: shared-properties
@@ -52,12 +52,16 @@ library
         IHP.TypedSql.TypeMapping
         IHP.TypedSql.Decoders
         IHP.TypedSql.RowType
+    other-modules:
+        IHP.TypedSql.CompileTimeDatabase
     build-depends:
-            base >= 4.17.0 && < 4.22
+            base >= 4.17.0 && < 4.23
             , ihp
             , aeson
             , bytestring
             , containers
+            , directory
+            , filepath
             , hasql
             , hasql-dynamic-statements
             , hasql-mapping
@@ -66,9 +70,11 @@ library
             , postgresql-syntax >= 0.4 && < 0.5
             , postgresql-types
             , postgresql-libpq
+            , process
             , scientific
             , string-conversions
             , template-haskell
+            , temporary
             , text
 
 source-repository head
@@ -82,9 +88,9 @@ test-suite tests
     hs-source-dirs: Test
     ghc-options: -threaded
     build-depends:
-            base >= 4.17.0 && < 4.22
+            base >= 4.17.0 && < 4.23
             , ihp
-            , ihp-log
+            , fast-logger
             , ihp-typed-sql
             , containers
             , directory

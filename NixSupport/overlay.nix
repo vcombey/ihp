@@ -62,10 +62,8 @@ let
         in {
             ihp = localPackage "ihp";
             ihp-with-docs = localPackageWithHaddock "ihp";
-            ihp-context = localPackage "ihp-context";
             ihp-router = localPackage "ihp-router";
             ihp-pagehead = localPackage "ihp-pagehead";
-            ihp-log = localPackage "ihp-log";
             ihp-pglistener = localPackage "ihp-pglistener";
             ihp-modal = localPackage "ihp-modal";
             ihp-ide = localPackage "ihp-ide";
@@ -90,6 +88,7 @@ let
             ihp-imagemagick = localPackage "ihp-imagemagick";
             ihp-hspec = localPackage "ihp-hspec";
             ihp-welcome = localPackage "ihp-welcome";
+            ihp-log = localPackage "ihp-log";
 
             # Forks of wai-session / wai-session-clientsession with deferred
             # session decryption and optional Set-Cookie (Maybe ByteString).
@@ -99,30 +98,40 @@ let
             wai-session-clientsession-deferred = hackagePackage "wai-session-clientsession-deferred";
             openapi3 = patchedOpenapi3;
 
-            # Can be removed after v0.3.2 is on hackage
-            # https://github.com/tippenein/countable-inflections/pull/6
-            countable-inflections = final.haskell.lib.overrideSrc super.countable-inflections {
-                version = "0.3.2";
-                src = final.fetchFromGitHub {
-                    owner = "tippenein";
-                    repo = "countable-inflections";
-                    rev = "9cae03513ad76783c226509f5c00dfe7989893e8";
-                    hash = "sha256-Pd9wQgEtc3e39c0iJR347kdawbyShDEtQqEzrIEu0eQ=";
-                };
-            };
+            # HsOpenSSL 0.11.7.10 fails to compile against openssl 3.6.1 on Linux
+            # because the C compiler escalates `-Wpointer-sign` to an error (the
+            # OpenSSL 3.6.1 headers tightened up `char*` vs `unsigned char*`).
+            # nixpkgs already passes `-Wno-error=incompatible-pointer-types`; we
+            # extend that with `-Wno-error=pointer-sign` until upstream HsOpenSSL
+            # / nixpkgs covers it.
+            HsOpenSSL = final.haskell.lib.appendConfigureFlags super.HsOpenSSL [
+                "--ghc-option=-optc=-Wno-error=pointer-sign"
+            ];
 
-            # Hasql 1.10 ecosystem upgrade for postgresql-types binary encoding support.
-            # Pre-generated nix files in NixSupport/hackage/ to avoid IFD.
-            # dontCheck on postgresql/hasql packages: their tests require a running PostgreSQL server.
-            postgresql-binary = final.haskell.lib.dontCheck (hackagePackage "postgresql-binary");
+            # countable-inflections: nixpkgs at the pinned rev already ships
+            # 0.3.2 (in the cached haskellPackages.ihp closure), so we drop the
+            # previous git-src override and consume `super.countable-inflections`
+            # verbatim for a cache hit. Restore the override only if a reverted
+            # nixpkgs pin no longer carries 0.3.2.
+
+            # Hasql 1.10 ecosystem.
+            #
+            # These attrs mirror the upstream `ihpHasqlScope` from
+            # NixOS/nixpkgs#519795 (configuration-common.nix) so that
+            # derivations are bit-identical to nixpkgs' Hydra-built
+            # `haskellPackages.ihp` closure and resolve straight from
+            # cache.nixos.org. Keep in sync with configuration-common.nix.
             postgresql-connection-string = hackagePackage "postgresql-connection-string";
 
-            hasql = final.haskell.lib.dontCheck (final.haskell.lib.doJailbreak (hackagePackage "hasql"));
-            hasql-pool = final.haskell.lib.dontCheck (hackagePackage "hasql-pool");
-            hasql-dynamic-statements = final.haskell.lib.dontCheck (hackagePackage "hasql-dynamic-statements");
-            # hasql-implicits 0.2.0.2 is the default on nixpkgs-unstable, no override needed
-            hasql-transaction = final.haskell.lib.dontCheck (hackagePackage "hasql-transaction");
-            hasql-notifications = final.haskell.lib.dontCheck (hackagePackage "hasql-notifications");
+            hasql                    = super.hasql_1_10_3;
+            hasql-pool               = super.hasql-pool_1_4_2;
+            hasql-dynamic-statements = super.hasql-dynamic-statements_0_5_1;
+            hasql-transaction        = super.hasql-transaction_1_2_2;
+            hasql-notifications      = super.hasql-notifications_0_2_5_0;
+            postgresql-binary        = super.postgresql-binary_0_15_0_1;
+            # text-builder 1.0.0.5 is needed by postgresql-simple-postgresql-types
+            text-builder             = super.text-builder_1_0_0_5;
+
             # hasql-interpolate: upstream 1.0.1.0 requires hasql <1.10; use fork with hasql 1.10 support
             # https://github.com/awkward-squad/hasql-interpolate/pull/27
             # Uses overrideCabal instead of callCabal2nix to avoid IFD and Hackage cabal revision fetch failures
@@ -138,21 +147,12 @@ let
             # Fork of temporary using OsPath instead of FilePath
             temporary-ospath = hackagePackage "temporary-ospath";
 
-            # ptr-poker 0.1.3 is the default on nixpkgs-unstable, no override needed
-            # postgresql-simple-postgresql-types: bridge providing FromField/ToField instances
-            # for all postgresql-types types (Point, Polygon, Inet, Interval, etc.) in postgresql-simple
-            postgresql-simple-postgresql-types = final.haskell.lib.dontCheck (final.haskell.lib.doJailbreak (hackagePackage "postgresql-simple-postgresql-types"));
-            # ptr-peeker is marked broken in nixpkgs but is needed by postgresql-types
-            # https://github.com/nikita-volkov/ptr-peeker/issues/10
-            ptr-peeker = final.haskell.lib.dontCheck (final.haskell.lib.markUnbroken super.ptr-peeker);
-            # postgresql-types-algebra 0.1 matches the nixpkgs default; only
-            # doJailbreak is needed to widen its `ptr-peeker ^>=0.1` bound so
-            # it accepts the markUnbroken ptr-peeker 0.2 above.
-            postgresql-types-algebra = final.haskell.lib.doJailbreak super.postgresql-types-algebra;
-            # dontCheck: tests require a running PostgreSQL server
-            postgresql-types = final.haskell.lib.dontCheck (final.haskell.lib.doJailbreak (hackagePackage "postgresql-types"));
-            hasql-mapping = final.haskell.lib.doJailbreak (hackagePackage "hasql-mapping");
-            hasql-postgresql-types = final.haskell.lib.dontHaddock (final.haskell.lib.doJailbreak (hackagePackage "hasql-postgresql-types"));
+            # postgresql-simple-postgresql-types and hasql-mapping are marked
+            # broken in nixpkgs; unmark them to mirror upstream ihpHasqlScope's
+            # `unmarkBroken` (configuration-nix.nix applies dontCheck for
+            # postgresql-simple-postgresql-types).
+            postgresql-simple-postgresql-types = final.haskell.lib.markUnbroken super.postgresql-simple-postgresql-types;
+            hasql-mapping = final.haskell.lib.markUnbroken super.hasql-mapping;
         };
 in
 final: prev: {
@@ -178,9 +178,8 @@ final: prev: {
         ];
     };
 
-    # Experimental: GHC 9.14 (bleeding edge, expected to fail)
-    # Only defined when nixpkgs includes the ghc914 package set.
-    # Attribute always exists but throws if ghc914 is unavailable in nixpkgs.
+    # GHC 9.14 — opt-in for apps using the digitallyinduced binary cache.
+    # To use: set `ihp.ghcCompiler = pkgs.ghc914;` in your flake-module config.
     ghc914 =
         if prev.haskell.packages ? ghc914
         then final.haskell.packages.ghc914.override {
@@ -190,7 +189,60 @@ final: prev: {
                     say = final.haskell.lib.dontCheck super.say;
                     text-icu = final.haskell.lib.dontCheck super.text-icu;
                     cryptonite = final.haskell.lib.dontCheck super.cryptonite;
+
+                    # relude doctests fail due to changed GHC error messages in 9.14
+                    relude = final.haskell.lib.dontCheck super.relude;
+
+                    # Upgrade ghc-tcplugin-api to 0.19 (supports GHC 9.14)
+                    ghc-tcplugin-api = self.callCabal2nix "ghc-tcplugin-api"
+                        (final.fetchzip {
+                            url = "https://hackage.haskell.org/package/ghc-tcplugin-api-0.19.0.0/ghc-tcplugin-api-0.19.0.0.tar.gz";
+                            sha256 = "sha256-2jm1Q2lmaG6vtRnxcvxf4U2gvQdVkDL0h8PWaTpDWJA=";
+                        }) {};
+
+                    # Upgrade ghc-typelits-natnormalise to 0.9.6 (supports GHC 9.14)
+                    ghc-typelits-natnormalise = final.haskell.lib.dontCheck (self.callCabal2nix "ghc-typelits-natnormalise"
+                        (final.fetchzip {
+                            url = "https://hackage.haskell.org/package/ghc-typelits-natnormalise-0.9.6/ghc-typelits-natnormalise-0.9.6.tar.gz";
+                            sha256 = "sha256-a1afS4iJrB9hVp3FK+fozbWVxIt75H/gO6Q+PeoV53k=";
+                        }) {});
+
+                    # Upgrade ghc-typelits-knownnat to 0.8.4 (supports GHC 9.14)
+                    ghc-typelits-knownnat = final.haskell.lib.dontCheck (self.callCabal2nix "ghc-typelits-knownnat"
+                        (final.fetchzip {
+                            url = "https://hackage.haskell.org/package/ghc-typelits-knownnat-0.8.4/ghc-typelits-knownnat-0.8.4.tar.gz";
+                            sha256 = "sha256-PyYMUvJ8/miqusNl7+xay8OJqtK1/uHNQEiLr1utieg=";
+                        }) {});
                 })
+                # GHC 9.14 ships base-4.22, containers-0.8, template-haskell-2.24.
+                # Many nixpkgs packages have tight upper bounds on these boot libraries.
+                (let
+                    jailbreak = names: self: super:
+                        builtins.listToAttrs (map (name: {
+                            inherit name;
+                            value = final.haskell.lib.doJailbreak super.${name};
+                        }) (builtins.filter (name: super ? ${name}) names));
+                in jailbreak [
+                    # cabal-install 3.16.1.0 / cabal-install-solver want Cabal &
+                    # Cabal-syntax >=3.16.1.0, but GHC 9.14 ships the 3.16.0.0 boot
+                    # libs (a patch-release skew) — drop the bound.
+                    "cabal-install" "cabal-install-solver" "cabal-install-parsers"
+                    "cabal-add"
+                    # hlint -> extensions pins Cabal-syntax <3.15, so nixpkgs builds
+                    # the Cabal-syntax_3_14_2_0 attr — which caps containers <0.8 /
+                    # time <1.15 and fails on GHC 9.14's containers-0.8 / time-1.15.
+                    # Jailbreaking lets that pinned version build on the new boot libs.
+                    "Cabal-syntax_3_14_2_0"
+                    "lucid" "lucid2" "clay" "tasty-hspec" "config-ini" "fsnotify"
+                    "string-interpolate" "rebase" "rerebase" "with-utf8" "minio-hs"
+                    "sandwich" "brick" "postgresql-simple" "hasql-dynamic-statements"
+                    "hasql-implicits" "warp-systemd" "ghc-trace-events"
+                    "algebraic-graphs" "hie-bios" "stan" "modern-uri"
+                    "ghc-lib-parser" "ghc-lib-parser-ex" "ghc-syntax-highlighter"
+                    "colourista" "extensions" "trial" "trial-optparse-applicative"
+                    "trial-tomland" "tomland" "validation-selective" "slist"
+                    "ihp-zip" "warp-systemd"
+                ])
             ];
         }
         else throw "ghc914 is not available in this nixpkgs";

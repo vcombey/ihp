@@ -14,10 +14,10 @@ module IHP.ControllerSupport
 , getFiles
 , Controller (..)
 , runAction
-, Context.ControllerContext
+, ControllerContext
 , InitControllerContext (..)
 , runActionWithNewContext
-, newContextForAction
+, initActionContext
 , respondWith
 , respondAndExit
 , earlyReturn
@@ -30,8 +30,8 @@ module IHP.ControllerSupport
 , Respond
 , Request
 , rlsContextVaultKey
-, setupActionContext
 , prepareRLSIfNeeded
+, initRequestContext
 , ResponseReceived
 ) where
 
@@ -55,8 +55,8 @@ import Wai.Request.Params.Middleware (Respond)
 import qualified Data.CaseInsensitive
 import qualified Data.Typeable as Typeable
 import IHP.FrameworkConfig.Types (FrameworkConfig (..), ConfigProvider)
-import qualified IHP.Controller.Context as Context
 import IHP.Controller.Response
+import IHP.RequestVault (insertApplicationContext) -- also imports HasField instances for Request
 import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
 import Network.HTTP.Types.Header
 import qualified Data.Aeson as Aeson
@@ -75,8 +75,15 @@ import System.IO.Unsafe (unsafePerformIO)
 
 type Action' = IO ResponseReceived
 
+-- | The WAI 'Request' threaded through controllers and views as the
+-- @?context@ implicit parameter. All request-scoped state lives in
+-- @request.vault@ (see 'IHP.RequestVault'). The type alias is preserved
+-- for source compatibility with existing @?context :: ControllerContext@
+-- type signatures.
+type ControllerContext = Request
+
 type ControllerAction' controller =
-    ( ?context :: Context.ControllerContext
+    ( ?context :: ControllerContext
     , ?modelContext :: ModelContext
     , ?theAction :: controller
     , ?respond :: Respond
@@ -90,7 +97,7 @@ type ControllerAction' controller =
 -- dispatch without requiring each controller instance to repeat the same
 -- 'runControllerAction' implementation.
 class RunControllerAction controller action where
-    runControllerActionDefault :: (?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
+    runControllerActionDefault :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
 
 instance RunControllerAction controller (IO ResponseReceived) where
     runControllerActionDefault controllerAction = controllerAction
@@ -100,19 +107,19 @@ class (Show controller, Eq controller) => Controller controller where
     type ControllerAction controller :: Type
     type ControllerAction controller = IO ResponseReceived
 
-    beforeAction :: (?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => IO ()
+    beforeAction :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => IO ()
     beforeAction = pure ()
     {-# INLINABLE beforeAction #-}
 
-    action :: (?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => controller -> ControllerAction controller
+    action :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => controller -> ControllerAction controller
 
-    runControllerAction :: (?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => ControllerAction controller -> IO ResponseReceived
-    default runControllerAction :: (RunControllerAction controller (ControllerAction controller), ?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => ControllerAction controller -> IO ResponseReceived
+    runControllerAction :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => ControllerAction controller -> IO ResponseReceived
+    default runControllerAction :: (RunControllerAction controller (ControllerAction controller), ?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => ControllerAction controller -> IO ResponseReceived
     runControllerAction = runControllerActionDefault @controller
     {-# INLINABLE runControllerAction #-}
 
 class InitControllerContext application where
-    initContext :: (?modelContext :: ModelContext, ?request :: Request, ?respond :: Respond, ?context :: Context.ControllerContext) => IO ()
+    initContext :: (?modelContext :: ModelContext, ?request :: Request, ?respond :: Respond, ?context :: ControllerContext) => IO ()
     initContext = pure ()
     {-# INLINABLE initContext #-}
 
@@ -120,20 +127,22 @@ instance InitControllerContext () where
     initContext = pure ()
 
 {-# INLINE runAction #-}
-runAction :: forall controller. (Controller controller, ?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?respond :: Respond) => controller -> IO ResponseReceived
+runAction :: forall controller. (Controller controller, ?context :: ControllerContext, ?modelContext :: ModelContext, ?respond :: Respond) => controller -> IO ResponseReceived
 runAction controller = do
     let ?theAction = controller
-    let ?request = ?context.request
-    ErrorController.withRequestContext ?request do
-        -- Exceptions are now caught by the error handler middleware
-        authenticatedModelContext <- prepareRLSIfNeeded ?modelContext
+    let ?request = ?context
 
-        let ?modelContext = authenticatedModelContext
-        beforeAction
-        runControllerAction @controller (action controller)
+    -- Exceptions are now caught by the error handler middleware
+    authenticatedModelContext <- prepareRLSIfNeeded ?modelContext
 
-{-# INLINE newContextForAction #-}
-newContextForAction
+    let ?modelContext = authenticatedModelContext
+    beforeAction
+    runControllerAction @controller (action controller)
+
+-- | Bind implicit parameters and run 'initContext' for a controller action.
+-- Used by 'runActionWithNewContext' and WebSocket handlers.
+{-# INLINE initActionContext #-}
+initActionContext
     :: forall application controller
      . ( Controller controller
        , ?request :: Request
@@ -143,42 +152,39 @@ newContextForAction
        , Typeable application
        , Typeable controller
        )
-    => controller -> IO Context.ControllerContext
-newContextForAction controller = do
-    ErrorController.withRequestContext ?request do
-        let ?modelContext = ?request.modelContext
-        controllerContext <- Context.newControllerContext
-        let ?context = controllerContext
-        Context.putContext ?application
-        wrapInitContextException (initContext @application)
-        pure ?context
+    => controller -> IO ControllerContext
+initActionContext controller = do
+    let request' = insertApplicationContext ?application ?request
+    let ?request = request'
+    let ?modelContext = ?request.modelContext
+    let ?context = ?request
+    wrapInitContextException (initContext @application)
+    pure ?context
 
--- | Shared request context setup, specialized once per application type.
--- Takes a pre-computed TypeRep to avoid per-controller-type code duplication.
+-- | Bind implicit parameters from a raw WAI request, insert the action type
+-- into the vault, and run 'initContext'. Specialized once per application type.
 -- NOINLINE ensures GHC compiles one copy shared across all controllers.
 --
 -- Exceptions from 'initContext' (including 'EarlyReturnException') propagate
 -- to the caller, which is expected to catch them.
-{-# NOINLINE setupActionContext #-}
-setupActionContext
+{-# NOINLINE initRequestContext #-}
+initRequestContext
     :: forall application
      . ( InitControllerContext application
        , ?application :: application
        , Typeable application
        )
     => Typeable.TypeRep -> Request -> Respond
-    -> IO Context.ControllerContext
-setupActionContext controllerTypeRep waiRequest waiRespond = do
-    let !request' = waiRequest { vault = Vault.insert actionTypeVaultKey (ActionType controllerTypeRep) waiRequest.vault }
-    ErrorController.withRequestContext request' do
-        let ?request = request'
-        let ?respond = waiRespond
-        let ?modelContext = request'.modelContext
-        controllerContext <- Context.newControllerContext
-        let ?context = controllerContext
-        Context.putContext ?application
-        wrapInitContextException (initContext @application)
-        pure ?context
+    -> IO ControllerContext
+initRequestContext controllerTypeRep waiRequest waiRespond = do
+    let !requestWithActionType = waiRequest { vault = Vault.insert actionTypeVaultKey (ActionType controllerTypeRep) waiRequest.vault }
+    let !request' = insertApplicationContext ?application requestWithActionType
+    let ?request = request'
+    let ?respond = waiRespond
+    let ?modelContext = request'.modelContext
+    let ?context = ?request
+    wrapInitContextException (initContext @application)
+    pure ?context
 
 -- | Wraps non-EarlyReturn exceptions from initContext in InitContextException
 -- so the error handler middleware can show "while calling initContext".
@@ -195,7 +201,7 @@ runActionWithNewContext controller =
     earlyReturnMiddleware (\request respond -> do
         let ?request = setActionType controller request
         let ?respond = respond
-        context <- newContextForAction controller
+        context <- initActionContext controller
         let ?modelContext = requestModelContext ?request
         let ?context = context
         runAction controller
@@ -220,15 +226,15 @@ rlsContextVaultKey = unsafePerformIO Vault.newKey
 {-# INLINE startWebSocketApp #-}
 startWebSocketApp :: forall webSocketApp application. (?request :: Request, ?respond :: Respond, InitControllerContext application, ?application :: application, Typeable application, WebSockets.WSApp webSocketApp) => webSocketApp -> IO ResponseReceived -> Application
 startWebSocketApp initialState onHTTP waiRequest waiRespond = do
+    let request' = insertApplicationContext ?application waiRequest
+    let ?request = request'
     let ?modelContext = requestModelContext ?request
-    let ?request = waiRequest
     let ?respond = waiRespond
 
     let handleConnection pendingConnection = do
             connection <- WebSockets.acceptRequest pendingConnection
 
-            controllerContext <- Context.newControllerContext
-            let ?context = controllerContext
+            let ?context = ?request
 
             try (initContext @application) >>= \case
                 Left (exception :: SomeException) -> putStrLn $ "Unexpected exception in initContext, " <> show exception
@@ -262,7 +268,7 @@ startWebSocketApp initialState onHTTP waiRequest waiRespond = do
     -- handshake. The on-the-wire status remains 101 (sent by the raw
     -- handler); the rewritten fallback status only affects what
     -- request-logger middlewares observe.
-    waiRequest
+    request'
         |> WebSockets.websocketsApp connectionOptions handleConnection
         |> \case
             Just response -> waiRespond (rewriteWebSocketFallbackStatus response)
@@ -285,7 +291,7 @@ rewriteWebSocketFallbackStatus (WaiInternal.ResponseRaw handler fallback) =
 rewriteWebSocketFallbackStatus other = other
 
 
-jumpToAction :: forall action. (Controller action, ?context :: Context.ControllerContext, ?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
+jumpToAction :: forall action. (Controller action, ?context :: ControllerContext, ?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
 jumpToAction theAction = do
     let ?theAction = theAction
     beforeAction @action

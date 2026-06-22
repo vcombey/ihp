@@ -58,11 +58,11 @@ import IHP.ActionType (isActiveController)
 
 class View theView where
     -- | Hook which is called before the render is called
-    beforeRender :: (?context :: ControllerContext, ?request :: Request) => theView -> IO ()
+    beforeRender :: (?context :: Request, ?request :: Request) => theView -> IO ()
     beforeRender view = pure ()
 
     -- Renders the view as html
-    html :: (?context :: ControllerContext, ?view :: theView, ?request :: Request) => theView -> Markup
+    html :: (?context :: Request, ?view :: theView, ?request :: Request) => theView -> Markup
 
 -- | A view that can also be rendered as JSON by 'renderHtmlOrJson'.
 class JsonView theView where
@@ -222,7 +222,7 @@ nl2br content = content
     |> map (\line -> [hsx|{line}<br/>|])
     |> mconcat
 
-type Html = HtmlWithContext ControllerContext
+type Html = HtmlWithContext Request
 
 -- | The URL for the dev-mode live reload server. Typically "ws://localhost:8001"
 liveReloadWebsocketUrl :: (?request :: Request) => Text

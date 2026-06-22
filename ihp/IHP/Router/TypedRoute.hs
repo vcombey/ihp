@@ -39,7 +39,7 @@ import Data.Text (Text)
 import Data.Typeable qualified as Typeable
 import GHC.TypeLits (KnownSymbol, symbolVal)
 import IHP.Controller.TypedAction (DecodeRequest (..), DecodedRequest, DocumentTypedResponse (..), ParameterDoc (..), ParameterLocation (..), RenderTypedResponse (..), RequestDecodeError (..), TypedController, action, beforeAction)
-import IHP.ControllerSupport (ControllerContext, InitControllerContext, Request, Respond, ResponseReceived, prepareRLSIfNeeded, respondAndExit, setupActionContext)
+import IHP.ControllerSupport (ControllerContext, InitControllerContext, Request, Respond, ResponseReceived, initRequestContext, prepareRLSIfNeeded, respondAndExit)
 import IHP.ErrorController qualified as ErrorController
 import IHP.RouterSupport
     ( DocumentedRenderExpectation (..)
@@ -128,11 +128,11 @@ runTypedRouteAction ::
 runTypedRouteAction responseHandlers typedAction waiRequest waiRespond =
     earlyReturnMiddleware
         ( \request respond -> do
-            context <- setupActionContext @application (Typeable.typeOf typedAction) request respond
+            context <- initRequestContext @application (Typeable.typeOf typedAction) request respond
             let ?theAction = typedAction
             let ?context = context
             let ?respond = respond
-            let ?request = context.request
+            let ?request = context
             let ?modelContext = ?request.modelContext
             authenticatedModelContext <- prepareRLSIfNeeded ?modelContext
             let ?modelContext = authenticatedModelContext

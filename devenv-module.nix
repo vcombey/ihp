@@ -147,7 +147,7 @@ that is defined in flake-module.nix
                 ghc912 = pkgs.ghc912;
                 ihpPackageNames = [
                     "ihp-ide" "ihp-hsx" "ihp-schema-compiler"
-                    "ihp-postgres-parser" "ihp-context" "ihp-pagehead"
+                    "ihp-postgres-parser" "ihp-pagehead"
                     "ihp-log" "ihp-modal" "ihp-mail"
                     "ihp-migrate" "ihp-openai" "ihp-ssc" "ihp-graphql"
                     "ihp-datasync-typescript" "ihp-sitemap"
@@ -169,22 +169,21 @@ that is defined in flake-module.nix
                 ghc912-ihp-pglistener = withTestPostgres pkgs.ghc912.ihp-pglistener;
             }
 
-            # GHC 9.14 compatibility checks — disabled: nixpkgs-unstable's ghc914 package
-            # set has many transitive upper-bound breaks (blaze-markup, ghc-tcplugins-extra,
-            # …) because boot libraries bumped for GHC 9.14.1. pkgs.ghc914 is still defined
-            # in the overlay for manual experimentation; re-enable once the ecosystem catches up.
-            // (lib.optionalAttrs (false && pkgs.haskell.packages ? ghc914) (let
+            # GHC 9.14 compatibility checks (build and test all IHP packages)
+            // (lib.optionalAttrs (pkgs.haskell.packages ? ghc914) (let
                 ghc914 = pkgs.ghc914;
                 ihpPackageNames = [
                     "ihp-ide" "ihp-hsx" "ihp-schema-compiler"
-                    "ihp-postgres-parser" "ihp-context" "ihp-pagehead"
+                    "ihp-postgres-parser" "ihp-pagehead"
                     "ihp-log" "ihp-modal" "ihp-mail"
                     "ihp-migrate" "ihp-openai" "ihp-ssc" "ihp-graphql"
                     "ihp-datasync-typescript" "ihp-sitemap"
                     "ihp-job-dashboard" "ihp-imagemagick"
-                    "ihp-hspec" "ihp-welcome" "ihp-zip"
+                    "ihp-hspec" "ihp-welcome"
                     "wai-asset-path" "wai-flash-messages" "wai-request-params"
                     "wai-session-maybe" "wai-session-clientsession-deferred"
+                    # ihp-zip excluded: Hackage 0.1.1 fails to configure under GHC 9.14
+                    # (zip-archive dependency resolution issue)
                 ];
             in lib.listToAttrs (map (name: {
                 name = "ghc914-${name}";
@@ -417,11 +416,34 @@ that is defined in flake-module.nix
 
             guide =
                 let
-                    node-modules = pkgs.mkYarnModules {
+                    # node_modules derivation built from yarn.lock + package.json.
+                    # Replaces the removed `mkYarnModules` (yarn2nix) with the standard
+                    # `fetchYarnDeps` + `yarnConfigHook` pipeline from nixpkgs.
+                    node-modules = pkgs.stdenv.mkDerivation {
                         pname = "guide-node_modules";
-                        packageJSON = ./Guide/package.json;
-                        yarnLock = ./Guide/yarn.lock;
                         version = "1.0.0";
+
+                        src = pkgs.runCommand "guide-yarn-src" {} ''
+                            mkdir -p $out
+                            cp ${./Guide/package.json} $out/package.json
+                            cp ${./Guide/yarn.lock}    $out/yarn.lock
+                        '';
+
+                        yarnOfflineCache = pkgs.fetchYarnDeps {
+                            yarnLock = ./Guide/yarn.lock;
+                            hash = "sha256-Alr/Bh3T7Bqvs+HgB9a2l730SNnfKGUPPK23SVlUSt0=";
+                        };
+
+                        nativeBuildInputs = [ pkgs.nodejs pkgs.yarn pkgs.yarnConfigHook ];
+
+                        dontBuild = true;
+
+                        installPhase = ''
+                            runHook preInstall
+                            mkdir -p $out
+                            cp -r node_modules $out/
+                            runHook postInstall
+                        '';
                     };
                 in
                     pkgs.stdenv.mkDerivation {
@@ -464,14 +486,20 @@ that is defined in flake-module.nix
 
             reference =
                 let
+                    hackageHtmlLocationFlag = "--html-location='https://hackage.haskell.org/package/$pkgid/docs'";
+                    withHackageLinks = package: pkgs.haskell.lib.overrideCabal package (old: {
+                        haddockFlags = (old.haddockFlags or []) ++ [ hackageHtmlLocationFlag ];
+                    });
+
                     # Subpackages whose Haddock should be merged into the reference docs.
                     # Order matters: ihp-with-docs MUST be first so its index.html /
                     # doc-index-*.html / linuwial.css / quick-jump.js win on conflicts.
                     # Subpackages contribute their unique IHP-*.html module pages.
-                    docPackages = with pkgs.ghc; [
+                    docPackages = with pkgs.ghc; map withHackageLinks [
                         ihp-with-docs
+                        ihp-pglistener
+                        ihp-router
                         ihp-mail
-                        ihp-log
                         ihp-modal
                         ihp-ssc
                         # ihp-hsx ships with `doHaddock = false` in its default.nix
@@ -487,7 +515,7 @@ that is defined in flake-module.nix
                 pkgs.stdenv.mkDerivation {
                     name = "ihp-reference";
                     src = self;
-                    nativeBuildInputs = docPackages;
+                    nativeBuildInputs = docPackages ++ [ pkgs.perl ];
                     buildPhase = ''
                         mkdir -p haddock-build
 
@@ -513,6 +541,18 @@ that is defined in flake-module.nix
                         cp ../ihp-haddock.css ihp-haddock.css
                         find . -type f \( -iname "*.html" \) -exec sed -i 's#<\/head>#<link href="ihp-haddock.css" rel="stylesheet"/><\/head>#g' '{}' +
 
+                        # Haddock's --html-location keeps prerequisite package links
+                        # stable. After merging IHP subpackage docs into one directory,
+                        # link sibling package references to the local merged pages.
+                        #
+                        find . -type f \( -iname "*.html" \) -exec perl -0pi -e '
+                            s{href="https://hackage\.haskell\.org/package/[^"/]+/docs/([^"#?]+(?:#[^"]*)?)"}{
+                                my ($target) = ($1);
+                                my ($page) = split /#/, $target, 2;
+                                (-e $page) ? qq{href="$target"} : $&
+                            }ge;
+                        ' '{}' +
+
                         # Link title to index
                         find . -type f \( -iname "*.html" \) -exec sed -i 's#<span class=\"caption\">IHP Api Reference</span>#<a href=\"index.html\" class=\"caption\"><img src=\"https://ihp.digitallyinduced.com/Guide/images/ihp-logo-readme.svg\"/>IHP Api Reference</a>#g' '{}' +
 
@@ -521,15 +561,37 @@ that is defined in flake-module.nix
                     # allowedReferences = [];
             };
 
-            datasync-js = pkgs.mkYarnPackage {
-                name = "datasync-js";
+            # DataSync TypeScript SDK: build + tests + typecheck.
+            # Replaces the removed `mkYarnPackage` (yarn2nix) with the standard
+            # `fetchYarnDeps` + `yarnConfigHook` pipeline from nixpkgs.
+            datasync-js = pkgs.stdenv.mkDerivation {
+                pname = "datasync-js";
+                version = "0.1.0";
+
                 src = let filter = inputs.nix-filter.lib; in filter {
                     root = "${self}/ihp-datasync/data/DataSync";
                 };
-                postConfigure = ''
-                    yarn run build
-                    yarn run test
-                    yarn run typecheck
+
+                yarnOfflineCache = pkgs.fetchYarnDeps {
+                    yarnLock = ./ihp-datasync/data/DataSync/yarn.lock;
+                    hash = "sha256-vu7gXhPlgnm76GAQiD7DqROCC80uwAhMrh24mXqdfG0=";
+                };
+
+                nativeBuildInputs = [ pkgs.nodejs pkgs.yarn pkgs.yarnConfigHook ];
+
+                buildPhase = ''
+                    runHook preBuild
+                    yarn --offline run build
+                    yarn --offline run test
+                    yarn --offline run typecheck
+                    runHook postBuild
+                '';
+
+                installPhase = ''
+                    runHook preInstall
+                    mkdir -p $out
+                    cp -r . $out/
+                    runHook postInstall
                 '';
             };
 

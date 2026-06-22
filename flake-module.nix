@@ -25,8 +25,11 @@ ihpFlake:
                 ghcCompiler = lib.mkOption {
                     description = ''
                         The GHC compiler to use for IHP.
+
+                        Defaults to `pkgs.ghc` (GHC 9.10, binary-cached). Set to
+                        `pkgs.ghc914` to opt into GHC 9.14 (built from source).
                     '';
-                    default = pkgs.haskellPackages;
+                    default = pkgs.ghc;
                 };
 
                 packages = lib.mkOption {
@@ -128,6 +131,15 @@ ihpFlake:
                     default = "1";
                 };
 
+                scripts.optimized = lib.mkOption {
+                    description = ''
+                        Whether packages.script-<Name> flake outputs are compiled with optimizations.
+                        Defaults to false for fast script builds.
+                    '';
+                    type = lib.types.bool;
+                    default = false;
+                };
+
                 relationSupport = lib.mkOption {
                     description = ''
                         Enable relation support (Include/fetchRelated type machinery).
@@ -167,7 +179,7 @@ ihpFlake:
         perSystem = { self', lib, pkgs, system, config, ... }: let
             cfg = config.ihp;
             ihp = ihpFlake.inputs.self;
-            ghcCompiler = pkgs.ghc;
+            ghcCompiler = cfg.ghcCompiler;
             ihpLib = ihpFlake.inputs.self.packages.${system}.ihp-env-var-backwards-compat;
             postgresPackage =
                 let cfg = config.devenv.shells.default.services.postgres; in
@@ -183,55 +195,61 @@ ihpFlake:
                     else cfg.package;
             # Auto-detect whether a build-time PostgreSQL is needed (e.g. ihp-typed-sql)
             buildWithPostgres = builtins.any (p: (p.pname or "") == "ihp-typed-sql") (cfg.haskellPackages ghcCompiler);
+            mkProdServer = { optimized, optimizationLevel }: import "${ihp}/NixSupport/default.nix" {
+                ihp = ihp;
+                haskellDeps = cfg.haskellPackages;
+                otherDeps = p: cfg.packages;
+                projectPath = cfg.projectPath;
+                inherit optimized;
+                ghc = ghcCompiler;
+                pkgs = pkgs;
+                rtsFlags = cfg.rtsFlags;
+                inherit optimizationLevel;
+                relationSupport = cfg.relationSupport;
+                appName = cfg.appName;
+                filter = ihpFlake.inputs.nix-filter.lib;
+                ihp-env-var-backwards-compat = ihpLib;
+                ihp-static = ihpFlake.inputs.self.packages.${system}.ihp-static;
+                static = self'.packages.static;
+                inherit buildWithPostgres;
+                appSchemaSql = "${self'.packages.schema}/Schema.sql";
+                ihpSchemaSql = "${self'.packages.ihp-schema}/IHPSchema.sql";
+            };
+            optimizedProdServer = mkProdServer {
+                optimized = true;
+                optimizationLevel = cfg.optimizationLevel;
+            };
+            unoptimizedProdServer = mkProdServer {
+                optimized = false;
+                optimizationLevel = "0";
+            };
+            scriptBinaries =
+                if cfg.scripts.optimized
+                then optimizedProdServer.passthru.scriptBinaries
+                else unoptimizedProdServer.passthru.scriptBinaries;
+            scriptPackages =
+                lib.mapAttrs' (scriptName: scriptBinary:
+                    lib.nameValuePair "script-${scriptName}" scriptBinary
+                ) scriptBinaries;
+            scriptApps =
+                lib.mapAttrs' (scriptName: scriptBinary:
+                    lib.nameValuePair "script-${scriptName}" {
+                        type = "app";
+                        program = "${scriptBinary}/bin/${scriptName}";
+                    }
+                ) scriptBinaries;
         in lib.mkIf cfg.enable {
             _module.args.pkgs = lib.mkDefault (import inputs.nixpkgs { inherit system; overlays = config.devenv.shells.default.overlays; config = { }; });
 
+            apps = scriptApps;
+
             # release build package
             packages = {
-                default = self'.packages.unoptimized-prod-server;
+                default = unoptimizedProdServer;
 
-                optimized-prod-server = import "${ihp}/NixSupport/default.nix" {
-                    ihp = ihp;
-                    haskellDeps = cfg.haskellPackages;
-                    otherDeps = p: cfg.packages;
-                    projectPath = cfg.projectPath;
-                    # Set optimized = true to get more optimized binaries, but slower build times
-                    optimized = true;
-                    ghc = ghcCompiler;
-                    pkgs = pkgs;
-                    rtsFlags = cfg.rtsFlags;
-                    optimizationLevel = cfg.optimizationLevel;
-                    relationSupport = cfg.relationSupport;
-                    appName = cfg.appName;
-                    filter = ihpFlake.inputs.nix-filter.lib;
-                    ihp-env-var-backwards-compat = ihpLib;
-                    ihp-static = ihpFlake.inputs.self.packages.${system}.ihp-static;
-                    static = self'.packages.static;
-                    inherit buildWithPostgres;
-                    appSchemaSql = "${self'.packages.schema}/Schema.sql";
-                    ihpSchemaSql = "${self'.packages.ihp-schema}/IHPSchema.sql";
-                };
+                optimized-prod-server = optimizedProdServer;
 
-                unoptimized-prod-server = import "${ihp}/NixSupport/default.nix" {
-                    ihp = ihp;
-                    haskellDeps = cfg.haskellPackages;
-                    otherDeps = p: cfg.packages;
-                    projectPath = cfg.projectPath;
-                    optimized = false;
-                    ghc = ghcCompiler;
-                    pkgs = pkgs;
-                    rtsFlags = cfg.rtsFlags;
-                    optimizationLevel = "0";
-                    relationSupport = cfg.relationSupport;
-                    appName = cfg.appName;
-                    filter = ihpFlake.inputs.nix-filter.lib;
-                    ihp-env-var-backwards-compat = ihpLib;
-                    ihp-static = ihpFlake.inputs.self.packages.${system}.ihp-static;
-                    static = self'.packages.static;
-                    inherit buildWithPostgres;
-                    appSchemaSql = "${self'.packages.schema}/Schema.sql";
-                    ihpSchemaSql = "${self'.packages.ihp-schema}/IHPSchema.sql";
-                };
+                unoptimized-prod-server = unoptimizedProdServer;
 
                 static =
                     let
@@ -271,6 +289,8 @@ ihpFlake:
 
                 migrate = ghcCompiler.ihp-migrate;
 
+                migration-check = unoptimizedProdServer.passthru.migrationCheck;
+
                 ihp-schema = pkgs.stdenv.mkDerivation {
                     name = "ihp-schema";
                     src = ihp;
@@ -292,7 +312,8 @@ ihpFlake:
                         cp Application/Schema.sql $out/
                     '';
                 };
-            } // (if cfg.static.makeBundling then {
+            } // scriptPackages
+            // (if cfg.static.makeBundling then {
                 staticFilesCompiledByMake = pkgs.stdenv.mkDerivation {
                     name = "${config.ihp.appName}-staticFilesCompiledByMake";
                     buildPhase = ''
@@ -416,15 +437,28 @@ ihpFlake:
                     exec env IHP_STATIC=${ihpFlake.inputs.self.packages.${system}.ihp-static} ${ghcCompiler.ihp-ide}/bin/RunDevServer
                 '';
 
+                scripts.start-worker.exec = ''
+                    exec env IHP_STATIC=${ihpFlake.inputs.self.packages.${system}.ihp-static} ${ghcCompiler.ihp-ide}/bin/RunDevWorker
+                '';
+
                 process.manager.implementation = "process-compose";
 
-                processes.ihp.exec = "start";
+                # The web server (RunDevServer) and the job worker (RunDevWorker) run as
+                # separate process-compose processes. The web process owns the file watcher,
+                # status server, schema compiler, and tool server; it signals the worker
+                # over a Unix socket whenever a Haskell change should reload it. The worker
+                # process idles when no Job/ modules exist in the project.
+                processes.web.exec = "start";
+                processes.worker.exec = "start-worker";
 
                 # Disabled for now
                 # Can be re-enabled once postgres is provided by devenv instead of IHP
                 env.IHP_DEVENV = "1";
                 env.DATABASE_URL = "postgres:///app?host=${config.devenv.shells.default.env.PGHOST}";
                 env.PGDATABASE = "app";
+                # Lets typedSql typecheck in non-interactive GHCi/build sessions
+                # even when `devenv up` is not currently running.
+                env.IHP_TYPED_SQL_AUTO_DB = "1";
 
                 services.postgres.enable = true;
                 services.postgres.settings = {

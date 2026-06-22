@@ -6,12 +6,11 @@
 , hashable, haskell-src-exts, haskell-src-meta, hasql
 , hasql-dynamic-statements, hasql-implicits, hasql-mapping
 , hasql-pool, hasql-postgresql-types, hasql-transaction, hspec
-, http-client, http-client-tls, http-media, http-types, ihp-context
-, ihp-hsx, ihp-imagemagick, ihp-log, ihp-modal, ihp-pagehead
-, ihp-pglistener, ihp-router, inflections, interpolate, lib, mime-types
-, openapi3
-, minio-hs, mono-traversable, mtl, neat-interpolation, network
-, network-uri, parser-combinators, postgresql-simple
+, http-client, http-client-tls, http-media, http-types, ihp-hsx
+, ihp-imagemagick, ihp-log, ihp-modal, ihp-pagehead, ihp-pglistener
+, ihp-router, inflections, interpolate, lib, mime-types, minio-hs
+, mono-traversable, mtl, neat-interpolation, network, network-uri
+, openapi3, parser-combinators, postgresql-simple
 , postgresql-simple-postgresql-types, postgresql-types, process
 , pwstore-fast, random, random-strings, regex-tdfa, resource-pool
 , resourcet, safe-exceptions, scientific, slugger, split, stm
@@ -25,7 +24,7 @@
 }:
 mkDerivation {
   pname = "ihp";
-  version = "1.5.0";
+  version = "1.6.0";
   src = ./.;
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
@@ -36,9 +35,9 @@ mkDerivation {
     fast-logger filepath ghc-prim hashable haskell-src-exts
     haskell-src-meta hasql hasql-dynamic-statements hasql-implicits
     hasql-mapping hasql-pool hasql-postgresql-types hasql-transaction
-    hspec http-client http-client-tls http-media http-types ihp-context
-    ihp-hsx ihp-imagemagick ihp-log ihp-modal ihp-pagehead
-    ihp-pglistener ihp-router inflections interpolate mime-types minio-hs
+    http-client http-client-tls http-media http-types ihp-hsx
+    ihp-imagemagick ihp-log ihp-modal ihp-pagehead ihp-pglistener
+    ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri openapi3
     parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types process
@@ -60,9 +59,9 @@ mkDerivation {
     fast-logger filepath ghc-prim hashable haskell-src-exts
     haskell-src-meta hasql hasql-dynamic-statements hasql-implicits
     hasql-mapping hasql-pool hasql-postgresql-types hasql-transaction
-    hspec http-client http-client-tls http-media http-types ihp-context
-    ihp-hsx ihp-imagemagick ihp-log ihp-modal ihp-pagehead
-    ihp-pglistener ihp-router inflections interpolate mime-types minio-hs
+    hspec http-client http-client-tls http-media http-types ihp-hsx
+    ihp-imagemagick ihp-log ihp-modal ihp-pagehead ihp-pglistener
+    ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri openapi3
     parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types process
@@ -84,9 +83,9 @@ mkDerivation {
     fast-logger filepath ghc-prim hashable haskell-src-exts
     haskell-src-meta hasql hasql-dynamic-statements hasql-implicits
     hasql-mapping hasql-pool hasql-postgresql-types hasql-transaction
-    http-client http-client-tls http-media http-types ihp-context
-    ihp-hsx ihp-imagemagick ihp-log ihp-modal ihp-pagehead
-    ihp-pglistener ihp-router inflections interpolate mime-types minio-hs
+    http-client http-client-tls http-media http-types ihp-hsx
+    ihp-imagemagick ihp-log ihp-modal ihp-pagehead ihp-pglistener
+    ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri openapi3
     parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types process

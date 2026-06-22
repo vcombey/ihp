@@ -1,6 +1,23 @@
 # Changelog for `ihp-typed-sql`
 
-## Unreleased
+## v1.6.0
+
+- Multi-column queries now generate named `SqlRow` result types with record-dot
+  field access.
+
+- More expressions are inferred as non-nullable when PostgreSQL guarantees a
+  value, including `COUNT`, `EXISTS`, `row_number`, `rank`, `dense_rank`,
+  non-null literals, and `COALESCE` / casts with non-null inputs.
+
+- `typedSql` rejects `SELECT *` and `INSERT` statements without explicit column
+  lists by default. This catches schema-drift bugs at compile time instead of in
+  production.
+
+- `typedSql` can now start a temporary private PostgreSQL instance for
+  compile-time query description when `DATABASE_URL` is unreachable and
+  `IHP_TYPED_SQL_AUTO_DB=1` is set. IHP app dev shells enable this by default,
+  which makes non-interactive agent/workspace typechecking work without a
+  separate `devenv up`.
 
 - Better error message when a `${...}` placeholder appears in a polymorphic-argument
   position (e.g. `CONCAT`, `COALESCE`, `GREATEST`, `LEAST`). Instead of surfacing

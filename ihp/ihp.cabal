@@ -1,6 +1,6 @@
 cabal-version:       2.2
 name:                ihp
-version:             1.5.0
+version:             1.6.0
 synopsis:            Haskell Web Framework
 description:         The Integrated Haskell Platform is a full stack framework focused on rapid application development while striving for robust code quality.
                      Full guide available at: <https://ihp.digitallyinduced.com/Guide/index.html>
@@ -34,7 +34,7 @@ extra-source-files: CHANGELOG.md
 common shared-properties
     default-language: GHC2021
     build-depends:
-            base >= 4.17.0 && < 4.22
+            base >= 4.17.0 && < 4.23
             , classy-prelude
             , mono-traversable
             , transformers
@@ -113,9 +113,7 @@ common shared-properties
             , unagi-chan
             , with-utf8
             , ihp-hsx
-            , ihp-context
             , ihp-pagehead
-            , ihp-log
             , ihp-modal
             , ihp-router
             , mime-types
@@ -158,7 +156,7 @@ common shared-properties
         , TemplateHaskell
         , OverloadedRecordDot
         , DeepSubsumption
-    ghc-options: -Werror=incomplete-patterns -Werror=unused-imports -Werror=missing-fields
+    ghc-options: -Werror=incomplete-patterns -Werror=unused-imports -Werror=missing-fields -Werror=missing-home-modules
 
 library
     import: shared-properties
@@ -173,7 +171,6 @@ library
         , IHP.Controller.Redirect
         , IHP.Controller.Render
         , IHP.Controller.Session
-        , IHP.Controller.Context
         , IHP.Controller.Layout
         , IHP.Controller.BasicAuth
         , IHP.Controller.Cookie
@@ -318,7 +315,6 @@ test-suite tests
         Test.HaskellSupportSpec
         Test.View.CSSFrameworkSpec
         Test.View.FormForSpec
-        Test.Controller.ContextSpec
         Test.Controller.ParamSpec
         Test.Controller.TypedActionSpec
         Test.Controller.AccessDeniedSpec
@@ -340,6 +336,15 @@ test-suite tests
         Test.FetchPipelinedSpec
         Test.JobQueueSpec
         Test.LoginSupport.AuthVaultSpec
+        Test.Router.AppBindingSpec
+        Test.Router.CaptureSpec
+        Test.Router.DSLParserSpec
+        Test.Router.DSLQuoterSpec
+        Test.Router.MiddlewareSpec
+        Test.Router.MixedModeSpec
+        Test.Router.MultiControllerSpec
+        Test.Router.TrieSpec
+        Test.Router.WebSocketSpec
         Test.ModelFixtures
         Test.Util
 

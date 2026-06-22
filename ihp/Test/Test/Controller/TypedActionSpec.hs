@@ -17,7 +17,6 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Bits ((.|.))
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
-import Data.TMap qualified as TypeMap
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Vector qualified as Vector
@@ -379,7 +378,7 @@ tests = do
             it "renders typed action forms against typed action URLs" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
 
                 let initialProjectInput = ProjectInput{name = "Acme", enabled = True}
                 let targetAction = UpdateProjectAction{projectId = 42, returnTo = Just "/dashboard"}
@@ -409,7 +408,7 @@ tests = do
             it "renders method override fields for non-GET/POST typed routes" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
 
                 let initialProjectInput = ProjectInput{name = "Acme", enabled = True}
                 let targetAction = ArchiveProjectAction{archiveProjectId = 42}
@@ -430,7 +429,7 @@ tests = do
             it "renders common form field helpers for plain typed inputs" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
                 let ?formContext = complexFormContext ComplexFormInput
                         { textValue = "Title"
                         , numberValue = 42
@@ -486,7 +485,7 @@ tests = do
             it "renders multipart typed action forms with multipart enctype" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
 
                 let initialProjectInput = ProjectInput{name = "Logo", enabled = True}
                 let targetAction = UploadProjectLogoAction{uploadProjectId = 42}
@@ -607,8 +606,7 @@ createControllerContext = do
                     Vault.insert RequestVault.frameworkConfigVaultKey frameworkConfig
                         $ Vault.insert requestBodyVaultKey requestBody Vault.empty
                 }
-    let customFields = TypeMap.insert request TypeMap.empty
-    pure FrozenControllerContext{customFields}
+    pure request
 
 createTypedRouteTestApplication :: IO Wai.Application
 createTypedRouteTestApplication =

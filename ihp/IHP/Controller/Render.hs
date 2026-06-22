@@ -12,7 +12,6 @@ import qualified Network.HTTP.Media as Accept
 
 import IHP.HSX.Markup (Markup, MarkupM(..))
 import IHP.AutoRefresh.View (autoRefreshMeta)
-import qualified IHP.Controller.Context as Context
 import IHP.Controller.Layout
 import IHP.FlashMessages (consumeFlashMessagesMiddleware)
 import IHP.RouterSupport (validateOpenApiRenderedView)
@@ -40,37 +39,29 @@ respondSvg (Markup builder) =
 -- | Like 'respondHtml', but always prepends 'autoRefreshMeta' to the response body.
 --
 -- Intended for fragment-style responses (e.g. HTMX) where a full layout is not rendered.
-respondHtmlFragment :: (?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => Markup -> IO ResponseReceived
+respondHtmlFragment :: (?request :: Request, ?respond :: Respond) => Markup -> IO ResponseReceived
 respondHtmlFragment html = do
-    frozenContext <- Context.freeze ?context
-    let ?context = frozenContext
     let Markup builder = autoRefreshMeta <> html
     respondWith $ responseBuilder status200 [(hContentType, "text/html; charset=utf-8"), (hConnection, "keep-alive")] builder
 {-# INLINE respondHtmlFragment #-}
 
-renderHtml :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request) => view -> IO Markup
+renderHtml :: forall view. (ViewSupport.View view, ?request :: Request) => view -> IO Markup
 renderHtml !view = do
+    let ?context = ?request
     let ?view = view
     ViewSupport.beforeRender view
-    frozenContext <- Context.freeze ?context
-
-    let ?context = frozenContext
     (ViewLayout layout) <- getLayout
-
-    let boundHtml = let ?context = frozenContext; in layout (ViewSupport.html ?view)
-    pure boundHtml
+    pure (layout (ViewSupport.html ?view))
 {-# INLINE renderHtml #-}
 
 -- | Like 'renderHtml', but does not apply the current layout.
 --
 -- Useful for endpoint fragments that should return only partial HTML.
-renderHtmlFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request) => view -> IO Markup
+renderHtmlFragment :: forall view. (ViewSupport.View view, ?request :: Request) => view -> IO Markup
 renderHtmlFragment !view = do
+    let ?context = ?request
     let ?view = view
     ViewSupport.beforeRender view
-    frozenContext <- Context.freeze ?context
-
-    let ?context = frozenContext
     pure (ViewSupport.html ?view)
 {-# INLINE renderHtmlFragment #-}
 
@@ -102,7 +93,7 @@ data PolymorphicRender
         }
 
 -- | Can be used to render different responses for html, json, etc. requests based on the Accept header.
-renderPolymorphic :: (?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => PolymorphicRender -> IO ResponseReceived
+renderPolymorphic :: (?request :: Request, ?respond :: Respond) => PolymorphicRender -> IO ResponseReceived
 renderPolymorphic PolymorphicRender { html, json } = do
     let acceptHeader = lookup hAccept (?request.requestHeaders)
     case acceptHeader of
@@ -126,12 +117,12 @@ polymorphicRender :: PolymorphicRender
 polymorphicRender = PolymorphicRender Nothing Nothing
 
 -- | Render a view fragment without layout and respond with 'autoRefreshMeta' prepended.
-renderFragment :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
+renderFragment :: forall view. (ViewSupport.View view, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
 renderFragment !view = (renderHtmlFragment view) >>= respondHtmlFragment
 {-# INLINE renderFragment #-}
 
 {-# INLINE render #-}
-render :: forall view. (ViewSupport.View view, ?context :: ControllerContext, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
+render :: forall view. (ViewSupport.View view, ?request :: Request, ?respond :: Respond) => view -> IO ResponseReceived
 render !view = do
     let !currentRequest = ?request
     renderHtmlView currentRequest view
@@ -143,7 +134,6 @@ renderHtmlOrJson
         , ViewSupport.JsonView view
         , Data.Aeson.ToJSON (ViewSupport.JsonResponse view)
         , Typeable view
-        , ?context :: ControllerContext
         , ?request :: Request
         , ?respond :: Respond
         )
@@ -159,7 +149,6 @@ renderHtmlOrJsonWithStatusCode
         , ViewSupport.JsonView view
         , Data.Aeson.ToJSON (ViewSupport.JsonResponse view)
         , Typeable view
-        , ?context :: ControllerContext
         , ?request :: Request
         , ?respond :: Respond
         )
@@ -176,10 +165,10 @@ renderHtmlOrJsonWithStatusCode status !view = do
                 renderJsonWithStatusCode status jsonValue
         }
 
-renderHtmlView :: (ViewSupport.View view, ?context :: ControllerContext, ?respond :: Respond) => Request -> view -> IO ResponseReceived
+renderHtmlView :: (ViewSupport.View view, ?respond :: Respond) => Request -> view -> IO ResponseReceived
 renderHtmlView = renderHtmlViewWithStatus status200
 
-renderHtmlViewWithStatus :: (ViewSupport.View view, ?context :: ControllerContext, ?respond :: Respond) => Status -> Request -> view -> IO ResponseReceived
+renderHtmlViewWithStatus :: (ViewSupport.View view, ?respond :: Respond) => Status -> Request -> view -> IO ResponseReceived
 renderHtmlViewWithStatus status currentRequest view = do
     let next request respond = do
             let ?request = request

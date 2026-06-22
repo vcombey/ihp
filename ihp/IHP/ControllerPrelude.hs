@@ -26,7 +26,6 @@ module IHP.ControllerPrelude
     , module IHP.ValidationSupport
     , module IHP.AutoRefresh
     , module IHP.FlashMessages
-    , module IHP.Controller.Context
     , module IHP.Modal.Types
     , setModal
     , module IHP.Controller.Layout
@@ -70,7 +69,6 @@ import IHP.Router.TypedRoute
 import IHP.Controller.Redirect
 import Database.PostgreSQL.Simple.Types (Only (..))
 import IHP.FlashMessages
-import IHP.Controller.Context
 import IHP.Controller.Layout
 
 import IHP.Modal.Types
@@ -98,5 +96,8 @@ import IHP.HSX.MarkupQQ (hsx, uncheckedHsx, customHsx)
 --
 -- > setModal MyModalView { .. }
 --
-setModal :: (?context :: ControllerContext, ?request :: Request, View view) => view -> IO ()
-setModal view = let ?view = view in Modal.setModal (ViewSupport.html view)
+setModal :: (?request :: Request, View view) => view -> IO ()
+setModal view =
+    let ?context = ?request
+        ?view = view
+    in Modal.setModal (ViewSupport.html view)
