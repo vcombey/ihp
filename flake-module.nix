@@ -51,7 +51,6 @@ ihpFlake:
                         p.wai
                         p.text
                         p.ihp
-                        p.hasql # Required for generated Types.hs (FromRowHasql instances)
                     ];
                 };
 
@@ -244,6 +243,25 @@ ihpFlake:
             ihp = ihpFlake.inputs.self;
             ghcCompiler = cfg.ghcCompiler;
             ihpLib = ihpFlake.inputs.self.packages.${system}.ihp-env-var-backwards-compat;
+            generatedCodeHaskellPackages = p: [
+                p.aeson
+                p.bytestring
+                p.data-default
+                p.deepseq
+                p.hasql
+                p.hasql-dynamic-statements
+                p.hasql-implicits
+                p.hasql-mapping
+                p.hasql-postgresql-types
+                p.postgresql-simple
+                p.postgresql-types
+                p.scientific
+                p.string-conversions
+                p.time
+                p.unordered-containers
+                p.uuid
+            ];
+            appHaskellPackages = p: cfg.haskellPackages p ++ generatedCodeHaskellPackages p;
             postgresPackage =
                 let cfg = config.devenv.shells.default.services.postgres; in
                     if cfg.extensions != null
@@ -257,10 +275,10 @@ ihpFlake:
                             ''
                     else cfg.package;
             # Auto-detect whether a build-time PostgreSQL is needed (e.g. ihp-typed-sql)
-            buildWithPostgres = builtins.any (p: (p.pname or "") == "ihp-typed-sql") (cfg.haskellPackages ghcCompiler);
+            buildWithPostgres = builtins.any (p: (p.pname or "") == "ihp-typed-sql") (appHaskellPackages ghcCompiler);
             mkProdServer = { optimized, optimizationLevel }: import "${ihp}/NixSupport/default.nix" {
                 ihp = ihp;
-                haskellDeps = cfg.haskellPackages;
+                haskellDeps = appHaskellPackages;
                 otherDeps = p: cfg.packages;
                 projectPath = cfg.projectPath;
                 inherit optimized;
@@ -457,7 +475,7 @@ ihpFlake:
                             name = "${config.ihp.appName}-integration-tests";
                             src = builtins.path { path = config.ihp.projectPath; name = "source"; };
                             nativeBuildInputs = with pkgs; [
-                                (ghcCompiler.ghcWithPackages (p: cfg.haskellPackages p ++ cfg.devHaskellPackages p))
+                                (ghcCompiler.ghcWithPackages (p: appHaskellPackages p ++ cfg.devHaskellPackages p))
                                 ghcCompiler.ihp-ide
                                 ghcCompiler.ihp-schema-compiler
                                 gnumake
@@ -532,7 +550,7 @@ ihpFlake:
                 languages.haskell.enable = true;
                 languages.haskell.package = (if cfg.withHoogle
                                              then ghcCompiler.ghc.withHoogle
-                                             else ghcCompiler.ghc.withPackages) (p: cfg.haskellPackages p ++ cfg.devHaskellPackages p);
+                                             else ghcCompiler.ghc.withPackages) (p: appHaskellPackages p ++ cfg.devHaskellPackages p);
 
                 languages.haskell.stack.enable = false; # Stack is not used in IHP
                 # Use the package-set HLS. devenv's default override rejects GHC RC version strings.
