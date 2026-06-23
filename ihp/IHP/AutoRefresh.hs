@@ -130,7 +130,7 @@ autoRefresh runAction = do
                                 Just lastResponse -> do
                                     updateSession autoRefreshServer id (\session -> session { tables, lastResponse, lastPing })
                                     totalSessions <- length . (.sessions) <$> readIORef autoRefreshServer
-                                    Log.info ("AutoRefresh register session=" <> tshow id <> " path=" <> cs ?request.rawPathInfo)
+                                    ?request.frameworkConfig.logger (toLogStr ("AutoRefresh register session=" <> tshow id <> " path=" <> cs ?request.rawPathInfo <> " totalSessions=" <> tshow totalSessions))
                                     async (gcSessions autoRefreshServer)
                                     registerNotificationTrigger ?touchedTables autoRefreshServer
                                 Nothing -> removeSession
@@ -149,12 +149,11 @@ instance WSApp AutoRefreshWSApp where
 
         autoRefreshServer <- getOrCreateAutoRefreshServer
         availableSessions <- getAvailableSessions autoRefreshServer
-        Log.info
-            ( "AutoRefresh websocket session="
+        ?context.frameworkConfig.logger . toLogStr $
+            "AutoRefresh websocket session="
                 <> tshow sessionId
                 <> " available="
                 <> tshow (sessionId `elem` availableSessions)
-            )
         unless (sessionId `elem` availableSessions) do
             Websocket.sendClose ?connection ("Auto refresh session unavailable" :: Text)
 
