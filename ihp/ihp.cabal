@@ -113,6 +113,7 @@ common shared-properties
             , unagi-chan
             , with-utf8
             , ihp-hsx
+            , ihp-log
             , ihp-pagehead
             , ihp-modal
             , ihp-router
