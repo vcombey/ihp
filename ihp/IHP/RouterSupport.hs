@@ -76,7 +76,6 @@ import Data.List (find, isPrefixOf)
 import Data.List qualified as List
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.String.Conversions (ConvertibleStrings (convertString), cs)
-import Data.TMap qualified as TypeMap
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
