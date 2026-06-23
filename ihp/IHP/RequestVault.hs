@@ -26,6 +26,7 @@ import qualified Data.Vault.Lazy as Vault
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.Typeable (typeRep)
 import IHP.FrameworkConfig
+import IHP.Log.Types (LogLevel (Debug), Logger (..), defaultFormatter)
 import IHP.PGListener
 import IHP.RequestVault.Helper
 import IHP.RequestVault.ModelContext
@@ -60,6 +61,17 @@ requestPGListener = lookupRequestVault pgListenerVaultKey
 instance HasField "frameworkConfig" Request FrameworkConfig where
     {-# INLINE getField #-}
     getField request = requestFrameworkConfig request
+
+instance HasField "logger" Request Logger where
+    {-# INLINE getField #-}
+    getField request =
+        Logger
+            { write = \formatLog -> request.frameworkConfig.logger (formatLog "")
+            , level = Debug
+            , formatter = defaultFormatter
+            , timeCache = pure ""
+            , cleanup = pure ()
+            }
 
 -- request.application
 applicationContextVaultKey :: Vault.Key Dynamic
