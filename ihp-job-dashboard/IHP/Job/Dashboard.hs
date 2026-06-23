@@ -76,21 +76,21 @@ class ( job ~ GetModelByTableName (GetTableName job)
 
     -- | How this job's section should be displayed in the dashboard. By default it's displayed as a table,
     -- but this can be any arbitrary view! Make some cool graphs :)
-    makeDashboardSection :: (?request :: Request, ?modelContext :: ModelContext) => IO SomeView
+    makeDashboardSection :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext) => IO SomeView
 
-    makePageView :: (?request :: Request, ?modelContext :: ModelContext) => Int -> Int -> IO SomeView
+    makePageView :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext) => Int -> Int -> IO SomeView
 
     -- | The content of the page that will be displayed for a detail view of this job.
     -- By default, the ID, Status, Created/Updated at times, and last error are displayed.
     -- Can be defined as any arbitrary view.
-    makeDetailView :: (?request :: Request, ?modelContext :: ModelContext) => job -> IO SomeView
+    makeDetailView :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext) => job -> IO SomeView
     makeDetailView job = do
         pure $ SomeView $ HtmlView $ renderBaseJobDetailView (buildBaseJob job)
 
     -- | The content of the page that will be displayed for the "new job" form of this job.
     -- By default, only the submit button is rendered. For additonal form data, define your own implementation.
     -- Can be defined as any arbitrary view, but it should be a form.
-    makeNewJobView :: (?request :: Request, ?modelContext :: ModelContext) => IO SomeView
+    makeNewJobView :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext) => IO SomeView
     makeNewJobView = pure $ SomeView $ HtmlView $ renderNewBaseJobForm $ tableName @job
 
     -- | The action run to create and insert a new value of this job into the database.
@@ -112,32 +112,32 @@ class ( job ~ GetModelByTableName (GetTableName job)
 -- so you'll get a compile error if you try and include a type that is not a job.
 class JobsDashboard (jobs :: [Type]) where
     -- | Creates the entire dashboard by recursing on the type list and calling 'makeDashboardSection' on each type.
-    makeDashboard :: (?request :: Request, ?modelContext :: ModelContext) => IO SomeView
+    makeDashboard :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext) => IO SomeView
 
     includedJobTables :: [Text]
 
     -- | Renders the index page, which is the view returned from 'makeDashboard'.
-    indexPage :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => IO ResponseReceived
+    indexPage :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => IO ResponseReceived
 
-    listJob :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> IO ResponseReceived
-    listJob' :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
+    listJob :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> IO ResponseReceived
+    listJob' :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
 
     -- | Renders the detail view page. Rescurses on the type list to find a type with the
     -- same table name as the "tableName" query parameter.
-    viewJob :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> UUID -> IO ResponseReceived
-    viewJob' :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
+    viewJob :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> UUID -> IO ResponseReceived
+    viewJob' :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
 
     -- | If performed in a POST request, creates a new job depending on the "tableName" query parameter.
     -- If performed in a GET request, renders the new job from depending on said parameter.
-    newJob :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> IO ResponseReceived
-    newJob' :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
+    newJob :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> IO ResponseReceived
+    newJob' :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
 
     -- | Deletes a job from the database.
-    deleteJob :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> UUID -> IO ResponseReceived
-    deleteJob' :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
+    deleteJob :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> UUID -> IO ResponseReceived
+    deleteJob' :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Bool -> IO ResponseReceived
 
-    retryJob :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> UUID -> IO ResponseReceived
-    retryJob' :: (?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => IO ResponseReceived
+    retryJob :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => Text -> UUID -> IO ResponseReceived
+    retryJob' :: (?context :: ControllerContext, ?request :: Request, ?modelContext :: ModelContext, ?respond :: Respond) => IO ResponseReceived
 
 -- If no types are passed, try to get all tables dynamically and render them as BaseJobs
 instance JobsDashboard '[] where
