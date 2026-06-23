@@ -35,7 +35,7 @@ mkDerivation {
     fast-logger filepath ghc-prim hashable haskell-src-exts
     haskell-src-meta hasql hasql-dynamic-statements hasql-implicits
     hasql-mapping hasql-pool hasql-postgresql-types hasql-transaction
-    http-client http-client-tls http-media http-types ihp-hsx
+    hspec http-client http-client-tls http-media http-types ihp-hsx
     ihp-imagemagick ihp-log ihp-modal ihp-pagehead ihp-pglistener
     ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri openapi3
