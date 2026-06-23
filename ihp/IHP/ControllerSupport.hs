@@ -38,6 +38,7 @@ module IHP.ControllerSupport
 , maybeFromContext
 , freeze
 , fromFrozenContext
+, maybeFromFrozenContext
 ) where
 
 import Prelude
@@ -334,6 +335,11 @@ fromFrozenContext :: forall value. (Typeable value, ?context :: ControllerContex
 fromFrozenContext =
     unsafePerformIO (fromContext @value)
 {-# NOINLINE fromFrozenContext #-}
+
+maybeFromFrozenContext :: forall value. (Typeable value, ?context :: ControllerContext) => Maybe value
+maybeFromFrozenContext =
+    unsafePerformIO (maybeFromContext @value)
+{-# NOINLINE maybeFromFrozenContext #-}
 
 jumpToAction :: forall action. (Controller action, ?context :: ControllerContext, ?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
 jumpToAction theAction = do
