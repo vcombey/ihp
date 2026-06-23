@@ -18,6 +18,7 @@ import Network.Wai
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Vault.Lazy as Vault
 import IHP.FrameworkConfig
+import IHP.Log.Types (LogLevel (Debug), Logger (..), defaultFormatter)
 import IHP.PGListener
 import IHP.RequestVault.Helper
 import IHP.RequestVault.ModelContext
