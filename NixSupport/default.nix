@@ -266,13 +266,18 @@ CABAL_EOF
     appSrcRoot = pkgs.nix-gitignore.gitignoreSource [] projectPath;
 
     appSrcInclude = [ filter.isDirectory "Makefile" (filter.matchExt "hs") ];
+    appSrcRootEntries = builtins.readDir appSrcRoot;
+    existingRootDirectory = name:
+        pkgs.lib.optional
+            (builtins.hasAttr name appSrcRootEntries && appSrcRootEntries.${name} == "directory")
+            name;
 
     scriptPath = scriptName: "Application/Script/${scriptName}.hs";
 
     appSrc = filter {
         root = appSrcRoot;
         include = appSrcInclude;
-        exclude = ["static" "Frontend"] ++ map scriptPath scriptNames;
+        exclude = existingRootDirectory "static" ++ existingRootDirectory "Frontend" ++ map scriptPath scriptNames;
         name = "${appName}-source";
     };
 
