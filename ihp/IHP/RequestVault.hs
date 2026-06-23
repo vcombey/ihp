@@ -24,6 +24,7 @@ import Network.Wai
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Vault.Lazy as Vault
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
+import Data.Typeable (typeRep)
 import IHP.FrameworkConfig
 import IHP.PGListener
 import IHP.RequestVault.Helper
