@@ -190,6 +190,7 @@ startAutoDatabase schemaInputs = do
             )
         runChecked "pg_ctl" ["-D", pgData, "-l", logFile, "-w", "start"]
         runChecked "createdb" ["-h", pgHost, "app"]
+        bootstrapAutoDatabaseRoles pgHost
         forM_ (catMaybes [siIhpSchema schemaInputs, Just (siAppSchema schemaInputs)]) \schemaFile ->
             runChecked "psql" ["-v", "ON_ERROR_STOP=1", "-h", pgHost, "app", "-f", schemaFile]
         startCleanupMonitor root pgData
@@ -226,6 +227,55 @@ ensureRequiredExecutables = do
                 <> "Enter the IHP nix/devenv shell or start the development "
                 <> "database with devenv up."
             )
+
+bootstrapAutoDatabaseRoles :: FilePath -> IO ()
+bootstrapAutoDatabaseRoles pgHost =
+    lookupEnv "IHP_TYPED_SQL_AUTO_DB_ROLES" >>= \case
+        Nothing -> pure ()
+        Just rawRoles -> do
+            let roles = filter (not . null) (map trim (splitOnComma rawRoles))
+            forM_ roles \role -> do
+                unless (isValidPgRoleName role) do
+                    fail
+                        ( "typedSql: invalid role name in IHP_TYPED_SQL_AUTO_DB_ROLES: "
+                            <> role
+                            <> ". Role names must match [A-Za-z_][A-Za-z0-9_]*."
+                        )
+                let quotedRole = quotePgIdentifier role
+                runChecked "psql"
+                    [ "-v", "ON_ERROR_STOP=1"
+                    , "-h", pgHost
+                    , "app"
+                    , "-c", "DO $$ BEGIN CREATE ROLE " <> quotedRole <> "; EXCEPTION WHEN duplicate_object THEN NULL; END $$;"
+                    ]
+                runChecked "psql"
+                    [ "-v", "ON_ERROR_STOP=1"
+                    , "-h", pgHost
+                    , "app"
+                    , "-c", "GRANT " <> quotedRole <> " TO CURRENT_USER;"
+                    ]
+
+splitOnComma :: String -> [String]
+splitOnComma = List.unfoldr \case
+    "" -> Nothing
+    input ->
+        let (role, rest) = break (== ',') input
+        in Just (role, drop 1 rest)
+
+trim :: String -> String
+trim = dropWhileEnd Char.isSpace . dropWhile Char.isSpace
+
+dropWhileEnd :: (a -> Bool) -> [a] -> [a]
+dropWhileEnd predicate = reverse . dropWhile predicate . reverse
+
+isValidPgRoleName :: String -> Bool
+isValidPgRoleName [] = False
+isValidPgRoleName (first:rest) =
+    (Char.isAlpha first || first == '_')
+        && all (\char -> Char.isAlphaNum char || char == '_') rest
+
+quotePgIdentifier :: String -> String
+quotePgIdentifier role = "\"" <> role <> "\""
 
 runChecked :: String -> [String] -> IO ()
 runChecked command args = do

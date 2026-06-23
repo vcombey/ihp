@@ -216,6 +216,33 @@ tests = do
                     envOverrides
                 assertGhciSuccess ghciOutput
 
+        it "creates requested roles before loading the temporary database schema" do
+            maybeInitdb <- findExecutable "initdb"
+            when (isNothing maybeInitdb) do
+                pendingWith "requires PostgreSQL tools on PATH"
+
+            template <- encodeUtf "typed-sql-auto-db-roles"
+            withSystemTempDirectory template \tempOsDir -> do
+                tempDir <- decodeUtf tempOsDir
+                let applicationDir = tempDir </> "Application"
+                let schemaPath = applicationDir </> "Schema.sql"
+                createDirectoryIfMissing True applicationDir
+                Text.writeFile schemaPath
+                    "CREATE TABLE typed_sql_auto_role_items (id UUID PRIMARY KEY, name TEXT NOT NULL);\nGRANT SELECT ON TABLE typed_sql_auto_role_items TO ihp_authenticated;\n"
+
+                let missingSocket = tempDir </> "missing-socket"
+                let envOverrides =
+                        [ ("DATABASE_URL", "postgresql:///app?host=" <> missingSocket)
+                        , ("IHP_TYPED_SQL_AUTO_DB", "1")
+                        , ("IHP_TYPED_SQL_AUTO_DB_ROLES", "ihp_authenticated")
+                        , ("IHP_TYPED_SQL_SCHEMA", schemaPath)
+                        ]
+                ghciOutput <- ghciLoadModuleWithEnv
+                    (mkTestModule "TypedQuery Text"
+                        "[typedSql| SELECT name FROM typed_sql_auto_role_items LIMIT 1 |]")
+                    envOverrides
+                assertGhciSuccess ghciOutput
+
     describe "TypedSql macro compile-time success" do
         compilePassTest "primary key inferred as Id'"
             (mkTestModuleWithPK ["typed_sql_test_items"] "TypedQuery (Id' \"typed_sql_test_items\")"
