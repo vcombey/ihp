@@ -32,14 +32,20 @@ module IHP.ControllerSupport
 , rlsContextVaultKey
 , initRequestContext
 , ResponseReceived
+, putContext
+, fromContext
+, maybeFromContext
+, freeze
+, fromFrozenContext
 ) where
 
 import Prelude
-import Data.IORef (IORef, modifyIORef', readIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Kind (Type)
 import Data.Maybe (fromMaybe)
+import Data.Proxy (Proxy (..))
 import Control.Exception.Safe (SomeException, fromException, try, throwIO)
 import qualified Control.Exception as Exception
 import qualified IHP.ErrorController as ErrorController
@@ -252,6 +258,44 @@ rewriteWebSocketFallbackStatus (WaiInternal.ResponseRaw handler fallback) =
     WaiInternal.ResponseRaw handler (mapResponseStatus (const HTTP.status200) fallback)
 rewriteWebSocketFallbackStatus other = other
 
+controllerContextVaultKey :: Vault.Key (IORef TypeMap.TMap)
+controllerContextVaultKey = unsafePerformIO Vault.newKey
+{-# NOINLINE controllerContextVaultKey #-}
+
+insertControllerContextStore :: Request -> IO Request
+insertControllerContextStore request = do
+    contextStore <- newIORef TypeMap.empty
+    pure request { vault = Vault.insert controllerContextVaultKey contextStore request.vault }
+{-# INLINE insertControllerContextStore #-}
+
+putContext :: forall value. (Typeable value, ?context :: ControllerContext) => value -> IO ()
+putContext value =
+    modifyIORef' (lookupRequestVault controllerContextVaultKey ?context) (TypeMap.insert value)
+{-# INLINE putContext #-}
+
+maybeFromContext :: forall value. (Typeable value, ?context :: ControllerContext) => IO (Maybe value)
+maybeFromContext =
+    TypeMap.lookup @value <$> readIORef (lookupRequestVault controllerContextVaultKey ?context)
+{-# INLINE maybeFromContext #-}
+
+fromContext :: forall value. (Typeable value, ?context :: ControllerContext) => IO value
+fromContext =
+    maybeFromContext @value >>= \case
+        Just value -> pure value
+        Nothing -> error $ "fromContext: Could not find " <> show (Typeable.typeRep (Proxy @value)) <> " in controller context."
+{-# INLINE fromContext #-}
+
+freeze :: ControllerContext -> IO ControllerContext
+freeze context = do
+    contextMap <- readIORef (lookupRequestVault controllerContextVaultKey context)
+    contextStore <- newIORef contextMap
+    pure context { vault = Vault.insert controllerContextVaultKey contextStore context.vault }
+{-# INLINE freeze #-}
+
+fromFrozenContext :: forall value. (Typeable value, ?context :: ControllerContext) => value
+fromFrozenContext =
+    unsafePerformIO (fromContext @value)
+{-# NOINLINE fromFrozenContext #-}
 
 jumpToAction :: forall action. (Controller action, ?context :: ControllerContext, ?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
 jumpToAction theAction = do
