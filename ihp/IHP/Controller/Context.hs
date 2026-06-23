@@ -5,6 +5,7 @@ module IHP.Controller.Context
     , maybeFromContext
     , freeze
     , fromFrozenContext
+    , maybeFromFrozenContext
     )
 where
 
