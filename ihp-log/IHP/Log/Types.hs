@@ -1,4 +1,3 @@
-{-# LANGUAGE ConstraintKinds #-}
 {-|
 Module: IHP.Log.Types
 Description:  Types for the IHP logging system
@@ -33,6 +32,7 @@ module IHP.Log.Types
 ) where
 
 import Prelude
+import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.Text as Text
 import Data.Default (Default (def))
@@ -203,13 +203,20 @@ instance Default LoggerSettings where
 defaultDestination :: LogDestination
 defaultDestination = Stdout defaultBufSize
 
--- | Used to get the logger for a given environment.
--- | Call in any instance of 'LoggingProvider' get the the environment's current logger.
+-- | Used to write logs for a given environment.
 -- Useful in controller and model actions, which both have logging contexts.
-type LoggingProvider context = HasField "logger" context Logger
+class LoggingProvider context where
+    writeLogForContext :: ToLogStr string => LogLevel -> context -> string -> IO ()
 
 instance HasField "logger" Logger Logger where
     getField logger = logger
+
+instance LoggingProvider Logger where
+    writeLogForContext level logger text = do
+        let write = logger.write
+        let formatter = logger.formatter
+        when (level >= logger.level) $
+            write (\time -> formatter time level (toLogStr text))
 
 -- | Create a new 'FastLogger' and wrap it in an IHP 'Logger'.
 -- Use with the default logger settings and record update syntax for nice configuration:

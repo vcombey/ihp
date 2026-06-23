@@ -30,6 +30,7 @@ module IHP.ViewPrelude (
     module IHP.View.Classes,
     module IHP.FlashMessages,
     module IHP.Controller.Layout,
+    ControllerContext,
     module IHP.Modal.Types,
     module IHP.Modal.ViewFunctions,
     module IHP.Job.Types,
@@ -58,6 +59,7 @@ import IHP.View.Types
 import IHP.View.Classes
 import IHP.FlashMessages
 import IHP.Controller.Layout
+import IHP.ControllerSupport (ControllerContext)
 
 import IHP.Modal.Types
 import IHP.Modal.ViewFunctions

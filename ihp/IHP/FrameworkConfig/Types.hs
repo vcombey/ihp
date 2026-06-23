@@ -43,6 +43,7 @@ import qualified Network.Wai.Middleware.Cors as Cors
 import qualified Network.Wai.Parse as WaiParse
 import Network.Wai (Middleware, Request)
 import IHP.Environment (Environment)
+import IHP.Log.Types (LoggingProvider (..), toLogStr)
 import IHP.View.Types (CSSFramework)
 import System.Log.FastLogger (FastLogger)
 import IHP.ModelSupport.Types (ModelContext)
@@ -178,5 +179,9 @@ data FrameworkConfig = FrameworkConfig
 
 instance HasField "frameworkConfig" FrameworkConfig FrameworkConfig where
     getField frameworkConfig = frameworkConfig
+
+instance LoggingProvider FrameworkConfig where
+    writeLogForContext _ frameworkConfig text =
+        frameworkConfig.logger (toLogStr text)
 
 type ConfigProvider context = HasField "frameworkConfig" context FrameworkConfig

@@ -26,7 +26,7 @@ import qualified Data.Vault.Lazy as Vault
 import Data.Dynamic (Dynamic, fromDynamic, toDyn)
 import Data.Typeable (typeRep)
 import IHP.FrameworkConfig
-import IHP.Log.Types (LogLevel (Debug), Logger (..), defaultFormatter)
+import IHP.Log.Types (LogLevel (Debug), Logger (..), LoggingProvider (..), defaultFormatter, toLogStr)
 import IHP.PGListener
 import IHP.RequestVault.Helper
 import IHP.RequestVault.ModelContext
@@ -62,6 +62,10 @@ instance HasField "frameworkConfig" Request FrameworkConfig where
     {-# INLINE getField #-}
     getField request = requestFrameworkConfig request
 
+instance HasField "request" Request Request where
+    {-# INLINE getField #-}
+    getField request = request
+
 instance HasField "logger" Request Logger where
     {-# INLINE getField #-}
     getField request =
@@ -72,6 +76,10 @@ instance HasField "logger" Request Logger where
             , timeCache = pure ""
             , cleanup = pure ()
             }
+
+instance LoggingProvider Request where
+    writeLogForContext _ request text =
+        request.frameworkConfig.logger (toLogStr text)
 
 -- request.application
 applicationContextVaultKey :: Vault.Key Dynamic

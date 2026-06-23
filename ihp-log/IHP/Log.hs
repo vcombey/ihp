@@ -22,7 +22,6 @@ module IHP.Log
 ) where
 
 import Prelude hiding (error, log)
-import Control.Monad (when)
 import IHP.Log.Types
 import Network.Wai (Middleware)
 import Network.Wai.Middleware.RequestLogger (mkRequestLogger, RequestLoggerSettings, destination)
@@ -34,8 +33,8 @@ import qualified System.Log.FastLogger as FastLogger
 -- Internal use only -- application code should call the
 -- function corresponding to the desired log level.
 log :: (?context :: context, LoggingProvider context, FastLogger.ToLogStr string) => LogLevel -> string -> IO ()
-log level text = do
-    writeLog level ?context.logger text
+log level text =
+    writeLogForContext level ?context text
 
 -- | Log a debug level message.
 --
@@ -98,11 +97,8 @@ unknown = log Unknown
 
 -- | Write a log if the given log level is greater than or equal to the logger's log level.
 writeLog :: (FastLogger.ToLogStr string) => LogLevel -> Logger -> string -> IO ()
-writeLog level logger text = do
-    let write = logger.write
-    let formatter = logger.formatter
-    when (level >= logger.level) $
-        write (\time -> formatter time level (toLogStr text))
+writeLog level logger text =
+    writeLogForContext level logger text
 
 -- | Wraps 'RequestLogger' from wai-extra to log to an IHP logger.
 -- See 'Network.Wai.Middleware.RequestLogger'.
