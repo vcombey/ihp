@@ -571,7 +571,7 @@ errorHandlerMiddleware frameworkConfig app request respond =
 logServerException :: FrameworkConfig -> Request -> SomeException -> Text -> Status -> IO ()
 logServerException frameworkConfig request exception actionDescription status =
     when (statusCode status >= 500) do
-        writeLog Error frameworkConfig.logger $
+        frameworkConfig.logger . toLogStr $
             Text.intercalate "\n"
                 [ "Unhandled exception during request"
                 , "  status: " <> tshow (statusCode status) <> " " <> decodeUtf8 (statusMessage status)
