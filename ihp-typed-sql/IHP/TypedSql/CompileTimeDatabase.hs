@@ -263,10 +263,7 @@ splitOnComma = List.unfoldr \case
         in Just (role, drop 1 rest)
 
 trim :: String -> String
-trim = dropWhileEnd Char.isSpace . dropWhile Char.isSpace
-
-dropWhileEnd :: (a -> Bool) -> [a] -> [a]
-dropWhileEnd predicate = reverse . dropWhile predicate . reverse
+trim = List.dropWhileEnd Char.isSpace . dropWhile Char.isSpace
 
 isValidPgRoleName :: String -> Bool
 isValidPgRoleName [] = False
