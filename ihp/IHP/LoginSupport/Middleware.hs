@@ -22,7 +22,6 @@ import IHP.LoginSupport.Types
 import IHP.LoginSupport.Helper.Controller (sessionKey)
 import IHP.Controller.Session
 import IHP.QueryBuilder
-import IHP.Fetch
 import IHP.Fetch.Statement (buildQueryMaybeStatement)
 import IHP.ModelSupport
 import IHP.Hasql.FromRow (FromRowHasql)
