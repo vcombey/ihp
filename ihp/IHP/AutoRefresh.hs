@@ -442,12 +442,12 @@ channelName tableName = "ar_did_change_row_" <> cs tableName
 notificationTriggerStatements :: Text -> [Text]
 notificationTriggerStatements tableName =
     [ "BEGIN"
-    , "CREATE UNLOGGED TABLE IF NOT EXISTS public.large_pg_notifications ("
+    , "CREATE UNLOGGED TABLE IF NOT EXISTS ihp_runtime.large_pg_notifications ("
         <> "id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL, "
         <> "payload TEXT DEFAULT NULL, "
         <> "created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL"
         <> ")"
-    , "CREATE INDEX IF NOT EXISTS large_pg_notifications_created_at_index ON public.large_pg_notifications (created_at)"
+    , "CREATE INDEX IF NOT EXISTS large_pg_notifications_created_at_index ON ihp_runtime.large_pg_notifications (created_at)"
     , "CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $$"
         <> "DECLARE\n"
         <> "    payload TEXT;\n"
@@ -461,9 +461,9 @@ notificationTriggerStatements tableName =
         <> "        payload := jsonb_build_object('op', lower(TG_OP), 'new', to_jsonb(NEW))::text;\n"
         <> "    END IF;\n"
         <> "    IF octet_length(payload) > 7800 THEN\n"
-        <> "        INSERT INTO public.large_pg_notifications (payload) VALUES (payload) RETURNING id INTO large_pg_notification_id;\n"
+        <> "        INSERT INTO ihp_runtime.large_pg_notifications (payload) VALUES (payload) RETURNING id INTO large_pg_notification_id;\n"
         <> "        payload := jsonb_build_object('op', lower(TG_OP), 'payloadId', large_pg_notification_id::text)::text;\n"
-        <> "        DELETE FROM public.large_pg_notifications WHERE created_at < CURRENT_TIMESTAMP - interval '30s';\n"
+        <> "        DELETE FROM ihp_runtime.large_pg_notifications WHERE created_at < CURRENT_TIMESTAMP - interval '30s';\n"
         <> "    END IF;\n"
         <> "    PERFORM pg_notify('" <> cs (channelName tableName) <> "', payload);\n"
         <> "    IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;\n"
@@ -478,7 +478,7 @@ notificationTriggerStatements tableName =
     , "COMMIT"
     ]
   where
-    functionName = "ar_notify_row_change_" <> tableName
+    functionName = "ihp_runtime.ar_notify_row_change_" <> tableName
     insertTriggerName = "ar_did_insert_row_" <> tableName
     updateTriggerName = "ar_did_update_row_" <> tableName
     deleteTriggerName = "ar_did_delete_row_" <> tableName
@@ -490,7 +490,7 @@ resolveAutoRefreshPayload payload = case payload.payloadLargePayloadId of
 
 fetchAutoRefreshPayload :: (?modelContext :: ModelContext) => UUID.UUID -> IO (Maybe AutoRefreshRowChangePayload)
 fetchAutoRefreshPayload payloadId = do
-    payloadResult <- Exception.try (sqlQueryScalar "SELECT payload FROM public.large_pg_notifications WHERE id = ? LIMIT 1" (PG.Only payloadId) :: IO ByteString)
+    payloadResult <- Exception.try (sqlQueryScalar "SELECT payload FROM ihp_runtime.large_pg_notifications WHERE id = ? LIMIT 1" (PG.Only payloadId) :: IO ByteString)
     case payloadResult of
         Left (_ :: Exception.SomeException) -> pure Nothing
         Right payload -> case Aeson.eitherDecodeStrict' payload of

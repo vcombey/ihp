@@ -13,7 +13,7 @@ import IHP.FrameworkConfig
 import IHP.ControllerPrelude hiding (get, request)
 import Network.Wai
 import Network.HTTP.Types
-import IHP.AutoRefresh (globalAutoRefreshServerVar, matchesInsertPayload, sessionResponseHasChanged, shouldRefreshForPayload, updateSession)
+import IHP.AutoRefresh (globalAutoRefreshServerVar, matchesInsertPayload, notificationTriggerStatements, sessionResponseHasChanged, shouldRefreshForPayload, updateSession)
 import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified Control.Concurrent.MVar as MVar
@@ -101,6 +101,14 @@ testLogger = noopLogger
 tests :: Spec
 tests = beforeAll (mockContextNoDatabase WebApplication config) do
     describe "AutoRefresh" do
+        describe "notification trigger setup" do
+            it "keeps runtime objects outside the application public schema" $ withContext do
+                let statements = notificationTriggerStatements "tasks"
+
+                statements `shouldSatisfy` any ("ihp_runtime.large_pg_notifications" `isInfixOf`)
+                statements `shouldSatisfy` any ("ihp_runtime.ar_notify_row_change_tasks" `isInfixOf`)
+                statements `shouldSatisfy` all (not . ("public.large_pg_notifications" `isInfixOf`))
+
         describe "autoRefreshMeta" do
             it "renders the ihp-auto-refresh-id meta tag on the initial response" $ withContext do
                 MVar.modifyMVar_ globalAutoRefreshServerVar (\_ -> pure Nothing)
