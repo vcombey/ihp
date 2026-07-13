@@ -98,6 +98,40 @@ action MyAction = do -- <-- We don't enable auto refresh at the action start in 
         render MyView { expensiveModels, cheap }
 ```
 
+### Fine-grained Auto Refresh
+
+By default, `autoRefresh` re-renders a session after any write to a tracked
+table. For high-churn tables where only a subset of rows can affect the current
+page, use `autoRefreshWith` to inspect the changed rows before re-rendering:
+
+```haskell
+action ShowProjectAction { projectId } =
+    autoRefreshWith AutoRefreshOptions { shouldRefresh } do
+        project <- fetch projectId
+        tasks <- query @Task |> filterWhere (#projectId, projectId) |> fetch
+        render ShowProjectView { .. }
+  where
+    shouldRefresh changes =
+        pure
+            ( any
+                (\change -> rowField @"projectId" change == Just projectId)
+                (changesForTable "tasks" changes)
+            )
+```
+
+`autoRefreshWith` uses row-level PostgreSQL notifications. Each change contains
+the operation plus the old and new row JSON. Use `rowField`, `rowFieldNew`, and
+`rowFieldOld` with IHP model field names; the helpers translate them to their
+database column names. `anyChangeOnTable` and `anyChangeWithField` cover common
+checks.
+
+If a notification cannot include its full row payload, IHP stores the payload
+briefly in the database and resolves it before calling `shouldRefresh`. If that
+resolution fails, the session re-renders rather than risking stale HTML.
+
+Keep `shouldRefresh` fast and avoid database queries in it. The change data is
+used only on the server and is never sent to the browser.
+
 
 Auto Refresh automatically tracks all tables your action is using by hooking itself into the Query Builder and `fetch` functions.
 

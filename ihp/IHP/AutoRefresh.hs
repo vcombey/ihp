@@ -8,6 +8,7 @@ module IHP.AutoRefresh where
 import IHP.Prelude
 import IHP.AutoRefresh.Types
 import IHP.ControllerSupport hiding (request)
+import qualified Data.Aeson as Aeson
 import qualified Data.UUID.V4 as UUID
 import qualified Data.UUID as UUID
 import IHP.Controller.Session
@@ -26,6 +27,9 @@ import IHP.WebSocket
 import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
 import qualified IHP.PGListener as PGListener
 import qualified Hasql.Session as HasqlSession
+import qualified Hasql.Statement as HasqlStatement
+import qualified Hasql.Encoders as HasqlEncoders
+import qualified Hasql.Decoders as HasqlDecoders
 import System.Log.FastLogger (toLogStr)
 import qualified Data.Vault.Lazy as Vault
 import qualified Network.WebSockets as Websocket
@@ -50,15 +54,43 @@ getOrCreateAutoRefreshServer =
             server <- newIORef (newAutoRefreshServer pgListener)
             pure (Just server, server)
 
+data AutoRefreshOptions = AutoRefreshOptions
+    { shouldRefresh :: AutoRefreshChangeSet -> IO Bool
+    }
+
+data AutoRefreshConfig
+    = AutoRefreshStatementConfig
+    | AutoRefreshRowConfig AutoRefreshOptions
+
 autoRefresh :: (
     ?theAction :: action
     , Controller action
     , ?modelContext :: ModelContext
     , ?request :: Request
-    , ?request :: Request
     , ?respond :: Respond
     ) => ((?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => IO ResponseReceived) -> IO ResponseReceived
-autoRefresh runAction = do
+autoRefresh = autoRefreshInternal AutoRefreshStatementConfig
+
+-- | Like 'autoRefresh', but receives the changed rows and only re-renders when
+-- 'shouldRefresh' returns 'True'. This is useful for high-churn tables where
+-- most writes cannot affect the current page.
+autoRefreshWith :: (
+    ?theAction :: action
+    , Controller action
+    , ?modelContext :: ModelContext
+    , ?request :: Request
+    , ?respond :: Respond
+    ) => AutoRefreshOptions -> ((?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => IO ResponseReceived) -> IO ResponseReceived
+autoRefreshWith options = autoRefreshInternal (AutoRefreshRowConfig options)
+
+autoRefreshInternal :: (
+    ?theAction :: action
+    , Controller action
+    , ?modelContext :: ModelContext
+    , ?request :: Request
+    , ?respond :: Respond
+    ) => AutoRefreshConfig -> ((?modelContext :: ModelContext, ?respond :: Respond, ?request :: Request) => IO ResponseReceived) -> IO ResponseReceived
+autoRefreshInternal config runAction = do
     -- When PGListener is not available, degrade gracefully to a
     -- plain action without auto-refresh.
     case Vault.lookup pgListenerVaultKey ?request.vault of
@@ -98,14 +130,27 @@ autoRefresh runAction = do
                     -- can authenticate immediately when the fragment/page HTML arrives.
                     event <- MVar.newEmptyMVar
                     lastPing <- getCurrentTime
-                    let placeholderSession =
-                            AutoRefreshSession
+                    placeholderSession <- case config of
+                        AutoRefreshStatementConfig ->
+                            pure AutoRefreshSession
                                 { id
                                 , renderView
                                 , event
                                 , tables = mempty
                                 , lastResponse = ""
                                 , lastPing
+                                }
+                        AutoRefreshRowConfig options -> do
+                            pendingChanges <- newIORef (Just mempty)
+                            pure AutoRefreshSessionWithChanges
+                                { id
+                                , renderView
+                                , event
+                                , tables = mempty
+                                , lastResponse = ""
+                                , lastPing
+                                , pendingChanges
+                                , shouldRefresh = options.shouldRefresh
                                 }
                     modifyIORef' autoRefreshServer (\server -> server { sessions = placeholderSession : server.sessions })
                     let removeSession = modifyIORef' autoRefreshServer (\server -> server { sessions = filter (\session -> session.id /= id) server.sessions })
@@ -132,7 +177,9 @@ autoRefresh runAction = do
                                     totalSessions <- length . (.sessions) <$> readIORef autoRefreshServer
                                     ?request.frameworkConfig.logger (toLogStr ("AutoRefresh register session=" <> tshow id <> " path=" <> cs ?request.rawPathInfo <> " totalSessions=" <> tshow totalSessions))
                                     async (gcSessions autoRefreshServer)
-                                    registerNotificationTrigger ?touchedTables autoRefreshServer
+                                    case config of
+                                        AutoRefreshStatementConfig -> registerNotificationTrigger ?touchedTables autoRefreshServer
+                                        AutoRefreshRowConfig {} -> registerRowNotificationTrigger ?touchedTables autoRefreshServer
                                 Nothing -> removeSession
 
                             pure result
@@ -154,36 +201,48 @@ instance WSApp AutoRefreshWSApp where
                 <> tshow sessionId
                 <> " available="
                 <> tshow (sessionId `elem` availableSessions)
-        unless (sessionId `elem` availableSessions) do
-            Websocket.sendClose ?connection ("Auto refresh session unavailable" :: Text)
+        if sessionId `elem` availableSessions
+            then do
+                setState AutoRefreshActive { sessionId }
+                session <- getSessionById autoRefreshServer sessionId
 
-        when (sessionId `elem` availableSessions) do
-            setState AutoRefreshActive { sessionId }
-            AutoRefreshSession { renderView, event } <- getSessionById autoRefreshServer sessionId
+                let handleOtherException :: SomeException -> IO ()
+                    handleOtherException ex = ?context.frameworkConfig.logger (toLogStr ("AutoRefresh: Failed to re-render view: " <> tshow ex))
 
-            let handleOtherException :: SomeException -> IO ()
-                handleOtherException ex = ?context.frameworkConfig.logger (toLogStr ("AutoRefresh: Failed to re-render view: " <> tshow ex))
+                let onRender = do
+                        let currentRequest = ?request
+                        (_, capturedResponse) <-
+                            captureResponseBody
+                                (\_ -> pure (error "AutoRefresh: ResponseReceived placeholder"))
+                                (\respond -> session.renderView currentRequest respond)
+                        case capturedResponse of
+                            Just html -> do
+                                responseChanged <- sessionResponseHasChanged autoRefreshServer sessionId html
+                                when responseChanged do
+                                    sendTextData html
+                                    updateSession autoRefreshServer sessionId (\currentSession -> currentSession { lastResponse = html })
+                            Nothing -> pure ()
 
-            async $ forever do
-                MVar.takeMVar event
-                let currentRequest = ?request
-                (do
-                    (_, capturedResponse) <- captureResponseBody (\_ -> pure (error "AutoRefresh: ResponseReceived placeholder")) \respond ->
-                        renderView currentRequest respond
-                    case capturedResponse of
-                        Just html -> do
-                            responseChanged <- sessionResponseHasChanged autoRefreshServer sessionId html
-                            when responseChanged do
-                                sendTextData html
-                                updateSession autoRefreshServer sessionId (\session -> session { lastResponse = html })
-                        Nothing -> pure ()
-                    ) `catch` handleOtherException
-                pure ()
+                case session of
+                    AutoRefreshSession { event } ->
+                        async $ forever do
+                            MVar.takeMVar event
+                            onRender `catch` handleOtherException
+                    AutoRefreshSessionWithChanges { event, pendingChanges, shouldRefresh } ->
+                        async $ forever do
+                            MVar.takeMVar event
+                            pending <- atomicModifyIORef' pendingChanges (\current -> (Just mempty, current))
+                            (case pending of
+                                Nothing -> onRender
+                                Just changes -> do
+                                    shouldRender <- shouldRefresh changes
+                                    when shouldRender onRender
+                                ) `catch` handleOtherException
 
-            pure ()
-
-        -- Keep the connection open until it's killed and the onClose is called
-        forever receiveDataMessage
+                -- Keep the connection open until it's killed and the onClose is called.
+                forever receiveDataMessage
+            else
+                Websocket.sendClose ?connection ("Auto refresh session unavailable" :: Text)
 
     onPing = do
         now <- getCurrentTime
@@ -195,7 +254,7 @@ instance WSApp AutoRefreshWSApp where
         getState >>= \case
             AutoRefreshActive { sessionId } -> do
                 autoRefreshServer <- getOrCreateAutoRefreshServer
-                modifyIORef' autoRefreshServer (\server -> server { sessions = filter (\AutoRefreshSession { id } -> id /= sessionId) server.sessions })
+                modifyIORef' autoRefreshServer (\server -> server { sessions = filter (\session -> session.id /= sessionId) server.sessions })
             AwaitingSessionID -> pure ()
 
 
@@ -242,8 +301,9 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
         pgListener |> PGListener.subscribe (channelName table) \notification -> do
                 sessions <- (.sessions) <$> readIORef autoRefreshServer
                 sessions
-                    |> filter (\session -> table `Set.member` session.tables)
-                    |> map (\session -> session.event)
+                    |> mapMaybe (\case
+                        AutoRefreshSession { tables, event } | table `Set.member` tables -> Just event
+                        _ -> Nothing)
                     |> mapM (\event -> MVar.tryPutMVar event ())
                 pure ())
 
@@ -257,6 +317,48 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
 
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
+
+registerRowNotificationTrigger :: (?modelContext :: ModelContext, ?request :: Request) => IORef (Set Text) -> IORef AutoRefreshServer -> IO ()
+registerRowNotificationTrigger touchedTablesVar autoRefreshServer = do
+    touchedTables <- Set.toList <$> readIORef touchedTablesVar
+    subscribedRowTables <- (.subscribedRowTables) <$> readIORef autoRefreshServer
+    let subscriptionRequired = filter (`Set.notMember` subscribedRowTables) touchedTables
+    let isDevelopment = ?request.frameworkConfig.environment == Development
+
+    modifyIORef' autoRefreshServer (\server -> server { subscribedRowTables = server.subscribedRowTables <> Set.fromList subscriptionRequired })
+
+    pgListener <- (.pgListener) <$> readIORef autoRefreshServer
+    subscriptions <- forM subscriptionRequired \table -> do
+        withRowLevelSecurityDisabled do
+            let pool = ?modelContext.hasqlPool
+            runSessionHasql pool (mapM_ HasqlSession.script (notificationRowTriggerStatements table))
+
+        pgListener |> PGListener.subscribeJSON (rowChannelName table) (\payload -> do
+            resolvedPayload <- resolveAutoRefreshPayload payload
+            sessions <- (.sessions) <$> readIORef autoRefreshServer
+            mapM_ (handleRowChange table resolvedPayload) sessions)
+
+    when isDevelopment do
+        let alreadySubscribed = filter (`Set.member` subscribedRowTables) touchedTables
+        forM_ alreadySubscribed \table ->
+            withRowLevelSecurityDisabled do
+                let pool = ?modelContext.hasqlPool
+                runSessionHasql pool (mapM_ HasqlSession.script (notificationRowTriggerStatements table))
+
+    modifyIORef' autoRefreshServer (\server -> server { subscriptions = server.subscriptions <> subscriptions })
+  where
+    handleRowChange table resolvedPayload = \case
+        AutoRefreshSessionWithChanges { tables, pendingChanges, event }
+            | table `Set.member` tables -> do
+                case resolvedPayload of
+                    Nothing -> writeIORef pendingChanges Nothing
+                    Just payload ->
+                        modifyIORef' pendingChanges (\case
+                            Nothing -> Nothing
+                            Just current -> Just (insertRowChangeFromPayload table payload current))
+                _ <- MVar.tryPutMVar event ()
+                pure ()
+        _ -> pure ()
 
 -- | Returns the ids of all sessions available to the client based on what sessions are found in the session cookie
 getAvailableSessions :: (?request :: Request) => IORef AutoRefreshServer -> IO [UUID]
@@ -302,7 +404,7 @@ getSessionById :: IORef AutoRefreshServer -> UUID -> IO AutoRefreshSession
 getSessionById autoRefreshServer sessionId = do
     autoRefreshServer <- readIORef autoRefreshServer
     autoRefreshServer.sessions
-        |> find (\AutoRefreshSession { id } -> id == sessionId)
+        |> find (\session -> session.id == sessionId)
         |> Maybe.fromMaybe (error "getSessionById: Could not find the session")
         |> pure
 
@@ -336,7 +438,7 @@ gcSessions autoRefreshServer = do
 
 -- | A session is expired if it was not pinged in the last 60 seconds
 isSessionExpired :: UTCTime -> AutoRefreshSession -> Bool
-isSessionExpired now AutoRefreshSession { lastPing } = (now `diffUTCTime` lastPing) > (secondsToNominalDiffTime 60)
+isSessionExpired now session = (now `diffUTCTime` session.lastPing) > (secondsToNominalDiffTime 60)
 
 -- | Returns the event name of the event that the pg notify trigger dispatches
 channelName :: Text -> ByteString
@@ -345,33 +447,117 @@ channelName tableName = "ar_did_change_" <> cs tableName
 -- | Returns a SQL script to set up database notification triggers.
 --
 -- Wrapped in a DO $$ block with EXCEPTION handler because concurrent requests
--- can race to CREATE OR REPLACE the same function, causing PostgreSQL to throw
--- 'tuple concurrently updated' (SQLSTATE XX000). This is safe to ignore: the
--- other connection's CREATE OR REPLACE will have succeeded.
+-- can race to CREATE the same function or trigger, causing PostgreSQL to throw
+-- 'tuple concurrently updated' (SQLSTATE XX000), 'duplicate_object' (42710),
+-- or 'duplicate_function' (42723). This is safe to ignore: the
+-- other connection's CREATE will have succeeded.
 notificationTriggerSQL :: Text -> Text
 notificationTriggerSQL tableName =
         "DO $$\n"
         <> "BEGIN\n"
-        <> "    CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $BODY$"
+        <> "    IF to_regprocedure('" <> functionName <> "()') IS NULL THEN\n"
+        <> "        CREATE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $BODY$"
             <> "BEGIN\n"
             <> "    PERFORM pg_notify('" <> cs (channelName tableName) <> "', '');\n"
             <> "    RETURN new;\n"
             <> "END;\n"
             <> "$BODY$ language plpgsql;\n"
-        <> "    DROP TRIGGER IF EXISTS " <> insertTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "    DROP TRIGGER IF EXISTS " <> updateTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "    DROP TRIGGER IF EXISTS " <> deleteTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> insertTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> updateTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> deleteTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
         <> "EXCEPTION\n"
         <> "    WHEN SQLSTATE 'XX000' THEN null; -- 'tuple concurrently updated': another connection installed it first\n"
+        <> "    WHEN SQLSTATE '42710' THEN null; -- 'duplicate_object': another connection installed it first\n"
+        <> "    WHEN SQLSTATE '42723' THEN null; -- 'duplicate_function': another connection installed it first\n"
         <> "END; $$"
     where
-        functionName = "ar_notify_did_change_" <> tableName
+        functionName = "ihp_runtime.ar_notify_did_change_" <> tableName
         insertTriggerName = "ar_did_insert_" <> tableName
         updateTriggerName = "ar_did_update_" <> tableName
         deleteTriggerName = "ar_did_delete_" <> tableName
+
+notificationRowTriggerStatements :: Text -> [Text]
+notificationRowTriggerStatements tableName =
+    [ "CREATE UNLOGGED TABLE IF NOT EXISTS public.large_pg_notifications ("
+        <> "id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL, "
+        <> "payload TEXT DEFAULT NULL, "
+        <> "created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL"
+        <> ")"
+    , "CREATE INDEX IF NOT EXISTS large_pg_notifications_created_at_index ON public.large_pg_notifications (created_at)"
+    , "DO $$\n"
+        <> "BEGIN\n"
+        <> "    IF to_regprocedure('" <> functionName <> "()') IS NULL THEN\n"
+        <> "        CREATE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $BODY$\n"
+        <> "DECLARE\n"
+        <> "    payload TEXT;\n"
+        <> "    large_pg_notification_id UUID;\n"
+        <> "BEGIN\n"
+        <> "    IF (TG_OP = 'DELETE') THEN\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'old', to_jsonb(OLD))::text;\n"
+        <> "    ELSIF (TG_OP = 'UPDATE') THEN\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'old', to_jsonb(OLD), 'new', to_jsonb(NEW))::text;\n"
+        <> "    ELSE\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'new', to_jsonb(NEW))::text;\n"
+        <> "    END IF;\n"
+        <> "    IF octet_length(payload) > 7800 THEN\n"
+        <> "        INSERT INTO public.large_pg_notifications (payload) VALUES (payload) RETURNING id INTO large_pg_notification_id;\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'payloadId', large_pg_notification_id::text)::text;\n"
+        <> "        DELETE FROM public.large_pg_notifications WHERE created_at < CURRENT_TIMESTAMP - interval '30s';\n"
+        <> "    END IF;\n"
+        <> "    PERFORM pg_notify('" <> cs (rowChannelName tableName) <> "', payload);\n"
+        <> "    IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;\n"
+        <> "END;\n"
+        <> "$BODY$ language plpgsql;\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> insertTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> updateTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> deleteTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "EXCEPTION\n"
+        <> "    WHEN SQLSTATE 'XX000' THEN null;\n"
+        <> "    WHEN SQLSTATE '42710' THEN null;\n"
+        <> "    WHEN SQLSTATE '42723' THEN null;\n"
+        <> "END; $$"
+    ]
+  where
+    functionName = "ihp_runtime.ar_notify_row_change_" <> tableName
+    insertTriggerName = "ar_did_insert_row_" <> tableName
+    updateTriggerName = "ar_did_update_row_" <> tableName
+    deleteTriggerName = "ar_did_delete_row_" <> tableName
+
+rowChannelName :: Text -> ByteString
+rowChannelName tableName = "ar_did_change_row_" <> cs tableName
+
+resolveAutoRefreshPayload :: (?modelContext :: ModelContext) => AutoRefreshRowChangePayload -> IO (Maybe AutoRefreshRowChangePayload)
+resolveAutoRefreshPayload payload = case payload.payloadLargePayloadId of
+    Nothing -> pure (Just payload)
+    Just payloadId -> fetchAutoRefreshPayload payloadId
+
+fetchAutoRefreshPayload :: (?modelContext :: ModelContext) => UUID.UUID -> IO (Maybe AutoRefreshRowChangePayload)
+fetchAutoRefreshPayload payloadId = do
+    let statement = HasqlStatement.preparable
+            "SELECT payload FROM public.large_pg_notifications WHERE id = $1 LIMIT 1"
+            (HasqlEncoders.param (HasqlEncoders.nonNullable HasqlEncoders.uuid))
+            (HasqlDecoders.singleRow (HasqlDecoders.column (HasqlDecoders.nullable HasqlDecoders.text)))
+    result <- Exception.try (sqlStatementHasql ?modelContext.hasqlPool payloadId statement)
+    case result of
+        Left (_ :: SomeException) -> pure Nothing
+        Right Nothing -> pure Nothing
+        Right (Just payload) -> case Aeson.eitherDecodeStrict' (Text.encodeUtf8 payload) of
+            Left _ -> pure Nothing
+            Right decoded -> pure (Just decoded)
 
 autoRefreshStateVaultKey :: Vault.Key AutoRefreshState
 autoRefreshStateVaultKey = unsafePerformIO Vault.newKey
