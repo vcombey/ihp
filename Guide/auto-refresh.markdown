@@ -98,6 +98,16 @@ action MyAction = do -- <-- We don't enable auto refresh at the action start in 
         render MyView { expensiveModels, cheap }
 ```
 
+### Smart Filtering
+
+`autoRefresh` automatically tracks both the row IDs and the `WHERE` conditions of queries fetched during your action. This allows IHP to skip unnecessary re-renders:
+
+- For `UPDATE` and `DELETE`, changes to rows outside the tracked ID set are ignored.
+- For `INSERT`, IHP evaluates supported equality conditions against the inserted row and ignores rows that do not match.
+
+This is transparent. Raw SQL, aggregate queries, and conditions that cannot be evaluated safely fall back to refreshing on every change.
+
+### Custom SQL Queries with Auto Refresh
 
 Auto Refresh automatically tracks all tables your action is using by hooking itself into the Query Builder and `fetch` functions.
 

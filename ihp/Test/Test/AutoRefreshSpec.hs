@@ -13,7 +13,7 @@ import IHP.FrameworkConfig
 import IHP.ControllerPrelude hiding (get, request)
 import Network.Wai
 import Network.HTTP.Types
-import IHP.AutoRefresh (globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession)
+import IHP.AutoRefresh (globalAutoRefreshServerVar, matchesInsertPayload, sessionResponseHasChanged, shouldRefreshForPayload, updateSession)
 import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified Control.Concurrent.MVar as MVar
@@ -26,6 +26,13 @@ import Network.Wai.Test (runSession, request, SResponse(..), simpleBody)
 import IHP.Test.Mocking
 import qualified Data.UUID as UUID
 import qualified Network.Wai as Wai
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AesonKey
+import qualified Data.Aeson.KeyMap as AesonKeyMap
+import Data.Dynamic (toDyn)
+import Data.Functor.Contravariant (contramap)
+import qualified Data.Set as Set
+import qualified Hasql.Encoders as Encoders
 
 data WebApplication = WebApplication deriving (Eq, Show, Data)
 
@@ -162,6 +169,8 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                             , tables = mempty
                             , lastResponse = "resolved"
                             , lastPing = now
+                            , trackedIds = mempty
+                            , trackedConditions = mempty
                             }
                 serverRef <-
                     newIORef
@@ -176,3 +185,67 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
 
                 sessionResponseHasChanged serverRef UUID.nil "resolved" `shouldReturn` True
                 sessionResponseHasChanged serverRef UUID.nil "unresolved" `shouldReturn` False
+
+        describe "matchesInsertPayload" do
+            let mkRow pairs = AesonKeyMap.fromList [(AesonKey.fromText key, value) | (key, value) <- pairs]
+                textParam value = Param (contramap (const value) (Encoders.param (Encoders.nonNullable Encoders.text)))
+                uuidParam value = Param (contramap (const value) (Encoders.param (Encoders.nonNullable Encoders.uuid)))
+
+            it "matches equality conditions" $ \_ -> do
+                let row = mkRow [("project_id", Aeson.String "abc-123")]
+                    condition = ColumnCondition "tasks.project_id" EqOp (textParam "abc-123") Nothing Nothing
+                matchesInsertPayload condition row `shouldBe` True
+
+            it "rejects non-matching equality conditions" $ \_ -> do
+                let row = mkRow [("project_id", Aeson.String "other-id")]
+                    condition = ColumnCondition "tasks.project_id" EqOp (textParam "abc-123") Nothing Nothing
+                matchesInsertPayload condition row `shouldBe` False
+
+            it "handles UUID values" $ \_ -> do
+                let uuid = "a7a37bca-417b-21d5-38fc-7f9000efe79c" :: UUID.UUID
+                    row = mkRow [("project_id", Aeson.String "a7a37bca-417b-21d5-38fc-7f9000efe79c")]
+                    condition = ColumnCondition "tasks.project_id" EqOp (uuidParam uuid) Nothing Nothing
+                matchesInsertPayload condition row `shouldBe` True
+
+            it "evaluates compound conditions" $ \_ -> do
+                let row = mkRow [("project_id", Aeson.String "abc"), ("status", Aeson.String "active")]
+                    projectCondition = ColumnCondition "tasks.project_id" EqOp (textParam "abc") Nothing Nothing
+                    activeCondition = ColumnCondition "tasks.status" EqOp (textParam "active") Nothing Nothing
+                    inactiveCondition = ColumnCondition "tasks.status" EqOp (textParam "inactive") Nothing Nothing
+                matchesInsertPayload (AndCondition projectCondition activeCondition) row `shouldBe` True
+                matchesInsertPayload (AndCondition projectCondition inactiveCondition) row `shouldBe` False
+                matchesInsertPayload (OrCondition activeCondition inactiveCondition) row `shouldBe` True
+
+            it "falls back safely for unsupported operators and transforms" $ \_ -> do
+                let row = mkRow [("name", Aeson.String "Hello")]
+                    likeCondition = ColumnCondition "tasks.name" (LikeOp CaseSensitive) (textParam "%hello%") Nothing Nothing
+                    lowerCondition = ColumnCondition "tasks.name" EqOp (textParam "hello") (Just "LOWER") Nothing
+                matchesInsertPayload likeCondition row `shouldBe` True
+                matchesInsertPayload lowerCondition row `shouldBe` True
+
+            it "handles IS NULL" $ \_ -> do
+                let nullCondition = ColumnCondition "tasks.deleted_at" IsOp (Literal "NULL") Nothing Nothing
+                matchesInsertPayload nullCondition (mkRow [("deleted_at", Aeson.Null)]) `shouldBe` True
+                matchesInsertPayload nullCondition (mkRow [("deleted_at", Aeson.String "2024-01-01")]) `shouldBe` False
+
+        describe "shouldRefreshForPayload" do
+            let mkRow pairs = AesonKeyMap.fromList [(AesonKey.fromText key, value) | (key, value) <- pairs]
+                mkInsertPayload row = AutoRefreshRowChangePayload AutoRefreshInsert Nothing (Just (Aeson.Object row)) Nothing
+                mkUpdatePayload rowId = AutoRefreshRowChangePayload AutoRefreshUpdate Nothing (Just (Aeson.Object (mkRow [("id", Aeson.String rowId)]))) Nothing
+                textParam value = Param (contramap (const value) (Encoders.param (Encoders.nonNullable Encoders.text)))
+
+            it "filters inserts using tracked conditions" $ \_ -> do
+                let condition = ColumnCondition "tasks.project_id" EqOp (textParam "abc") Nothing Nothing
+                    matchingPayload = mkInsertPayload (mkRow [("project_id", Aeson.String "abc")])
+                    otherPayload = mkInsertPayload (mkRow [("project_id", Aeson.String "other")])
+                shouldRefreshForPayload mempty (Just [Just (toDyn condition)]) matchingPayload `shouldBe` True
+                shouldRefreshForPayload mempty (Just [Just (toDyn condition)]) otherPayload `shouldBe` False
+
+            it "refreshes inserts when no usable condition is tracked" $ \_ -> do
+                let payload = mkInsertPayload (mkRow [("id", Aeson.String "1")])
+                shouldRefreshForPayload (Set.singleton "1") Nothing payload `shouldBe` True
+                shouldRefreshForPayload mempty (Just [Nothing]) payload `shouldBe` True
+
+            it "filters updates using tracked IDs" $ \_ -> do
+                shouldRefreshForPayload (Set.singleton "abc-123") Nothing (mkUpdatePayload "abc-123") `shouldBe` True
+                shouldRefreshForPayload (Set.singleton "abc-123") Nothing (mkUpdatePayload "other-id") `shouldBe` False

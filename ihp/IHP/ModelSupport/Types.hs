@@ -90,8 +90,11 @@ data ModelContext = ModelContext
     , transactionRunner :: Maybe TransactionRunner -- ^ When set, queries are sent through this runner instead of 'HasqlPool.use' directly
     , logger :: FastLogger
     , queryLoggingEnabled :: !Bool
-    -- | A callback that is called whenever a specific table is accessed using a SELECT query
-    , trackTableReadCallback :: Maybe (Text -> IO ())
+    -- | A callback that is called whenever a specific table is accessed using a SELECT query.
+    -- The second argument contains the fetched row IDs; an empty list means they are unknown.
+    , trackTableReadCallback :: Maybe (Text -> [Text] -> IO ())
+    -- | Records the WHERE condition for smart AutoRefresh INSERT filtering.
+    , trackTableConditionCallback :: Maybe (Text -> Maybe Dynamic -> IO ())
     -- | Is set to a value if row level security was enabled at runtime
     , rowLevelSecurity :: Maybe RowLevelSecurityContext
     }

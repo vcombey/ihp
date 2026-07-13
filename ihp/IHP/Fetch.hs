@@ -30,9 +30,12 @@ where
 import IHP.Prelude
 import IHP.ModelSupport
 import IHP.QueryBuilder
+import IHP.QueryBuilder.Types (SQLQuery(..))
 import IHP.Hasql.FromRow (FromRowHasql(..))
 import Hasql.Implicits.Encoders (DefaultParamEncoder)
 import IHP.Fetch.Statement (buildQueryListStatement, buildQueryVectorStatement, buildQueryMaybeStatement, buildCountStatement, buildExistsStatement)
+import Data.Dynamic (toDyn)
+import qualified Data.Vector as Vector
 
 class Fetchable fetchable model | fetchable -> model where
     type FetchResult fetchable model
@@ -40,19 +43,23 @@ class Fetchable fetchable model | fetchable -> model where
     fetchOneOrNothing :: (Table model, FromRowHasql model, ?modelContext :: ModelContext) => fetchable -> IO (Maybe model)
     fetchOne :: (Table model, FromRowHasql model, ?modelContext :: ModelContext) => fetchable -> IO model
 
-instance (model ~ GetModelByTableName table, KnownSymbol table) => Fetchable (QueryBuilder table) model where
+instance (model ~ GetModelByTableName table, KnownSymbol table, HasField "id" model (Id' table), Show (PrimaryKey table)) => Fetchable (QueryBuilder table) model where
     type instance FetchResult (QueryBuilder table) model = [model]
     fetch :: (Table model, FromRowHasql model, ?modelContext :: ModelContext) => QueryBuilder table -> IO [model]
     fetch !queryBuilder = do
-        trackTableRead (tableName @model)
         let pool = ?modelContext.hasqlPool
-        sqlStatementHasql pool () (buildQueryListStatement queryBuilder)
+        results <- sqlStatementHasql pool () (buildQueryListStatement queryBuilder)
+        trackTableReadWithIds (tableName @model) (map (tshow . get #id) results)
+        trackTableCondition (tableName @model) (toDyn <$> (buildQuery queryBuilder).whereCondition)
+        pure results
 
     fetchOneOrNothing :: (?modelContext :: ModelContext) => (Table model, FromRowHasql model) => QueryBuilder table -> IO (Maybe model)
     fetchOneOrNothing !queryBuilder = do
-        trackTableRead (tableName @model)
         let pool = ?modelContext.hasqlPool
-        sqlStatementHasql pool () (buildQueryMaybeStatement queryBuilder)
+        result <- sqlStatementHasql pool () (buildQueryMaybeStatement queryBuilder)
+        trackTableReadWithIds (tableName @model) (maybe [] (pure . tshow . get #id) result)
+        trackTableCondition (tableName @model) (toDyn <$> (buildQuery queryBuilder).whereCondition)
+        pure result
 
     fetchOne :: (?modelContext :: ModelContext) => (Table model, FromRowHasql model) => QueryBuilder table -> IO model
     fetchOne !queryBuilder = do
@@ -74,11 +81,13 @@ instance (model ~ GetModelByTableName table, KnownSymbol table) => Fetchable (Qu
 -- > activeUsers <- query @User
 -- >     |> filterWhere (#active, True)
 -- >     |> fetchVector
-fetchVector :: forall model table. (Table model, model ~ GetModelByTableName table, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext) => QueryBuilder table -> IO (Vector model)
+fetchVector :: forall model table. (Table model, model ~ GetModelByTableName table, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, HasField "id" model (Id' table), Show (PrimaryKey table)) => QueryBuilder table -> IO (Vector model)
 fetchVector !queryBuilder = do
-    trackTableRead (tableName @model)
     let pool = ?modelContext.hasqlPool
-    sqlStatementHasql pool () (buildQueryVectorStatement queryBuilder)
+    results <- sqlStatementHasql pool () (buildQueryVectorStatement queryBuilder)
+    trackTableReadWithIds (tableName @model) (map (tshow . get #id) (Vector.toList results))
+    trackTableCondition (tableName @model) (toDyn <$> (buildQuery queryBuilder).whereCondition)
+    pure results
 
 -- | Returns the count of records selected by the query builder.
 --
@@ -115,22 +124,22 @@ fetchExists !queryBuilder = do
     let pool = ?modelContext.hasqlPool
     sqlStatementHasql pool () (buildExistsStatement queryBuilder)
 
-genericFetchId :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, FilterPrimaryKey table) => Id' table -> IO [model]
+genericFetchId :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, FilterPrimaryKey table, HasField "id" model (Id' table), Show (PrimaryKey table)) => Id' table -> IO [model]
 genericFetchId !id = query @model |> filterWhereId id |> fetch
 
-genericfetchIdOneOrNothing :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, FilterPrimaryKey table) => Id' table -> IO (Maybe model)
+genericfetchIdOneOrNothing :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, FilterPrimaryKey table, HasField "id" model (Id' table), Show (PrimaryKey table)) => Id' table -> IO (Maybe model)
 genericfetchIdOneOrNothing !id = query @model |> filterWhereId id |> fetchOneOrNothing
 
-genericFetchIdOne :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, FilterPrimaryKey table) => Id' table -> IO model
+genericFetchIdOne :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, FilterPrimaryKey table, HasField "id" model (Id' table), Show (PrimaryKey table)) => Id' table -> IO model
 genericFetchIdOne !id = query @model |> filterWhereId id |> fetchOne
 
-genericFetchIds :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey (GetTableName model)]) => [Id model] -> IO [model]
+genericFetchIds :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey (GetTableName model)], HasField "id" model (Id' table), Show (PrimaryKey table)) => [Id model] -> IO [model]
 genericFetchIds !ids = query @model |> filterWhereIdIn ids |> fetch
 
-genericfetchIdsOneOrNothing :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey (GetTableName model)]) => [Id model] -> IO (Maybe model)
+genericfetchIdsOneOrNothing :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey (GetTableName model)], HasField "id" model (Id' table), Show (PrimaryKey table)) => [Id model] -> IO (Maybe model)
 genericfetchIdsOneOrNothing !ids = query @model |> filterWhereIdIn ids |> fetchOneOrNothing
 
-genericFetchIdsOne :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey (GetTableName model)]) => [Id model] -> IO model
+genericFetchIdsOne :: forall table model. (Table model, KnownSymbol table, FromRowHasql model, ?modelContext :: ModelContext, model ~ GetModelByTableName table, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey (GetTableName model)], HasField "id" model (Id' table), Show (PrimaryKey table)) => [Id model] -> IO model
 genericFetchIdsOne !ids = query @model |> filterWhereIdIn ids |> fetchOne
 
 findBy !field !value !queryBuilder = queryBuilder |> filterWhere (field, value) |> fetchOne
@@ -141,13 +150,13 @@ findMaybeBy !field !value !queryBuilder = queryBuilder |> filterWhere (field, va
 findManyBy !field !value !queryBuilder = queryBuilder |> filterWhere (field, value) |> fetch
 -- Step.findOneByWorkflowId id    ==    queryBuilder |> findBy #templateId id
 
-instance (model ~ GetModelById (Id' table), GetTableName model ~ table, FilterPrimaryKey table) => Fetchable (Id' table) model where
+instance (model ~ GetModelById (Id' table), GetTableName model ~ table, FilterPrimaryKey table, HasField "id" model (Id' table), Show (PrimaryKey table)) => Fetchable (Id' table) model where
     type FetchResult (Id' table) model = model
     fetch = genericFetchIdOne
     fetchOneOrNothing = genericfetchIdOneOrNothing
     fetchOne = genericFetchIdOne
 
-instance (model ~ GetModelById (Id' table), GetTableName model ~ table, FilterPrimaryKey table) => Fetchable (Maybe (Id' table)) model where
+instance (model ~ GetModelById (Id' table), GetTableName model ~ table, FilterPrimaryKey table, HasField "id" model (Id' table), Show (PrimaryKey table)) => Fetchable (Maybe (Id' table)) model where
     type FetchResult (Maybe (Id' table)) model = [model]
     fetch (Just a) = genericFetchId a
     fetch Nothing = pure []
@@ -156,7 +165,7 @@ instance (model ~ GetModelById (Id' table), GetTableName model ~ table, FilterPr
     fetchOne (Just a) = genericFetchIdOne a
     fetchOne Nothing = error "Fetchable (Maybe Id): Failed to fetch because given id is 'Nothing', 'Just id' was expected"
 
-instance (model ~ GetModelById (Id' table), GetModelByTableName table ~ model, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey table]) => Fetchable [Id' table] model where
+instance (model ~ GetModelById (Id' table), GetModelByTableName table ~ model, GetTableName model ~ table, DefaultParamEncoder [PrimaryKey table], HasField "id" model (Id' table), Show (PrimaryKey table)) => Fetchable [Id' table] model where
     type FetchResult [Id' table] model = [model]
     fetch = genericFetchIds
     fetchOneOrNothing = genericfetchIdsOneOrNothing
@@ -185,6 +194,8 @@ fetchLatest :: forall table model.
     , HasField "createdAt" model UTCTime
     , Table model
     , FromRowHasql model
+    , HasField "id" model (Id' table)
+    , Show (PrimaryKey table)
     ) => QueryBuilder table -> IO (Maybe model)
 fetchLatest queryBuilder = queryBuilder |> fetchLatestBy #createdAt
 
@@ -214,6 +225,8 @@ fetchLatestBy :: forall table createdAt model.
     , HasField createdAt model UTCTime
     , Table model
     , FromRowHasql model
+    , HasField "id" model (Id' table)
+    , Show (PrimaryKey table)
     ) => Proxy createdAt -> QueryBuilder table -> IO (Maybe model)
 fetchLatestBy field queryBuilder =
     queryBuilder

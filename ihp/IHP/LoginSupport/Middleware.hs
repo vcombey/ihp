@@ -103,6 +103,8 @@ fetchUserMiddleware :: forall user normalizedModel.
     , PrimaryKey (GetTableName normalizedModel) ~ UUID
     , GetTableName normalizedModel ~ GetTableName user
     , FilterPrimaryKey (GetTableName normalizedModel)
+    , HasField "id" normalizedModel (Id' (GetTableName normalizedModel))
+    , Show (PrimaryKey (GetTableName normalizedModel))
     ) => Wai.Middleware
 fetchUserMiddleware = fetchUserMiddlewareFor @user currentUserIdVaultKey currentUserVaultKey
 {-# INLINE fetchUserMiddleware #-}
@@ -123,6 +125,8 @@ fetchAdminMiddleware :: forall admin normalizedModel.
     , PrimaryKey (GetTableName normalizedModel) ~ UUID
     , GetTableName normalizedModel ~ GetTableName admin
     , FilterPrimaryKey (GetTableName normalizedModel)
+    , HasField "id" normalizedModel (Id' (GetTableName normalizedModel))
+    , Show (PrimaryKey (GetTableName normalizedModel))
     ) => Wai.Middleware
 fetchAdminMiddleware = fetchUserMiddlewareFor @admin currentAdminIdVaultKey currentAdminVaultKey
 {-# INLINE fetchAdminMiddleware #-}
@@ -137,6 +141,8 @@ fetchUserMiddlewareFor :: forall user normalizedModel.
     , PrimaryKey (GetTableName normalizedModel) ~ UUID
     , GetTableName normalizedModel ~ GetTableName user
     , FilterPrimaryKey (GetTableName normalizedModel)
+    , HasField "id" normalizedModel (Id' (GetTableName normalizedModel))
+    , Show (PrimaryKey (GetTableName normalizedModel))
     ) => Vault.Key (Maybe UUID) -> Vault.Key (Maybe normalizedModel) -> Wai.Middleware
 fetchUserMiddlewareFor idKey userKey app req respond = do
     let ?modelContext = req.modelContext
@@ -174,6 +180,8 @@ authMiddleware :: forall user normalizedModel.
     , GetTableName normalizedModel ~ GetTableName user
     , FilterPrimaryKey (GetTableName normalizedModel)
     , KnownSymbol (GetModelName user)
+    , HasField "id" normalizedModel (Id' (GetTableName normalizedModel))
+    , Show (PrimaryKey (GetTableName normalizedModel))
     ) => Wai.Middleware
 authMiddleware = userIdMiddleware (sessionKey @user) . fetchUserMiddleware @user
 {-# INLINE authMiddleware #-}
@@ -195,6 +203,8 @@ adminAuthMiddleware :: forall admin normalizedModel.
     , GetTableName normalizedModel ~ GetTableName admin
     , FilterPrimaryKey (GetTableName normalizedModel)
     , KnownSymbol (GetModelName admin)
+    , HasField "id" normalizedModel (Id' (GetTableName normalizedModel))
+    , Show (PrimaryKey (GetTableName normalizedModel))
     ) => Wai.Middleware
 adminAuthMiddleware = adminIdMiddleware (sessionKey @admin) . fetchAdminMiddleware @admin
 {-# INLINE adminAuthMiddleware #-}

@@ -8,8 +8,14 @@ module IHP.AutoRefresh where
 import IHP.Prelude
 import IHP.AutoRefresh.Types
 import IHP.ControllerSupport hiding (request)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as AesonKey
+import qualified Data.Aeson.KeyMap as AesonKeyMap
+import Data.Dynamic (Dynamic, fromDynamic)
+import qualified Data.Map.Strict as Map
 import qualified Data.UUID.V4 as UUID
 import qualified Data.UUID as UUID
+import qualified Database.PostgreSQL.Simple.Types as PG
 import IHP.Controller.Session
 import qualified Network.Wai.Internal as Wai
 import qualified Data.Binary.Builder as ByteString
@@ -34,6 +40,7 @@ import Network.Wai
 import IHP.RequestVault (pgListenerVaultKey)
 import IHP.FrameworkConfig.Types (FrameworkConfig(..))
 import IHP.Environment (Environment(..))
+import IHP.QueryBuilder.Types (Condition(..), ConditionValue(..), FilterOperator(..), getParamPrinterText)
 
 {-# NOINLINE globalAutoRefreshServerVar #-}
 globalAutoRefreshServerVar :: MVar.MVar (Maybe (IORef AutoRefreshServer))
@@ -106,6 +113,8 @@ autoRefresh runAction = do
                                 , tables = mempty
                                 , lastResponse = ""
                                 , lastPing
+                                , trackedIds = mempty
+                                , trackedConditions = mempty
                                 }
                     modifyIORef' autoRefreshServer (\server -> server { sessions = placeholderSession : server.sessions })
                     let removeSession = modifyIORef' autoRefreshServer (\server -> server { sessions = filter (\session -> session.id /= id) server.sessions })
@@ -125,10 +134,12 @@ autoRefresh runAction = do
 
                             -- After the action completes, set up the auto refresh session
                             tables <- readIORef ?touchedTables
+                            trackedIds <- readIORef ?trackedIds
+                            trackedConditions <- readIORef ?trackedConditions
                             lastPing <- getCurrentTime
                             case capturedResponse of
                                 Just lastResponse -> do
-                                    updateSession autoRefreshServer id (\session -> session { tables, lastResponse, lastPing })
+                                    updateSession autoRefreshServer id (\session -> session { tables, lastResponse, lastPing, trackedIds, trackedConditions })
                                     totalSessions <- length . (.sessions) <$> readIORef autoRefreshServer
                                     ?request.frameworkConfig.logger (toLogStr ("AutoRefresh register session=" <> tshow id <> " path=" <> cs ?request.rawPathInfo <> " totalSessions=" <> tshow totalSessions))
                                     async (gcSessions autoRefreshServer)
@@ -222,7 +233,7 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
     touchedTables <- Set.toList <$> readIORef touchedTablesVar
     subscribedTables <- (.subscribedTables) <$> (autoRefreshServer |> readIORef)
 
-    let subscriptionRequired = touchedTables |> filter (\table -> subscribedTables |> Set.notMember table)
+    let subscriptionRequired = touchedTables |> filter (`Set.notMember` subscribedTables)
     -- In development, always re-run trigger SQL for all touched tables because
     -- `make db` drops and recreates the database, destroying triggers that were
     -- previously installed. The trigger SQL is idempotent so re-running is safe.
@@ -233,30 +244,116 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer = do
 
     pgListener <- (.pgListener) <$> readIORef autoRefreshServer
     subscriptions <- subscriptionRequired |> mapM (\table -> do
-        -- We need to add the trigger from the main IHP database role other we will get this error:
-        -- ERROR:  permission denied for schema public
         withRowLevelSecurityDisabled do
             let pool = ?modelContext.hasqlPool
-            runSessionHasql pool (HasqlSession.script (notificationTriggerSQL table))
+            runSessionHasql pool (mapM_ HasqlSession.script (notificationTriggerStatements table))
 
-        pgListener |> PGListener.subscribe (channelName table) \notification -> do
-                sessions <- (.sessions) <$> readIORef autoRefreshServer
-                sessions
-                    |> filter (\session -> table `Set.member` session.tables)
-                    |> map (\session -> session.event)
-                    |> mapM (\event -> MVar.tryPutMVar event ())
-                pure ())
+        pgListener |> PGListener.subscribeJSON (channelName table) (\payload -> do
+            resolvedPayload <- resolveAutoRefreshPayload payload
+            sessions <- (.sessions) <$> readIORef autoRefreshServer
+            mapM_ (handleSmartRowChange table resolvedPayload) sessions))
 
     -- Re-run trigger SQL for already-subscribed tables in dev mode
     when isDevelopment do
-        let alreadySubscribed = touchedTables |> filter (\table -> subscribedTables |> Set.member table)
+        let alreadySubscribed = touchedTables |> filter (`Set.member` subscribedTables)
         forM_ alreadySubscribed \table -> do
             withRowLevelSecurityDisabled do
                 let pool = ?modelContext.hasqlPool
-                runSessionHasql pool (HasqlSession.script (notificationTriggerSQL table))
+                runSessionHasql pool (mapM_ HasqlSession.script (notificationTriggerStatements table))
 
     modifyIORef' autoRefreshServer (\s -> s { subscriptions = s.subscriptions <> subscriptions })
     pure ()
+  where
+    handleSmartRowChange table resolvedPayload AutoRefreshSession { tables, event, trackedIds, trackedConditions }
+        | table `Set.member` tables = do
+            let conditions = Map.lookup table trackedConditions
+                shouldRefreshNow = case Map.lookup table trackedIds of
+                    Nothing -> True
+                    Just ids | Set.null ids -> True
+                    Just ids -> case resolvedPayload of
+                        Nothing -> True
+                        Just payload -> shouldRefreshForPayload ids conditions payload
+            when shouldRefreshNow do
+                _ <- MVar.tryPutMVar event ()
+                pure ()
+        | otherwise = pure ()
+
+shouldRefreshForPayload :: Set Text -> Maybe [Maybe Dynamic] -> AutoRefreshRowChangePayload -> Bool
+shouldRefreshForPayload trackedIds maybeConditions payload =
+    case payload.payloadOperation of
+        AutoRefreshInsert -> case maybeConditions of
+            Nothing -> True
+            Just conditions -> any (matchesInsertPayloadDynamic newRow) conditions
+          where
+            newRow = case payload.payloadNewRow of
+                Just (Aeson.Object object) -> object
+                _ -> AesonKeyMap.empty
+        _ -> case extractRowId payload of
+            Nothing -> True
+            Just rowId -> rowId `Set.member` trackedIds
+
+extractRowId :: AutoRefreshRowChangePayload -> Maybe Text
+extractRowId payload =
+    (payload.payloadNewRow <|> payload.payloadOldRow) >>= \case
+        Aeson.Object object -> case AesonKeyMap.lookup "id" object of
+            Just (Aeson.String value) -> Just value
+            Just (Aeson.Number value) -> Just (tshow (round value :: Integer))
+            _ -> Nothing
+        _ -> Nothing
+
+matchesInsertPayloadDynamic :: AesonKeyMap.KeyMap Aeson.Value -> Maybe Dynamic -> Bool
+matchesInsertPayloadDynamic _ Nothing = True
+matchesInsertPayloadDynamic newRow (Just conditionDynamic) =
+    case fromDynamic conditionDynamic of
+        Nothing -> True
+        Just condition -> matchesInsertPayload condition newRow
+
+matchesInsertPayload :: Condition -> AesonKeyMap.KeyMap Aeson.Value -> Bool
+matchesInsertPayload (AndCondition left right) row = matchesInsertPayload left row && matchesInsertPayload right row
+matchesInsertPayload (OrCondition left right) row = matchesInsertPayload left row || matchesInsertPayload right row
+matchesInsertPayload (ColumnCondition column operator value applyLeft applyRight) row
+    | isJust applyLeft || isJust applyRight = True
+    | otherwise = case operator of
+        EqOp -> matchEq column value row
+        IsOp -> matchIs column value row
+        _ -> True
+
+matchEq :: Text -> ConditionValue -> AesonKeyMap.KeyMap Aeson.Value -> Bool
+matchEq column (Param params) row = case getParamPrinterText params of
+    [filterText] -> jsonValueMatchesText (lookupColumn column row) filterText
+    _ -> True
+matchEq column (Literal text) row = jsonValueMatchesText (lookupColumn column row) text
+
+matchIs :: Text -> ConditionValue -> AesonKeyMap.KeyMap Aeson.Value -> Bool
+matchIs column (Literal text) row
+    | Text.toLower text == "null" = case lookupColumn column row of
+        Nothing -> True
+        Just Aeson.Null -> True
+        Just _ -> False
+    | otherwise = True
+matchIs _ (Param _) _ = True
+
+lookupColumn :: Text -> AesonKeyMap.KeyMap Aeson.Value -> Maybe Aeson.Value
+lookupColumn column row =
+    let columnName = case Text.breakOnEnd "." column of
+            ("", value) -> value
+            (_, value) -> value
+     in AesonKeyMap.lookup (AesonKey.fromText columnName) row
+
+jsonValueMatchesText :: Maybe Aeson.Value -> Text -> Bool
+jsonValueMatchesText Nothing _ = True
+jsonValueMatchesText (Just jsonValue) filterText = case jsonValue of
+    Aeson.String value -> value == unquote filterText
+    Aeson.Number value -> tshow (round value :: Integer) == filterText || tshow value == filterText
+    Aeson.Bool value -> (if value then "true" else "false") == Text.toLower filterText || (if value then "t" else "f") == Text.toLower filterText
+    Aeson.Null -> Text.toLower filterText == "null"
+    _ -> True
+  where
+    unquote value
+        | Text.length value >= 2
+        , Text.head value == '"'
+        , Text.last value == '"' = Text.init (Text.tail value)
+        | otherwise = value
 
 -- | Returns the ids of all sessions available to the client based on what sessions are found in the session cookie
 getAvailableSessions :: (?request :: Request) => IORef AutoRefreshServer -> IO [UUID]
@@ -340,38 +437,65 @@ isSessionExpired now AutoRefreshSession { lastPing } = (now `diffUTCTime` lastPi
 
 -- | Returns the event name of the event that the pg notify trigger dispatches
 channelName :: Text -> ByteString
-channelName tableName = "ar_did_change_" <> cs tableName
+channelName tableName = "ar_did_change_row_" <> cs tableName
 
--- | Returns a SQL script to set up database notification triggers.
---
--- Wrapped in a DO $$ block with EXCEPTION handler because concurrent requests
--- can race to CREATE OR REPLACE the same function, causing PostgreSQL to throw
--- 'tuple concurrently updated' (SQLSTATE XX000). This is safe to ignore: the
--- other connection's CREATE OR REPLACE will have succeeded.
-notificationTriggerSQL :: Text -> Text
-notificationTriggerSQL tableName =
-        "DO $$\n"
+notificationTriggerStatements :: Text -> [Text]
+notificationTriggerStatements tableName =
+    [ "BEGIN"
+    , "CREATE UNLOGGED TABLE IF NOT EXISTS public.large_pg_notifications ("
+        <> "id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL, "
+        <> "payload TEXT DEFAULT NULL, "
+        <> "created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL"
+        <> ")"
+    , "CREATE INDEX IF NOT EXISTS large_pg_notifications_created_at_index ON public.large_pg_notifications (created_at)"
+    , "CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $$"
+        <> "DECLARE\n"
+        <> "    payload TEXT;\n"
+        <> "    large_pg_notification_id UUID;\n"
         <> "BEGIN\n"
-        <> "    CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $BODY$"
-            <> "BEGIN\n"
-            <> "    PERFORM pg_notify('" <> cs (channelName tableName) <> "', '');\n"
-            <> "    RETURN new;\n"
-            <> "END;\n"
-            <> "$BODY$ language plpgsql;\n"
-        <> "    DROP TRIGGER IF EXISTS " <> insertTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "    DROP TRIGGER IF EXISTS " <> updateTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "    DROP TRIGGER IF EXISTS " <> deleteTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH STATEMENT EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "EXCEPTION\n"
-        <> "    WHEN SQLSTATE 'XX000' THEN null; -- 'tuple concurrently updated': another connection installed it first\n"
-        <> "END; $$"
-    where
-        functionName = "ar_notify_did_change_" <> tableName
-        insertTriggerName = "ar_did_insert_" <> tableName
-        updateTriggerName = "ar_did_update_" <> tableName
-        deleteTriggerName = "ar_did_delete_" <> tableName
+        <> "    IF (TG_OP = 'DELETE') THEN\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'old', to_jsonb(OLD))::text;\n"
+        <> "    ELSIF (TG_OP = 'UPDATE') THEN\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'old', to_jsonb(OLD), 'new', to_jsonb(NEW))::text;\n"
+        <> "    ELSE\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'new', to_jsonb(NEW))::text;\n"
+        <> "    END IF;\n"
+        <> "    IF octet_length(payload) > 7800 THEN\n"
+        <> "        INSERT INTO public.large_pg_notifications (payload) VALUES (payload) RETURNING id INTO large_pg_notification_id;\n"
+        <> "        payload := jsonb_build_object('op', lower(TG_OP), 'payloadId', large_pg_notification_id::text)::text;\n"
+        <> "        DELETE FROM public.large_pg_notifications WHERE created_at < CURRENT_TIMESTAMP - interval '30s';\n"
+        <> "    END IF;\n"
+        <> "    PERFORM pg_notify('" <> cs (channelName tableName) <> "', payload);\n"
+        <> "    IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;\n"
+        <> "END;\n"
+        <> "$$ language plpgsql"
+    , "DROP TRIGGER IF EXISTS " <> insertTriggerName <> " ON " <> tableName
+    , "CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "()"
+    , "DROP TRIGGER IF EXISTS " <> updateTriggerName <> " ON " <> tableName
+    , "CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "()"
+    , "DROP TRIGGER IF EXISTS " <> deleteTriggerName <> " ON " <> tableName
+    , "CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "()"
+    , "COMMIT"
+    ]
+  where
+    functionName = "ar_notify_row_change_" <> tableName
+    insertTriggerName = "ar_did_insert_row_" <> tableName
+    updateTriggerName = "ar_did_update_row_" <> tableName
+    deleteTriggerName = "ar_did_delete_row_" <> tableName
+
+resolveAutoRefreshPayload :: (?modelContext :: ModelContext) => AutoRefreshRowChangePayload -> IO (Maybe AutoRefreshRowChangePayload)
+resolveAutoRefreshPayload payload = case payload.payloadLargePayloadId of
+    Nothing -> pure (Just payload)
+    Just payloadId -> fetchAutoRefreshPayload payloadId
+
+fetchAutoRefreshPayload :: (?modelContext :: ModelContext) => UUID.UUID -> IO (Maybe AutoRefreshRowChangePayload)
+fetchAutoRefreshPayload payloadId = do
+    payloadResult <- Exception.try (sqlQueryScalar "SELECT payload FROM public.large_pg_notifications WHERE id = ? LIMIT 1" (PG.Only payloadId) :: IO ByteString)
+    case payloadResult of
+        Left (_ :: Exception.SomeException) -> pure Nothing
+        Right payload -> case Aeson.eitherDecodeStrict' payload of
+            Left _ -> pure Nothing
+            Right result -> pure (Just result)
 
 autoRefreshStateVaultKey :: Vault.Key AutoRefreshState
 autoRefreshStateVaultKey = unsafePerformIO Vault.newKey

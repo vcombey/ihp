@@ -41,6 +41,7 @@ import Data.Data
 import Data.Aeson (ToJSON (..), FromJSON (..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Set as Set
+import qualified Data.Map.Strict as Map
 import qualified Text.Read as Read
 import qualified Hasql.Pool as HasqlPool
 import qualified Hasql.Pool.Config as HasqlPoolConfig
@@ -81,6 +82,7 @@ notConnectedModelContext logger = ModelContext
     , logger = logger
     , queryLoggingEnabled = False
     , trackTableReadCallback = Nothing
+    , trackTableConditionCallback = Nothing
     , rowLevelSecurity = Nothing
     }
 
@@ -101,6 +103,7 @@ createModelContext databaseUrl logger = do
     hasqlPool <- HasqlPool.acquire hasqlPoolConfig
 
     let trackTableReadCallback = Nothing
+    let trackTableConditionCallback = Nothing
     let transactionRunner = Nothing
     let rowLevelSecurity = Nothing
     queryLoggingEnabled <- envOrDefault "DEBUG" False
@@ -918,9 +921,21 @@ instance Default Aeson.Value where
 --
 trackTableRead :: (?modelContext :: ModelContext) => Text -> IO ()
 trackTableRead tableName = case ?modelContext.trackTableReadCallback of
-    Just callback -> callback tableName
+    Just callback -> callback tableName []
     Nothing -> pure ()
 {-# INLINABLE trackTableRead #-}
+
+trackTableReadWithIds :: (?modelContext :: ModelContext) => Text -> [Text] -> IO ()
+trackTableReadWithIds tableName ids = case ?modelContext.trackTableReadCallback of
+    Just callback -> callback tableName ids
+    Nothing -> pure ()
+{-# INLINABLE trackTableReadWithIds #-}
+
+trackTableCondition :: (?modelContext :: ModelContext) => Text -> Maybe Dynamic -> IO ()
+trackTableCondition tableName condition = case ?modelContext.trackTableConditionCallback of
+    Just callback -> callback tableName condition
+    Nothing -> pure ()
+{-# INLINABLE trackTableCondition #-}
 
 -- | Track all tables in SELECT queries executed within the given IO action.
 --
@@ -935,13 +950,23 @@ trackTableRead tableName = case ?modelContext.trackTableReadCallback of
 -- >     tables <- readIORef ?touchedTables
 -- >     -- tables = Set.fromList ["projects", "users"]
 -- >
-withTableReadTracker :: (?modelContext :: ModelContext) => ((?modelContext :: ModelContext, ?touchedTables :: IORef (Set.Set Text)) => IO a) -> IO a
+withTableReadTracker :: (?modelContext :: ModelContext) => ((?modelContext :: ModelContext, ?touchedTables :: IORef (Set.Set Text), ?trackedIds :: IORef (Map.Map Text (Set.Set Text)), ?trackedConditions :: IORef (Map.Map Text [Maybe Dynamic])) => IO a) -> IO a
 withTableReadTracker trackedSection = do
     touchedTablesVar <- newIORef Set.empty
-    let trackTableReadCallback = Just \tableName -> modifyIORef' touchedTablesVar (Set.insert tableName)
+    trackedIdsVar <- newIORef Map.empty
+    trackedConditionsVar <- newIORef Map.empty
+    let trackTableReadCallback = Just \tableName ids -> do
+            modifyIORef' touchedTablesVar (Set.insert tableName)
+            case ids of
+                [] -> modifyIORef' trackedIdsVar (Map.delete tableName)
+                _ -> modifyIORef' trackedIdsVar (Map.insertWith Set.union tableName (Set.fromList ids))
+    let trackTableConditionCallback = Just \tableName condition ->
+            modifyIORef' trackedConditionsVar (Map.insertWith (<>) tableName [condition])
     let oldModelContext = ?modelContext
-    let ?modelContext = oldModelContext { trackTableReadCallback }
+    let ?modelContext = oldModelContext { trackTableReadCallback, trackTableConditionCallback }
     let ?touchedTables = touchedTablesVar
+    let ?trackedIds = trackedIdsVar
+    let ?trackedConditions = trackedConditionsVar
     trackedSection
 
 
