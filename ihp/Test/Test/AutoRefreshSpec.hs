@@ -108,6 +108,9 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                 statements `shouldSatisfy` any ("ihp_runtime.large_pg_notifications" `isInfixOf`)
                 statements `shouldSatisfy` any ("ihp_runtime.ar_notify_row_change_tasks" `isInfixOf`)
                 statements `shouldSatisfy` all (not . ("public.large_pg_notifications" `isInfixOf`))
+                statements `shouldSatisfy` any ("IF NOT EXISTS (SELECT 1 FROM pg_trigger" `isInfixOf`)
+                statements `shouldSatisfy` all (not . ("DROP TRIGGER" `isInfixOf`))
+                statements `shouldSatisfy` all (`notElem` ["BEGIN", "COMMIT"])
 
         describe "autoRefreshMeta" do
             it "renders the ihp-auto-refresh-id meta tag on the initial response" $ withContext do

@@ -441,8 +441,7 @@ channelName tableName = "ar_did_change_row_" <> cs tableName
 
 notificationTriggerStatements :: Text -> [Text]
 notificationTriggerStatements tableName =
-    [ "BEGIN"
-    , "CREATE UNLOGGED TABLE IF NOT EXISTS ihp_runtime.large_pg_notifications ("
+    [ "CREATE UNLOGGED TABLE IF NOT EXISTS ihp_runtime.large_pg_notifications ("
         <> "id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL, "
         <> "payload TEXT DEFAULT NULL, "
         <> "created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL"
@@ -469,13 +468,22 @@ notificationTriggerStatements tableName =
         <> "    IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;\n"
         <> "END;\n"
         <> "$$ language plpgsql"
-    , "DROP TRIGGER IF EXISTS " <> insertTriggerName <> " ON " <> tableName
-    , "CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "()"
-    , "DROP TRIGGER IF EXISTS " <> updateTriggerName <> " ON " <> tableName
-    , "CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "()"
-    , "DROP TRIGGER IF EXISTS " <> deleteTriggerName <> " ON " <> tableName
-    , "CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "()"
-    , "COMMIT"
+    , "DO $$\n"
+        <> "BEGIN\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> insertTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> updateTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = '" <> deleteTriggerName <> "' AND tgrelid = '" <> tableName <> "'::regclass) THEN\n"
+        <> "        CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    END IF;\n"
+        <> "EXCEPTION\n"
+        <> "    WHEN SQLSTATE 'XX000' THEN null;\n"
+        <> "    WHEN SQLSTATE '42710' THEN null;\n"
+        <> "    WHEN SQLSTATE '42723' THEN null;\n"
+        <> "END; $$"
     ]
   where
     functionName = "ihp_runtime.ar_notify_row_change_" <> tableName
