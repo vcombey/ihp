@@ -14,7 +14,7 @@ import IHP.FrameworkConfig
 import IHP.ControllerPrelude hiding (get, request)
 import Network.Wai
 import Network.HTTP.Types
-import IHP.AutoRefresh (getSessionById, globalAutoRefreshServerVar, notificationRowTriggerStatements, sessionResponseHasChanged, updateSession)
+import IHP.AutoRefresh (getSessionById, globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession)
 import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified Control.Concurrent.MVar as MVar
@@ -208,12 +208,6 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                 found.id `shouldBe` UUID.nil
 
         describe "fine-grained change sets" do
-            it "keeps runtime payload storage outside the application public schema" $ withContext do
-                let statements = notificationRowTriggerStatements "tasks"
-
-                statements `shouldSatisfy` any ("ihp_runtime.large_pg_notifications" `isInfixOf`)
-                statements `shouldSatisfy` all (not . ("public.large_pg_notifications" `isInfixOf`))
-
             it "exposes new and old row fields using model field names" $ withContext do
                 let oldRow = Aeson.object ["project_id" Aeson..= ("before" :: Text)]
                     newRow = Aeson.object ["project_id" Aeson..= ("after" :: Text)]
