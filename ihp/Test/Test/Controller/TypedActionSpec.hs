@@ -30,7 +30,6 @@ import IHP.ErrorController qualified as ErrorController
 import IHP.FrameworkConfig qualified as FrameworkConfig
 import IHP.HSX.Markup (renderMarkupText)
 import IHP.Log qualified as Log
-import IHP.Log.Types (LogDestination (..))
 import IHP.ModelSupport
 import IHP.OpenApiSupport qualified as OpenApiSupport
 import IHP.Prelude
@@ -44,6 +43,7 @@ import IHP.ViewPrelude hiding (action)
 import Network.HTTP.Types
 import Network.Wai qualified as Wai
 import Network.Wai.Test qualified as WaiTest
+import System.Log.FastLogger (FastLogger)
 import Test.Hspec
 import Wai.Request.Params.Middleware (RequestBody (..), requestBodyVaultKey)
 
@@ -562,14 +562,9 @@ tests = do
 
             it "logs request context and decoded body state for typed route 500s" do
                 logsRef <- newIORef []
-                logger <-
-                    Log.newLogger def
-                        { Log.destination =
-                            Callback
-                                (\logStr -> modifyIORef' logsRef (<> [TextEncoding.decodeUtf8Lenient (Log.fromLogStr logStr)]))
-                                (pure ())
-                        }
-                app <- createTypedRouteTestApplicationWithConfig (FrameworkConfig.option logger)
+                let logger logStr =
+                        modifyIORef' logsRef (<> [TextEncoding.decodeUtf8Lenient (Log.fromLogStr logStr)])
+                app <- createTypedRouteTestApplicationWithConfig logger (pure ())
 
                 response <-
                     WaiTest.runSession
@@ -598,7 +593,7 @@ requestWithBody headers body =
 
 createControllerContext :: IO ControllerContext
 createControllerContext = do
-    frameworkConfig <- FrameworkConfig.buildFrameworkConfig (pure ())
+    frameworkConfig <- FrameworkConfig.buildFrameworkConfig noopLogger (pure ())
     let requestBody = FormBody{params = [], files = [], rawPayload = ""}
     let request =
             Wai.defaultRequest
@@ -610,11 +605,11 @@ createControllerContext = do
 
 createTypedRouteTestApplication :: IO Wai.Application
 createTypedRouteTestApplication =
-    createTypedRouteTestApplicationWithConfig (pure ())
+    createTypedRouteTestApplicationWithConfig noopLogger (pure ())
 
-createTypedRouteTestApplicationWithConfig :: FrameworkConfig.ConfigBuilder -> IO Wai.Application
-createTypedRouteTestApplicationWithConfig config = do
-    frameworkConfig <- FrameworkConfig.buildFrameworkConfig config
+createTypedRouteTestApplicationWithConfig :: FastLogger -> FrameworkConfig.ConfigBuilder -> IO Wai.Application
+createTypedRouteTestApplicationWithConfig logger config = do
+    frameworkConfig <- FrameworkConfig.buildFrameworkConfig logger config
     let modelContext = notConnectedModelContext frameworkConfig.logger
     middleware <- Server.initMiddlewareStack frameworkConfig modelContext Nothing
     pure (ErrorController.errorHandlerMiddleware frameworkConfig (middleware (frontControllerToWAIApp @TypedRouteApplication @AutoRefreshWSApp id TypedRouteApplication typedRouteNotFound)))

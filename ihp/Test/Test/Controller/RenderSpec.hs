@@ -81,8 +81,7 @@ captureResponse request action = do
     let ?respond = \response -> do
             writeIORef responseRef (Just response)
             pure ResponseReceived
-    context <- newControllerContext
-    let ?context = context
+    let ?context = request
 
     _ <- action
     maybeResponse <- readIORef responseRef

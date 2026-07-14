@@ -1,5 +1,6 @@
 packages:
     ihp/
+    ihp-log/
     ihp-hsx/
     ihp-router/
     ihp-modal/
