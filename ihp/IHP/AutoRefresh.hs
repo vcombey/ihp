@@ -546,7 +546,7 @@ resolveAutoRefreshPayload payload = case payload.payloadLargePayloadId of
     Just payloadId -> fetchAutoRefreshPayload payloadId
 
 fetchAutoRefreshPayload :: (?modelContext :: ModelContext) => UUID.UUID -> IO (Maybe AutoRefreshRowChangePayload)
-fetchAutoRefreshPayload payloadId = do
+fetchAutoRefreshPayload payloadId = withRowLevelSecurityDisabled do
     let statement = HasqlStatement.preparable
             "SELECT payload FROM ihp_runtime.large_pg_notifications WHERE id = $1 LIMIT 1"
             (HasqlEncoders.param (HasqlEncoders.nonNullable HasqlEncoders.uuid))
