@@ -78,6 +78,32 @@ tests = do
                 ("WorkerMain" `ByteString.isInfixOf` contents) `shouldBe` True
                 ("import Main" `ByteString.isInfixOf` contents) `shouldBe` False
 
+    describe "IHP.IDE.SplitMode.generateWorkerGhciScript" do
+        it "preserves project commands and selects the worker application config" do
+            withTempCwd \dir -> do
+                let projectGhci = ":set -XNoImplicitPrelude\n:loadFromIHP applicationGhciConfig\nimport Project.Prelude\n"
+                ByteString.writeFile (dir <> "/.ghci") projectGhci
+
+                SplitMode.generateWorkerGhciScript
+
+                contents <- ByteString.readFile (dir <> "/build/.ghci-worker")
+                contents `shouldBe` ":set -XNoImplicitPrelude\n:loadFromIHP workerApplicationGhciConfig\nimport Project.Prelude\n"
+
+        it "is a no-op when the worker script is already up to date" do
+            withTempCwd \dir -> do
+                ByteString.writeFile (dir <> "/.ghci") ":loadFromIHP applicationGhciConfig\n"
+                SplitMode.generateWorkerGhciScript
+                let path = dir <> "/build/.ghci-worker"
+                mtime1 <- Directory.getModificationTime path
+                SplitMode.generateWorkerGhciScript
+                mtime2 <- Directory.getModificationTime path
+                mtime2 `shouldBe` mtime1
+
+        it "fails instead of loading the full web app when the IHP config marker is missing" do
+            withTempCwd \dir -> do
+                ByteString.writeFile (dir <> "/.ghci") ":set -XNoImplicitPrelude\n"
+                SplitMode.generateWorkerGhciScript `shouldThrow` anyIOException
+
 -- | Run an action with a fresh temporary directory as the current working
 -- directory. Restores the previous cwd on exit.
 withTempCwd :: (FilePath -> IO a) -> IO a
