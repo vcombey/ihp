@@ -9,8 +9,10 @@ of dev-server state) and 'DevWorker' (which has almost none).
 module IHP.IDE.GhciSupport
 ( -- * Spawning GHCi
   ghciArguments
+, ghciArgumentsForScript
 , procGhci
 , withGhci
+, withGhciArguments
   -- * Talking to GHCi
 , sendGhciCommand
 , sendGhciCommands
@@ -43,14 +45,22 @@ import qualified System.Process as Process
 -- hands accumulated heap back to the OS between reloads, keeping the footprint
 -- close to a fresh load.
 ghciArguments :: [String]
-ghciArguments =
+ghciArguments = ghciArgumentsForScript ".ghci"
+
+-- | Build the standard dev-mode GHCi argv with a specific project script.
+--
+-- The web process uses the regular @.ghci@, while the split worker uses a
+-- generated variant that loads @build/RunJobs.hs@ without first compiling the
+-- web application's @Main.hs@.
+ghciArgumentsForScript :: FilePath -> [String]
+ghciArgumentsForScript scriptPath =
     [ "-threaded"
     , "-fomit-interface-pragmas"
     , "-j"
     , "-O0"
     , "-package-env -" -- Don't load global package environments — they conflict with our pinned set
     , "-ignore-dot-ghci" -- Skip the global ~/.ghc/ghci.conf which sometimes sets `+c +s`
-    , "-ghci-script", ".ghci" -- Manually point at the project's .ghci since we just disabled defaults
+    , "-ghci-script", scriptPath -- Manually point at the project script since we just disabled defaults
     , "+RTS", "-A32m", "-n4m", "-H64m", "-Iw60", "-N4", "-Fd1"
     ]
 
@@ -71,8 +81,19 @@ withGhci
     -> Concurrent.ThreadId -- ^ thread to interrupt with 'Exit.ExitSuccess' on SIGTERM
     -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a)
     -> IO a
-withGhci wrapWithDirenv mainThreadId callback = do
-    let baseParams = procGhci wrapWithDirenv ghciArguments
+withGhci = withGhciArguments ghciArguments
+
+-- | Like 'withGhci', but with explicit GHCi arguments. This lets specialized
+-- dev processes select a different startup script while preserving the same
+-- process-group and shutdown behaviour.
+withGhciArguments
+    :: [String]
+    -> Bool                -- ^ wrap with @direnv exec .@?
+    -> Concurrent.ThreadId -- ^ thread to interrupt with 'Exit.ExitSuccess' on SIGTERM
+    -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a)
+    -> IO a
+withGhciArguments arguments wrapWithDirenv mainThreadId callback = do
+    let baseParams = procGhci wrapWithDirenv arguments
     let params = baseParams
             { Process.std_in = Process.CreatePipe
             , Process.std_out = Process.CreatePipe
