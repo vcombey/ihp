@@ -65,8 +65,10 @@ waitUntilJobsReady waitForReload = do
 runWithJobs :: Concurrent.ThreadId -> IO () -> IO ()
 runWithJobs mainThreadId waitForReload = do
     wrapWithDirenv <- EnvVar.envOrDefault "IHP_DEV_WRAP_DIRENV" False
+    SplitMode.generateWorkerGhciScript
 
-    withGhci wrapWithDirenv mainThreadId \input output err _processHandle -> do
+    let workerGhciArguments = ghciArgumentsForScript SplitMode.workerGhciScriptPath
+    withGhciArguments workerGhciArguments wrapWithDirenv mainThreadId \input output err _processHandle -> do
         -- One iteration of the worker lifecycle. @loaded@ says whether the most
         -- recent @:l@ / @:r@ succeeded. When the worker is running we drain
         -- GHCi for its whole lifetime ('withRunningWorker'); when it isn't we

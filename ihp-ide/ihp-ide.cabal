@@ -20,6 +20,8 @@ data-files:
       lib/IHP/Makefile.dist
     , lib/IHP/.hie-bios
     , lib/IHP/applicationGhciConfig
+    , lib/IHP/sharedApplicationGhciConfig
+    , lib/IHP/workerApplicationGhciConfig
     , IHPSchema.sql
     , static/IDE/*.css
     , static/IDE/*.js
