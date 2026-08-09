@@ -17,7 +17,6 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Bits ((.|.))
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
-import Data.TMap qualified as TypeMap
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Vector qualified as Vector
@@ -30,8 +29,6 @@ import IHP.ControllerSupport hiding (Controller (..))
 import IHP.ErrorController qualified as ErrorController
 import IHP.FrameworkConfig qualified as FrameworkConfig
 import IHP.HSX.Markup (renderMarkupText)
-import IHP.Log qualified as Log
-import IHP.Log.Types (LogDestination (..))
 import IHP.ModelSupport
 import IHP.OpenApiSupport qualified as OpenApiSupport
 import IHP.Prelude
@@ -45,6 +42,7 @@ import IHP.ViewPrelude hiding (action)
 import Network.HTTP.Types
 import Network.Wai qualified as Wai
 import Network.Wai.Test qualified as WaiTest
+import System.Log.FastLogger qualified as FastLogger
 import Test.Hspec
 import Wai.Request.Params.Middleware (RequestBody (..), requestBodyVaultKey)
 
@@ -379,7 +377,7 @@ tests = do
             it "renders typed action forms against typed action URLs" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
 
                 let initialProjectInput = ProjectInput{name = "Acme", enabled = True}
                 let targetAction = UpdateProjectAction{projectId = 42, returnTo = Just "/dashboard"}
@@ -409,7 +407,7 @@ tests = do
             it "renders method override fields for non-GET/POST typed routes" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
 
                 let initialProjectInput = ProjectInput{name = "Acme", enabled = True}
                 let targetAction = ArchiveProjectAction{archiveProjectId = 42}
@@ -430,7 +428,7 @@ tests = do
             it "renders common form field helpers for plain typed inputs" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
                 let ?formContext = complexFormContext ComplexFormInput
                         { textValue = "Title"
                         , numberValue = 42
@@ -486,7 +484,7 @@ tests = do
             it "renders multipart typed action forms with multipart enctype" do
                 context <- createControllerContext
                 let ?context = context
-                let ?request = ?context.request
+                let ?request = ?context
 
                 let initialProjectInput = ProjectInput{name = "Logo", enabled = True}
                 let targetAction = UploadProjectLogoAction{uploadProjectId = 42}
@@ -563,14 +561,9 @@ tests = do
 
             it "logs request context and decoded body state for typed route 500s" do
                 logsRef <- newIORef []
-                logger <-
-                    Log.newLogger def
-                        { Log.destination =
-                            Callback
-                                (\logStr -> modifyIORef' logsRef (<> [TextEncoding.decodeUtf8Lenient (Log.fromLogStr logStr)]))
-                                (pure ())
-                        }
-                app <- createTypedRouteTestApplicationWithConfig (FrameworkConfig.option logger)
+                let logger logStr =
+                        modifyIORef' logsRef (<> [TextEncoding.decodeUtf8Lenient (FastLogger.fromLogStr logStr)])
+                app <- createTypedRouteTestApplicationWithLogger logger
 
                 response <-
                     WaiTest.runSession
@@ -599,7 +592,7 @@ requestWithBody headers body =
 
 createControllerContext :: IO ControllerContext
 createControllerContext = do
-    frameworkConfig <- FrameworkConfig.buildFrameworkConfig (pure ())
+    frameworkConfig <- FrameworkConfig.buildFrameworkConfig noopLogger (pure ())
     let requestBody = FormBody{params = [], files = [], rawPayload = ""}
     let request =
             Wai.defaultRequest
@@ -607,16 +600,15 @@ createControllerContext = do
                     Vault.insert RequestVault.frameworkConfigVaultKey frameworkConfig
                         $ Vault.insert requestBodyVaultKey requestBody Vault.empty
                 }
-    let customFields = TypeMap.insert request TypeMap.empty
-    pure FrozenControllerContext{customFields}
+    pure request
 
 createTypedRouteTestApplication :: IO Wai.Application
 createTypedRouteTestApplication =
-    createTypedRouteTestApplicationWithConfig (pure ())
+    createTypedRouteTestApplicationWithLogger noopLogger
 
-createTypedRouteTestApplicationWithConfig :: FrameworkConfig.ConfigBuilder -> IO Wai.Application
-createTypedRouteTestApplicationWithConfig config = do
-    frameworkConfig <- FrameworkConfig.buildFrameworkConfig config
+createTypedRouteTestApplicationWithLogger :: FastLogger.FastLogger -> IO Wai.Application
+createTypedRouteTestApplicationWithLogger logger = do
+    frameworkConfig <- FrameworkConfig.buildFrameworkConfig logger (pure ())
     let modelContext = notConnectedModelContext frameworkConfig.logger
     middleware <- Server.initMiddlewareStack frameworkConfig modelContext Nothing
     pure (ErrorController.errorHandlerMiddleware frameworkConfig (middleware (frontControllerToWAIApp @TypedRouteApplication @AutoRefreshWSApp id TypedRouteApplication typedRouteNotFound)))

@@ -57,13 +57,13 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Typeable qualified as Typeable
 import GHC.Exts qualified as Exts
-import IHP.Controller.Context qualified as Context
 import IHP.Controller.Response (respondWith)
 import IHP.Controller.TypedAction (FromFormBody (..))
 import IHP.Controller.TypedAction qualified as TypedAction
 import IHP.ControllerSupport (Controller (..))
 import IHP.ModelSupport
 import IHP.Prelude
+import IHP.RequestVault (requestApplication)
 import IHP.Router.Types (UnexpectedMethodException (..))
 import IHP.RouterSupport
 import Network.HTTP.Types.Header (hContentType)
@@ -404,7 +404,7 @@ instance
 
     action OpenApiJsonAction =
         do
-            application <- Context.fromContext @application
+            let application = requestApplication @application ?request
             let openApiOptions = swaggerUiControllerOpenApiOptions @application
             respondWith (openApiJsonResponse openApiOptions application)
 

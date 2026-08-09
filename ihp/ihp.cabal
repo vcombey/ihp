@@ -320,7 +320,7 @@ test-suite tests
         Test.NameSupportSpec
         Test.HaskellSupportSpec
         Test.View.CSSFrameworkSpec
-        Test.View.FormSpec
+        Test.View.FormForSpec
         Test.Controller.ParamSpec
         Test.Controller.TypedActionSpec
         Test.Controller.AccessDeniedSpec

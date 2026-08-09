@@ -7,7 +7,7 @@ import qualified Test.ValidationSupport.ValidateFieldSpec
 import qualified Test.NameSupportSpec
 import qualified Test.HaskellSupportSpec
 import qualified Test.View.CSSFrameworkSpec
-import qualified Test.View.FormSpec
+import qualified Test.View.FormForSpec
 import qualified Test.Controller.ParamSpec
 import qualified Test.Controller.TypedActionSpec
 import qualified Test.Controller.CookieSpec
@@ -45,7 +45,7 @@ main = hspec do
     Test.NameSupportSpec.tests
     Test.HaskellSupportSpec.tests
     Test.View.CSSFrameworkSpec.tests
-    Test.View.FormSpec.tests
+    Test.View.FormForSpec.tests
     Test.Controller.ParamSpec.tests
     Test.Controller.TypedActionSpec.tests
     Test.Controller.AccessDeniedSpec.tests

@@ -10,7 +10,7 @@
 , ihp-imagemagick, ihp-modal, ihp-pagehead, ihp-pglistener
 , ihp-router, inflections, interpolate, lib, mime-types, minio-hs
 , mono-traversable, mtl, neat-interpolation, network, network-uri
-, parser-combinators, postgresql-simple
+, openapi3, parser-combinators, postgresql-simple
 , postgresql-simple-postgresql-types, postgresql-types
 , postgresql-types-algebra, process, ptr-peeker, ptr-poker
 , pwstore-fast, random, random-strings, regex-tdfa, resource-pool
@@ -40,7 +40,7 @@ mkDerivation {
     ihp-imagemagick ihp-modal ihp-pagehead ihp-pglistener
     ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri
-    parser-combinators postgresql-simple
+    openapi3 parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types
     postgresql-types-algebra process ptr-peeker ptr-poker pwstore-fast
     random random-strings regex-tdfa resource-pool resourcet
@@ -64,7 +64,7 @@ mkDerivation {
     ihp-imagemagick ihp-modal ihp-pagehead ihp-pglistener
     ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri
-    parser-combinators postgresql-simple
+    openapi3 parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types
     postgresql-types-algebra process ptr-peeker ptr-poker pwstore-fast
     random random-strings regex-tdfa resource-pool resourcet
@@ -88,7 +88,7 @@ mkDerivation {
     ihp-imagemagick ihp-modal ihp-pagehead ihp-pglistener
     ihp-router inflections interpolate mime-types minio-hs
     mono-traversable mtl neat-interpolation network network-uri
-    parser-combinators postgresql-simple
+    openapi3 parser-combinators postgresql-simple
     postgresql-simple-postgresql-types postgresql-types
     postgresql-types-algebra process ptr-peeker ptr-poker pwstore-fast
     random random-strings regex-tdfa resource-pool resourcet

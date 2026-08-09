@@ -30,6 +30,7 @@ module IHP.ControllerSupport
 , Respond
 , Request
 , rlsContextVaultKey
+, prepareRLSIfNeeded
 , initRequestContext
 , ResponseReceived
 , putContext
@@ -62,7 +63,7 @@ import qualified Data.CaseInsensitive
 import qualified Data.Typeable as Typeable
 import IHP.FrameworkConfig.Types (FrameworkConfig (..), ConfigProvider)
 import IHP.Controller.Response
-import IHP.RequestVault () -- for HasField "frameworkConfig"/"logger"/"pgListener" on Request
+import IHP.RequestVault (insertApplicationContext) -- also imports HasField instances for Request
 import Network.Wai.Middleware.EarlyReturn (earlyReturnMiddleware)
 import Network.HTTP.Types.Header
 import qualified Data.Aeson as Aeson
@@ -88,11 +89,41 @@ type Action' = IO ResponseReceived
 -- type signatures.
 type ControllerContext = Request
 
+type ControllerAction' controller =
+    ( ?context :: ControllerContext
+    , ?modelContext :: ModelContext
+    , ?theAction :: controller
+    , ?respond :: Respond
+    , ?request :: Request
+    ) =>
+    IO ResponseReceived
+
+-- | Runs a controller's 'ControllerAction' value.
+--
+-- This lets typed action representations plug into the normal controller
+-- dispatch without requiring each controller instance to repeat the same
+-- 'runControllerAction' implementation.
+class RunControllerAction controller action where
+    runControllerActionDefault :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => action -> IO ResponseReceived
+
+instance RunControllerAction controller (IO ResponseReceived) where
+    runControllerActionDefault controllerAction = controllerAction
+    {-# INLINABLE runControllerActionDefault #-}
+
 class (Show controller, Eq controller) => Controller controller where
+    type ControllerAction controller :: Type
+    type ControllerAction controller = IO ResponseReceived
+
     beforeAction :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => IO ()
     beforeAction = pure ()
     {-# INLINABLE beforeAction #-}
-    action :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => controller -> IO ResponseReceived
+
+    action :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => controller -> ControllerAction controller
+
+    runControllerAction :: (?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => ControllerAction controller -> IO ResponseReceived
+    default runControllerAction :: (RunControllerAction controller (ControllerAction controller), ?context :: ControllerContext, ?modelContext :: ModelContext, ?theAction :: controller, ?respond :: Respond, ?request :: Request) => ControllerAction controller -> IO ResponseReceived
+    runControllerAction = runControllerActionDefault @controller
+    {-# INLINABLE runControllerAction #-}
 
 class InitControllerContext application where
     initContext :: (?modelContext :: ModelContext, ?request :: Request, ?respond :: Respond, ?context :: ControllerContext) => IO ()
@@ -108,9 +139,12 @@ runAction controller = do
     let ?theAction = controller
     let ?request = ?context
 
-        let ?modelContext = authenticatedModelContext
-        beforeAction
-        runControllerAction @controller (action controller)
+    -- Exceptions are now caught by the error handler middleware
+    authenticatedModelContext <- prepareRLSIfNeeded ?modelContext
+
+    let ?modelContext = authenticatedModelContext
+    beforeAction
+    runControllerAction @controller (action controller)
 
 -- | Bind implicit parameters and run 'initContext' for a controller action.
 -- Used by 'runActionWithNewContext' and WebSocket handlers.
@@ -127,7 +161,9 @@ initActionContext
        )
     => controller -> IO ControllerContext
 initActionContext controller = do
-    let ?modelContext = ?request.modelContext
+    request' <- insertControllerContextStore (insertApplicationContext ?application ?request)
+    let ?request = request'
+    let ?modelContext = request'.modelContext
     let ?context = ?request
     wrapInitContextException (initContext @application)
     pure ?context
@@ -148,7 +184,8 @@ initRequestContext
     => Typeable.TypeRep -> Request -> Respond
     -> IO ControllerContext
 initRequestContext controllerTypeRep waiRequest waiRespond = do
-    let !request' = waiRequest { vault = Vault.insert actionTypeVaultKey (ActionType controllerTypeRep) waiRequest.vault }
+    let !requestWithActionType = waiRequest { vault = Vault.insert actionTypeVaultKey (ActionType controllerTypeRep) waiRequest.vault }
+    request' <- insertControllerContextStore (insertApplicationContext ?application requestWithActionType)
     let ?request = request'
     let ?respond = waiRespond
     let ?modelContext = request'.modelContext
@@ -196,8 +233,9 @@ rlsContextVaultKey = unsafePerformIO Vault.newKey
 {-# INLINE startWebSocketApp #-}
 startWebSocketApp :: forall webSocketApp application. (?request :: Request, ?respond :: Respond, InitControllerContext application, ?application :: application, Typeable application, WebSockets.WSApp webSocketApp) => webSocketApp -> IO ResponseReceived -> Application
 startWebSocketApp initialState onHTTP waiRequest waiRespond = do
-    let ?modelContext = requestModelContext ?request
-    let ?request = waiRequest
+    request' <- insertControllerContextStore (insertApplicationContext ?application waiRequest)
+    let ?request = request'
+    let ?modelContext = requestModelContext request'
     let ?respond = waiRespond
 
     let handleConnection pendingConnection = do
@@ -237,7 +275,7 @@ startWebSocketApp initialState onHTTP waiRequest waiRespond = do
     -- handshake. The on-the-wire status remains 101 (sent by the raw
     -- handler); the rewritten fallback status only affects what
     -- request-logger middlewares observe.
-    waiRequest
+    request'
         |> WebSockets.websocketsApp connectionOptions handleConnection
         |> \case
             Just response -> waiRespond (rewriteWebSocketFallbackStatus response)

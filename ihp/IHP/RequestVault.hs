@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 module IHP.RequestVault
 ( -- * Vault infrastructure (re-exported from Helper)
   module IHP.RequestVault.Helper
@@ -7,6 +9,10 @@ module IHP.RequestVault
 , frameworkConfigVaultKey
 , frameworkConfigMiddleware
 , requestFrameworkConfig
+  -- * Current application
+, applicationContextVaultKey
+, insertApplicationContext
+, requestApplication
   -- * PGListener
 , pgListenerVaultKey
 , pgListenerMiddleware
@@ -17,8 +23,9 @@ import IHP.Prelude
 import Network.Wai
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Vault.Lazy as Vault
+import Data.Dynamic (Dynamic, fromDynamic, toDyn)
+import Data.Typeable (typeRep)
 import IHP.FrameworkConfig
-import IHP.Log.Types (LogLevel (Debug), Logger (..), defaultFormatter)
 import IHP.PGListener
 import IHP.RequestVault.Helper
 import IHP.RequestVault.ModelContext
@@ -53,6 +60,24 @@ requestPGListener = lookupRequestVault pgListenerVaultKey
 instance HasField "frameworkConfig" Request FrameworkConfig where
     {-# INLINE getField #-}
     getField request = requestFrameworkConfig request
+
+-- request.application
+applicationContextVaultKey :: Vault.Key Dynamic
+applicationContextVaultKey = unsafePerformIO Vault.newKey
+{-# NOINLINE applicationContextVaultKey #-}
+
+{-# INLINE insertApplicationContext #-}
+insertApplicationContext :: Typeable application => application -> Request -> Request
+insertApplicationContext application request =
+    request { vault = Vault.insert applicationContextVaultKey (toDyn application) request.vault }
+
+{-# INLINE requestApplication #-}
+requestApplication :: forall application. Typeable application => Request -> application
+requestApplication request =
+    case Vault.lookup applicationContextVaultKey request.vault >>= fromDynamic of
+        Just application -> application
+        Nothing -> error $ "requestApplication: Could not find " <> show (typeRep (Proxy @application)) <> " in request.vault. Did you forget to initialize the controller context?"
+
 instance HasField "pgListener" Request PGListener where
     {-# INLINE getField #-}
     getField request = requestPGListener request
