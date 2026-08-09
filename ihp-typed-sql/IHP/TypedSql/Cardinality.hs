@@ -29,13 +29,21 @@ inferCardinality tables = \case
     Ast.CallPreparableStmt _ -> ManyRows
 
 inferInsertStmt :: Map.Map PQ.Oid TableMeta -> Ast.InsertStmt -> QueryCardinality
-inferInsertStmt tables (Ast.InsertStmt _with _target insertRest _onConflict maybeReturning) =
+inferInsertStmt tables (Ast.InsertStmt _with _target insertRest maybeOnConflict maybeReturning) =
     case maybeReturning of
         Nothing -> ManyRows
         Just _ ->
-            case insertRest of
+            applyOnConflict maybeOnConflict $ case insertRest of
                 Ast.DefaultValuesInsertRest -> ExactlyOneRow
                 Ast.SelectInsertRest _columns _override selectStmt -> inferSelectStmt tables selectStmt
+
+-- An ON CONFLICT clause can suppress the RETURNING row. DO NOTHING always can,
+-- and DO UPDATE can include a WHERE clause that declines the update. Keeping
+-- this conservative avoids selecting a single-row decoder for a zero-row result.
+applyOnConflict :: Maybe Ast.OnConflict -> QueryCardinality -> QueryCardinality
+applyOnConflict Nothing cardinality = cardinality
+applyOnConflict (Just _) ExactlyOneRow = AtMostOneRow
+applyOnConflict (Just _) cardinality = cardinality
 
 inferSelectStmt :: Map.Map PQ.Oid TableMeta -> Ast.SelectStmt -> QueryCardinality
 inferSelectStmt tables = \case

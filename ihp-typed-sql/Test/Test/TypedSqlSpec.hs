@@ -738,6 +738,14 @@ tests = do
             (mkTestModule "TypedQuery 'ExactlyOneRow 'ReturnsRows Bool"
                 "[typedSql| SELECT EXISTS(SELECT 1 FROM typed_sql_test_items WHERE views > 7) |]")
 
+        compilePassTest "INSERT ON CONFLICT DO NOTHING can return no row"
+            (mkTestModule "TypedQuery 'AtMostOneRow 'ReturnsRows Text"
+                "[typedSql| INSERT INTO typed_sql_test_items (name, views, tags) VALUES ('First', 1, '{}') ON CONFLICT DO NOTHING RETURNING name |]")
+
+        compilePassTest "INSERT ON CONFLICT DO UPDATE can return no row"
+            (mkTestModule "TypedQuery 'AtMostOneRow 'ReturnsRows Text"
+                "[typedSql| INSERT INTO typed_sql_test_items (id, name, views, tags) VALUES ('10000000-0000-0000-0000-000000000001', 'First', 1, '{}') ON CONFLICT (id) DO UPDATE SET views = EXCLUDED.views WHERE false RETURNING name |]")
+
         compilePassTest "NULL literal inferred as Maybe Text"
             (mkTestModule "TypedQuery 'ExactlyOneRow 'ReturnsRows (Maybe Text)"
                 "[typedSql| SELECT NULL::text |]")
