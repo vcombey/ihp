@@ -73,7 +73,7 @@ buildRequest autoRefreshSession = do
 
 captureResponse
     :: Wai.Request
-    -> ((?context :: ControllerContext, ?request :: Wai.Request, ?respond :: Respond) => IO ResponseReceived)
+    -> ((?context :: Wai.Request, ?request :: Wai.Request, ?respond :: Respond) => IO ResponseReceived)
     -> IO Wai.Response
 captureResponse request action = do
     responseRef <- newIORef Nothing
@@ -81,8 +81,7 @@ captureResponse request action = do
     let ?respond = \response -> do
             writeIORef responseRef (Just response)
             pure ResponseReceived
-    context <- newControllerContext
-    let ?context = context
+    let ?context = request
 
     _ <- action
     maybeResponse <- readIORef responseRef

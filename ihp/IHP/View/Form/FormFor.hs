@@ -16,6 +16,7 @@ Copyright: (c) digitally induced GmbH, 2020
 -}
 module IHP.View.Form.FormFor where
 
+import           IHP.Controller.TypedAction
 import           IHP.HSX.ConvertibleStrings ()
 import           IHP.HSX.MarkupQQ (hsx)
 import           IHP.ModelSupport (Id', InputValue, getModelName, isNew)
@@ -30,7 +31,7 @@ import           Network.HTTP.Types.Method (StdMethod (..), renderStdMethod)
 import           Network.Wai (Request, pathInfo)
 import IHP.HSX.Markup (Markup, ToHtml(..))
 
-type FormMarkup model = (?context :: ControllerContext, ?formContext :: FormContext model) => Markup
+type FormMarkup model = (?request :: Request, ?formContext :: FormContext model) => Markup
 
 -- | Forms usually begin with a 'formFor' expression.
 --
@@ -98,10 +99,10 @@ type FormMarkup model = (?context :: ControllerContext, ?formContext :: FormCont
 -- > </div>
 formFor :: forall record. (
     ?request :: Request
-    , ?request :: Request
     , ModelFormAction record
     , HasField "meta" record MetaBag
-    ) => record -> ((?request :: Request, ?formContext :: FormContext record) => Markup) -> Markup
+    , KnownSymbol (GetModelName record)
+    ) => record -> FormMarkup record -> Markup
 formFor record formBody = formForWithOptions @record record (\c -> c) formBody
 {-# INLINE formFor #-}
 
@@ -123,11 +124,12 @@ formFor record formBody = formForWithOptions @record record (\c -> c) formBody
 --
 formForWithOptions :: forall record. (
     ?request :: Request
-    , ?request :: Request
     , ModelFormAction record
     , HasField "meta" record MetaBag
-    ) => record -> (FormContext record -> FormContext record) -> ((?request :: Request, ?formContext :: FormContext record) => Markup) -> Markup
-formForWithOptions record applyOptions formBody = buildForm (applyOptions (createFormContext record) { formAction = modelFormAction record }) formBody
+    , KnownSymbol (GetModelName record)
+    ) => record -> (FormContext record -> FormContext record) -> FormMarkup record -> Markup
+formForWithOptions record applyOptions formBody =
+    buildForm (applyOptions (createFormContext record) { formAction = modelFormAction record }) formBody
 {-# INLINE formForWithOptions #-}
 
 -- | Like 'formFor' but disables the IHP javascript helpers.
@@ -157,10 +159,10 @@ formForWithOptions record applyOptions formBody = buildForm (applyOptions (creat
 --
 formForWithoutJavascript :: forall record. (
     ?request :: Request
-    , ?request :: Request
     , ModelFormAction record
     , HasField "meta" record MetaBag
-    ) => record -> ((?request :: Request, ?formContext :: FormContext record) => Markup) -> Markup
+    , KnownSymbol (GetModelName record)
+    ) => record -> FormMarkup record -> Markup
 formForWithoutJavascript record formBody = formForWithOptions @record record (\formContext -> formContext { disableJavascriptSubmission = True }) formBody
 {-# INLINE formForWithoutJavascript #-}
 
@@ -189,9 +191,9 @@ formForWithoutJavascript record formBody = formForWithOptions @record record (\f
 --
 formFor' :: forall record. (
     ?request :: Request
-    , ?request :: Request
     , HasField "meta" record MetaBag
-    ) => record -> Text -> ((?request :: Request, ?formContext :: FormContext record) => Markup) -> Markup
+    , KnownSymbol (GetModelName record)
+    ) => record -> Text -> FormMarkup record -> Markup
 formFor' record action = buildForm (createFormContext record) { formAction = action }
 {-# INLINE formFor' #-}
 
@@ -255,8 +257,7 @@ createInputFormContext input =
 
 formForAction ::
     forall action body response.
-    ( ?context :: ControllerContext
-    , ?request :: Request
+    ( ?request :: Request
     , HasPath (action body response)
     , HasActionMethods (action body response)
     , FormCompatibleBodyEncodings (BodyEncodings body)
@@ -271,8 +272,7 @@ formForAction typedAction input formBody =
 
 formForActionWithOptions ::
     forall action body response.
-    ( ?context :: ControllerContext
-    , ?request :: Request
+    ( ?request :: Request
     , HasPath (action body response)
     , HasActionMethods (action body response)
     , FormCompatibleBodyEncodings (BodyEncodings body)
