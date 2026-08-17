@@ -116,6 +116,14 @@ let
         then "${previousIntermediates}/${executableIntermediatesRoot}"
         else null;
 
+    withPreviousIntermediatesClosure = pkg:
+        pkg.overrideAttrs (_old: pkgs.lib.optionalAttrs (previousIntermediates != null) {
+            exportReferencesGraph = [
+                "previous-intermediates-closure"
+                previousIntermediates
+            ];
+        });
+
     # Generate the models package source from Schema.sql
     modelsPackageSrc = pkgs.stdenv.mkDerivation {
         name = "${appName}-models-src";
@@ -214,7 +222,7 @@ CABAL_EOF
     # Every generated table expands into several modules. With large schemas,
     # split sections create enough archive members for the final library
     # assembly to exceed the platform's argument-size limit.
-    modelsPackage = withStableUnitId (configureHaskellBuild (pkgs.haskell.lib.overrideCabal (
+    modelsPackage = withStableUnitId (withPreviousIntermediatesClosure (configureHaskellBuild (pkgs.haskell.lib.overrideCabal (
         pkgs.haskell.lib.disableLibraryProfiling (pkgs.haskell.lib.dontHaddock (
             ghc.callPackage ({ mkDerivation, base, ihp, basic-prelude, text, bytestring, time, uuid, aeson, postgresql-simple, deepseq, data-default, scientific, string-conversions, hasql, hasql-dynamic-statements, hasql-implicits, hasql-mapping, hasql-postgresql-types, hasql-pool, unordered-containers, postgresql-types }: mkDerivation {
                 pname = "${appName}-models";
@@ -223,10 +231,6 @@ CABAL_EOF
                 doInstallIntermediates = optimized;
                 enableSeparateIntermediatesOutput = optimized;
                 previousIntermediates = if optimized then reusableModelsIntermediates else null;
-                exportReferencesGraph = pkgs.lib.optionals (reusableModelsIntermediates != null) [
-                    "previous-intermediates-closure"
-                    reusableModelsIntermediates
-                ];
                 libraryHaskellDepends = [
                     base
                     ihp
@@ -255,7 +259,7 @@ CABAL_EOF
         ))
     ) (old: {
         configureFlags = (old.configureFlags or []) ++ [ "--disable-split-sections" ];
-    })));
+    }))));
 
     allHaskellPackages =
         (if withHoogle
@@ -537,7 +541,7 @@ CABAL_EOF
                 enableParallelBuilding = false;
             }));
 
-    mkAppLibPackage = withIntermediates: withStableUnitId (configureAppLibBuild (pkgs.haskell.lib.disableLibraryProfiling (pkgs.haskell.lib.dontHaddock (
+    mkAppLibPackage = withIntermediates: withStableUnitId (withPreviousIntermediatesClosure (configureAppLibBuild (pkgs.haskell.lib.disableLibraryProfiling (pkgs.haskell.lib.dontHaddock (
         ghc.callPackage ({ mkDerivation, base }: mkDerivation {
             pname = "${appName}-lib";
             version = "0.1.0";
@@ -546,10 +550,6 @@ CABAL_EOF
             doInstallIntermediates = withIntermediates;
             enableSeparateIntermediatesOutput = withIntermediates;
             inherit previousIntermediates;
-            exportReferencesGraph = pkgs.lib.optionals (previousIntermediates != null) [
-                "previous-intermediates-closure"
-                previousIntermediates
-            ];
             # The app library remains the first cache stage. Carry forward
             # executable objects from the previous combined cache so the
             # server, worker, and scripts can reuse them when they are built
@@ -572,7 +572,7 @@ CABAL_EOF
             '';
             license = pkgs.lib.licenses.free;
         }) {}
-    ))));
+    )))));
 
     withAppLibPostgres = pkg:
         if buildWithPostgres
