@@ -197,6 +197,10 @@ CABAL_EOF
                 doInstallIntermediates = optimized;
                 enableSeparateIntermediatesOutput = optimized;
                 previousIntermediates = if optimized then reusableModelsIntermediates else null;
+                exportReferencesGraph = pkgs.lib.optionals (reusableModelsIntermediates != null) [
+                    "previous-intermediates-closure"
+                    reusableModelsIntermediates
+                ];
                 libraryHaskellDepends = [
                     base
                     ihp
@@ -494,6 +498,10 @@ CABAL_EOF
             doInstallIntermediates = withIntermediates;
             enableSeparateIntermediatesOutput = withIntermediates;
             inherit previousIntermediates;
+            exportReferencesGraph = pkgs.lib.optionals (previousIntermediates != null) [
+                "previous-intermediates-closure"
+                previousIntermediates
+            ];
             # The app library remains the first cache stage. Carry forward
             # executable objects from the previous combined cache so the
             # server, worker, and scripts can reuse them when they are built
@@ -543,6 +551,10 @@ CABAL_EOF
             name = "${appName}-${executableName}-binary";
             inherit src;
             outputs = [ "out" ] ++ pkgs.lib.optional optimized "intermediates";
+            exportReferencesGraph = pkgs.lib.optionals (reusableIntermediates != null) [
+                "previous-intermediates-closure"
+                previousIntermediates
+            ];
 
             buildInputs = [ allHaskellPackagesWithAppLib ];
             nativeBuildInputs = commonNativeBuildInputs ++ pkgs.lib.optional needsBuildTimePostgres pkgs.postgresql;
