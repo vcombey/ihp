@@ -90,12 +90,20 @@ let
         then "${previousIntermediates}/${executableIntermediatesRoot}"
         else null;
 
+    previousIntermediatesStorePaths =
+        if previousIntermediates != null
+            && builtins.pathExists "${previousIntermediates}/.intermediate-roots"
+        then builtins.filter (path: path != "")
+            (pkgs.lib.splitString "\n" (builtins.readFile "${previousIntermediates}/.intermediate-roots"))
+        else [];
+    previousIntermediatesClosure = builtins.foldl'
+        (context: path: builtins.appendContext context { "${path}" = { path = true; }; })
+        ""
+        previousIntermediatesStorePaths;
+
     withPreviousIntermediatesClosure = pkg:
         pkg.overrideAttrs (_old: pkgs.lib.optionalAttrs (previousIntermediates != null) {
-            exportReferencesGraph = [
-                "previous-intermediates-closure"
-                previousIntermediates
-            ];
+            inherit previousIntermediatesClosure;
         });
 
     # Generate the models package source from Schema.sql
@@ -551,10 +559,7 @@ CABAL_EOF
             name = "${appName}-${executableName}-binary";
             inherit src;
             outputs = [ "out" ] ++ pkgs.lib.optional optimized "intermediates";
-            exportReferencesGraph = pkgs.lib.optionals (reusableIntermediates != null) [
-                "previous-intermediates-closure"
-                previousIntermediates
-            ];
+            inherit previousIntermediatesClosure;
 
             buildInputs = [ allHaskellPackagesWithAppLib ];
             nativeBuildInputs = commonNativeBuildInputs ++ pkgs.lib.optional needsBuildTimePostgres pkgs.postgresql;
