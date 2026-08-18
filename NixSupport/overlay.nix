@@ -158,6 +158,13 @@ final: prev: {
     # on the same bounds-relaxed build as the default GHC package set.
     darcs = final.ghc.darcs;
 
+    # callCabal2nix uses nixpkgs' build-time package set during evaluation.
+    haskellPackages = prev.haskellPackages.override {
+        overrides = self: super: {
+            hpack = final.haskell.lib.dontCheck super.hpack;
+        };
+    };
+
     # Default: GHC 9.12 — the pinned nixpkgs `haskellPackages` compiler.
     # The dontCheck overrides below apply to that default build.
     ghc = final.haskellPackages.override {
