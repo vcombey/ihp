@@ -167,7 +167,8 @@ final: prev: {
 
     # Default: GHC 9.12 — the pinned nixpkgs `haskellPackages` compiler.
     # The dontCheck overrides below apply to that default build.
-    ghc = final.haskellPackages.override {
+    # Keep the compiler set independent from the build-time hpack override above.
+    ghc = prev.haskellPackages.override {
         overrides = final.lib.composeManyExtensions [
             (ihpOverrides final)
             (self: super: {
