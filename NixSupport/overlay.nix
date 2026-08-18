@@ -172,6 +172,8 @@ final: prev: {
         overrides = final.lib.composeManyExtensions [
             (ihpOverrides final)
             (self: super: {
+                hpack = final.haskell.lib.dontCheck super.hpack;
+
                 # say tests fail due to CRLF newline handling changes
                 say = final.haskell.lib.dontCheck super.say;
 
