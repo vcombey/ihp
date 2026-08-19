@@ -186,6 +186,7 @@ compileExpression (ScalarSelectExpression scalar) = "SELECT " <> compileExpressi
 compileExpression (ExistsExpression a) = "EXISTS " <> compileExpressionWithOptionalParenthese a
 compileExpression (DotExpression a b) = compileExpressionWithOptionalParenthese a <> "." <> compileIdentifier b
 compileExpression (ConcatenationExpression a b) = compileExpressionWithOptionalParenthese a <> " || " <> compileExpressionWithOptionalParenthese b
+compileExpression (BinaryOperatorExpression operator a b) = compileExpressionWithOptionalParenthese a <> " " <> operator <> " " <> compileExpressionWithOptionalParenthese b
 
 compileExpressionWithOptionalParenthese :: Expression -> Text
 compileExpressionWithOptionalParenthese expr@(VarExpression {}) = compileExpression expr
