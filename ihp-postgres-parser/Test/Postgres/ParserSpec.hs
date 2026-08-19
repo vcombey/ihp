@@ -612,6 +612,24 @@ spec = do
                     (TypeCastExpression (VarExpression "a") PInt)
                     (IntExpression 1)
 
+        it "should parse 'GRANT' and 'REVOKE' statements" do
+            parseSql "GRANT SELECT ON TABLE users TO ihp_authenticated;" `shouldBe`
+                UnknownStatement { raw = "GRANT SELECT ON TABLE users TO ihp_authenticated" }
+            parseSql "REVOKE ALL ON FUNCTION public.touch_updated_at() FROM PUBLIC;" `shouldBe`
+                UnknownStatement { raw = "REVOKE ALL ON FUNCTION public.touch_updated_at() FROM PUBLIC" }
+
+        it "should parse a 'DO' block whose body contains semicolons" do
+            parseSql "DO $$\nBEGIN\n    PERFORM 1;\nEND\n$$;" `shouldBe`
+                UnknownStatement { raw = "DO $$\nBEGIN\n    PERFORM 1;\nEND\n$$" }
+
+        it "should parse a function body quoted with a tag other than $$" do
+            parseSql "CREATE FUNCTION f() RETURNS trigger AS $_$ BEGIN RETURN NEW; END; $_$ language plpgsql;" `shouldBe`
+                (function "f") { returns = PTrigger, functionBody = " BEGIN RETURN NEW; END; ", language = "plpgsql" }
+
+        it "should parse a function body containing a dollar sign" do
+            parseSql "CREATE FUNCTION f(a TEXT) RETURNS text AS $$ SELECT $1; $$ language sql;" `shouldBe`
+                (function "f") { functionArguments = [("a", PText)], returns = PText, functionBody = " SELECT $1; ", language = "sql" }
+
         it "should ignore a comment inside a statement" do
             parseSql "CREATE TABLE users (\n    id UUID PRIMARY KEY, -- surrogate key\n    email TEXT NOT NULL /* the login */\n);" `shouldBe`
                 StatementCreateTable (table "users")
