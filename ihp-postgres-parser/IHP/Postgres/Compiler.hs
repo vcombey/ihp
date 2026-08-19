@@ -58,6 +58,7 @@ compileStatement SetDefaultValue { tableName, columnName, value } = "ALTER TABLE
 compileStatement DropDefaultValue { tableName, columnName } = "ALTER TABLE " <> compileIdentifier tableName <> " ALTER COLUMN " <> compileIdentifier columnName <> " DROP DEFAULT;"
 compileStatement AddValueToEnumType { enumName, newValue } = "ALTER TYPE " <> compileIdentifier enumName <> " ADD VALUE " <> compileExpression (TextExpression newValue) <> ";"
 compileStatement CreateTrigger { name, eventWhen, event, tableName, for, whenCondition, functionName, arguments } = "CREATE TRIGGER " <> compileIdentifier name <> " " <> compileTriggerEventWhen eventWhen <> " " <> intercalate " OR " (map compileTriggerEvent event) <> " ON " <> compileIdentifier tableName <> " " <> compileTriggerFor for <> " EXECUTE FUNCTION " <> compileExpression (CallExpression functionName arguments) <> ";"
+compileStatement CreateConstraintTrigger { name, eventWhen, event, tableName, deferrable, deferrableType, for, whenCondition, functionName, arguments } = "CREATE CONSTRAINT TRIGGER " <> compileIdentifier name <> " " <> compileTriggerEventWhen eventWhen <> " " <> intercalate " OR " (map compileTriggerEvent event) <> " ON " <> compileIdentifier tableName <> compileDeferrable deferrable deferrableType <> " " <> compileTriggerFor for <> " EXECUTE FUNCTION " <> compileExpression (CallExpression functionName arguments) <> ";"
 compileStatement Begin = "BEGIN;"
 compileStatement Commit = "COMMIT;"
 compileStatement DropFunction { functionName } = "DROP FUNCTION " <> compileIdentifier functionName <> ";"
@@ -78,6 +79,7 @@ compilePrimaryKeyConstraint PrimaryKeyConstraint { primaryKeyColumnNames } =
 
 compileConstraint :: Constraint -> Text
 compileConstraint ForeignKeyConstraint { columnName, referenceTable, referenceColumn, onDelete } = "FOREIGN KEY (" <> compileIdentifier columnName <> ") REFERENCES " <> compileIdentifier referenceTable <> (if isJust referenceColumn then " (" <> fromJust referenceColumn <> ")" else "") <> " " <> compileOnDelete onDelete
+compileConstraint CompositeForeignKeyConstraint { columnNames, referenceTable, referenceColumns, onDelete, onUpdate } = "FOREIGN KEY (" <> intercalate ", " (map compileIdentifier columnNames) <> ") REFERENCES " <> compileIdentifier referenceTable <> (if null referenceColumns then "" else " (" <> intercalate ", " (map compileIdentifier referenceColumns) <> ")") <> compileOnUpdate onUpdate <> " " <> compileOnDelete onDelete
 compileConstraint UniqueConstraint { columnNames } = "UNIQUE(" <> intercalate ", " columnNames <> ")"
 compileConstraint CheckConstraint { checkExpression } = "CHECK (" <> compileExpression checkExpression <> ")"
 compileConstraint AlterTableAddPrimaryKey { primaryKeyConstraint } = fromMaybe "" (compilePrimaryKeyConstraint primaryKeyConstraint)
@@ -100,6 +102,14 @@ compileDeferrable deferrable deferrableType = Text.concat $ map ((<>) " ") $ cat
         compileIsDeferrable False = "NOT DEFERRABLE"
         compileDeferrableType InitiallyImmediate = "INITIALLY IMMEDIATE"
         compileDeferrableType InitiallyDeferred = "INITIALLY DEFERRED"
+
+compileOnUpdate :: Maybe OnDelete -> Text
+compileOnUpdate Nothing = ""
+compileOnUpdate (Just NoAction) = " ON UPDATE NO ACTION"
+compileOnUpdate (Just Restrict) = " ON UPDATE RESTRICT"
+compileOnUpdate (Just SetNull) = " ON UPDATE SET NULL"
+compileOnUpdate (Just SetDefault) = " ON UPDATE SET DEFAULT"
+compileOnUpdate (Just Cascade) = " ON UPDATE CASCADE"
 
 compileOnDelete :: Maybe OnDelete -> Text
 compileOnDelete Nothing = ""
@@ -224,6 +234,10 @@ compilePostgresType PTSVector = "TSVECTOR"
 compilePostgresType (PArray type_) = compilePostgresType type_ <> "[]"
 compilePostgresType PTrigger = "TRIGGER"
 compilePostgresType PEventTrigger = "EVENT_TRIGGER"
+compilePostgresType (PSetOf type_) = "SETOF " <> compilePostgresType type_
+compilePostgresType (PReturnTable columns) = "TABLE(" <> intercalate ", " (map compileReturnTableColumn columns) <> ")"
+    where
+        compileReturnTableColumn (columnName, columnType) = compileIdentifier columnName <> " " <> compilePostgresType columnType
 compilePostgresType (PCustomType theType) = theType
 
 compileIdentifier :: Text -> Text
@@ -488,6 +502,7 @@ compileTriggerEventWhen InsteadOf = "INSTEAD OF"
 compileTriggerEvent :: TriggerEvent -> Text
 compileTriggerEvent TriggerOnInsert = "INSERT"
 compileTriggerEvent TriggerOnUpdate = "UPDATE"
+compileTriggerEvent (TriggerOnUpdateOf columns) = "UPDATE OF " <> intercalate ", " (map compileIdentifier columns)
 compileTriggerEvent TriggerOnDelete = "DELETE"
 compileTriggerEvent TriggerOnTruncate = "TRUNCATE"
 
