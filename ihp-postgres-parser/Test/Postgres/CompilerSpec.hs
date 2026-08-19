@@ -362,6 +362,40 @@ spec = do
                         ]
             compileSql statements `shouldBe` sql
 
+        describe "round trips the SQL a pg_dump contains" do
+            let roundTrip sql = compileSql [parseSql sql] `shouldBe` (sql <> "\n")
+
+            it "keeps a single column primary key added by ALTER TABLE" do
+                roundTrip "ALTER TABLE ai_chat_accesses ADD CONSTRAINT ai_chat_accesses_pkey PRIMARY KEY(chat_id);"
+
+            it "keeps a composite primary key added by ALTER TABLE" do
+                roundTrip "ALTER TABLE memberships ADD CONSTRAINT memberships_pkey PRIMARY KEY(user_id, team_id);"
+
+            it "adds an unnamed constraint without inventing a name" do
+                roundTrip "ALTER TABLE users ADD CHECK (age > 0);"
+
+            it "keeps the name of a constraint declared inside CREATE TABLE" do
+                roundTrip "CREATE TABLE users (\n    age INT,\n    CONSTRAINT users_age_check CHECK (age > 0)\n);"
+
+            -- The operands come back parenthesised, which is the compiler's canonical
+            -- form for AND and parses to the same expression.
+            it "keeps a CHECK constraint combining comparisons with AND" do
+                compileSql [parseSql "ALTER TABLE t ADD CONSTRAINT t_positive CHECK (a > 0 AND b > 0);"]
+                    `shouldBe` "ALTER TABLE t ADD CONSTRAINT t_positive CHECK ((a > 0) AND (b > 0));\n"
+
+            it "keeps an operator it has no constructor for" do
+                roundTrip "ALTER TABLE t ADD CONSTRAINT t_code CHECK (code ~ '^[A-Z]{3}$');"
+
+            it "keeps a referential action restricted to some columns" do
+                roundTrip "ALTER TABLE t ADD CONSTRAINT t_fk FOREIGN KEY (a, b) REFERENCES o (a, b) ON DELETE SET NULL (b);"
+
+            it "keeps GRANT and REVOKE statements" do
+                roundTrip "REVOKE ALL ON FUNCTION public.touch_updated_at() FROM PUBLIC;"
+
+            it "picks a dollar quote the function body does not contain" do
+                compileSql [(function "f") { functionBody = " BEGIN RETURN $$x$$; END; ", language = "plpgsql" }]
+                    `shouldBe` "CREATE FUNCTION f() RETURNS TRIGGER AS $_$ BEGIN RETURN $$x$$; END; $_$ language plpgsql;\n"
+
 parseSql :: Text -> Statement
 parseSql sql =
     case Megaparsec.runParser parseDDL "input" sql of

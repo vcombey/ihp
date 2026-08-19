@@ -7,7 +7,7 @@ module IHP.Postgres.Compiler (compileSql, compileIdentifier, compileExpression, 
 
 import Prelude hiding (unlines, unwords)
 import IHP.Postgres.Types
-import Data.Maybe (fromJust, isJust, catMaybes, fromMaybe, maybeToList)
+import Data.Maybe (fromJust, isJust, isNothing, catMaybes, fromMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Function ((&))
@@ -32,10 +32,14 @@ compileSql statements = statements
     & unlines
 
 compileStatement :: Statement -> Text
-compileStatement (StatementCreateTable CreateTable { name, columns, primaryKeyConstraint, constraints, unlogged, inherits }) = "CREATE" <> (if unlogged then " UNLOGGED" else "") <> " TABLE " <> compileIdentifier name <> " (\n" <> intercalate ",\n" (map (\col -> "    " <> compileColumn primaryKeyConstraint col) columns <> maybe [] ((:[]) . indent) (compilePrimaryKeyConstraint primaryKeyConstraint) <> map (indent . compileConstraint) constraints) <> "\n)" <> maybe "" (\parent -> " INHERITS (" <> compileIdentifier parent <> ")") inherits <> ";"
+compileStatement (StatementCreateTable CreateTable { name, columns, primaryKeyConstraint, constraints, unlogged, inherits }) = "CREATE" <> (if unlogged then " UNLOGGED" else "") <> " TABLE " <> compileIdentifier name <> " (\n" <> intercalate ",\n" (map (\col -> "    " <> compileColumn primaryKeyConstraint col) columns <> maybe [] ((:[]) . indent) (compilePrimaryKeyConstraint primaryKeyConstraint) <> map (indent . compileTableConstraint) constraints) <> "\n)" <> maybe "" (\parent -> " INHERITS (" <> compileIdentifier parent <> ")") inherits <> ";"
 compileStatement CreateEnumType { name, values } = "CREATE TYPE " <> compileIdentifier name <> " AS ENUM (" <> intercalate ", " (values & map TextExpression & map compileExpression) <> ");"
 compileStatement CreateExtension { name, ifNotExists } = "CREATE EXTENSION " <> (if ifNotExists then "IF NOT EXISTS " else "") <> compileIdentifier name <> ";"
 compileStatement AddConstraint { tableName, constraint = UniqueConstraint { name = Nothing, columnNames } } = "ALTER TABLE " <> compileIdentifier tableName <> " ADD UNIQUE (" <> intercalate ", " columnNames <> ")" <> ";"
+-- | An unnamed constraint is added without a name rather than crashing on the
+-- missing one. PostgreSQL generates the name itself, which is what the schema
+-- meant by leaving it out.
+compileStatement AddConstraint { tableName, constraint, deferrable, deferrableType } | isNothing constraint.name = "ALTER TABLE " <> compileIdentifier tableName <> " ADD " <> compileConstraint constraint <> compileDeferrable deferrable deferrableType <> ";"
 compileStatement AddConstraint { tableName, constraint, deferrable, deferrableType } = "ALTER TABLE " <> compileIdentifier tableName <> " ADD CONSTRAINT " <> compileIdentifier (fromMaybe (error "compileStatement: Expected constraint name") (constraint.name)) <> " " <> compileConstraint constraint <> compileDeferrable deferrable deferrableType <> ";"
 compileStatement AddColumn { tableName, column } = "ALTER TABLE " <> compileIdentifier tableName <> " ADD COLUMN " <> (compileColumn (PrimaryKeyConstraint []) column) <> ";"
 compileStatement DropColumn { tableName, columnName } = "ALTER TABLE " <> compileIdentifier tableName <> " DROP COLUMN " <> compileIdentifier columnName <> ";"
@@ -77,12 +81,25 @@ compilePrimaryKeyConstraint PrimaryKeyConstraint { primaryKeyColumnNames } =
         [_] -> Nothing
         names -> Just $ "PRIMARY KEY(" <> intercalate ", " names <> ")"
 
+-- | A constraint written inside CREATE TABLE, where its name is declared.
+--
+-- 'compileConstraint' stays name-free because the ALTER TABLE form prints the
+-- name itself, before the constraint body.
+compileTableConstraint :: Constraint -> Text
+compileTableConstraint constraint =
+    maybe "" (\name -> "CONSTRAINT " <> compileIdentifier name <> " ") constraint.name <> compileConstraint constraint
+
 compileConstraint :: Constraint -> Text
 compileConstraint ForeignKeyConstraint { columnName, referenceTable, referenceColumn, onDelete } = "FOREIGN KEY (" <> compileIdentifier columnName <> ") REFERENCES " <> compileIdentifier referenceTable <> (if isJust referenceColumn then " (" <> fromJust referenceColumn <> ")" else "") <> " " <> compileOnDelete onDelete
 compileConstraint CompositeForeignKeyConstraint { columnNames, referenceTable, referenceColumns, onDelete, onUpdate } = "FOREIGN KEY (" <> intercalate ", " (map compileIdentifier columnNames) <> ") REFERENCES " <> compileIdentifier referenceTable <> (if null referenceColumns then "" else " (" <> intercalate ", " (map compileIdentifier referenceColumns) <> ")") <> compileOnUpdate onUpdate <> " " <> compileOnDelete onDelete
 compileConstraint UniqueConstraint { columnNames } = "UNIQUE(" <> intercalate ", " columnNames <> ")"
 compileConstraint CheckConstraint { checkExpression } = "CHECK (" <> compileExpression checkExpression <> ")"
-compileConstraint AlterTableAddPrimaryKey { primaryKeyConstraint } = fromMaybe "" (compilePrimaryKeyConstraint primaryKeyConstraint)
+-- | Not 'compilePrimaryKeyConstraint': that one answers "does this table need a
+-- separate PRIMARY KEY line", and says no for a single column because
+-- 'compileColumn' already writes it on the column. A constraint added by
+-- ALTER TABLE has no column to write it on, and every primary key in a pg_dump
+-- arrives that way.
+compileConstraint AlterTableAddPrimaryKey { primaryKeyConstraint = PrimaryKeyConstraint { primaryKeyColumnNames } } = "PRIMARY KEY(" <> intercalate ", " (map compileIdentifier primaryKeyColumnNames) <> ")"
 compileConstraint ExcludeConstraint { excludeElements, predicate, indexType } = "EXCLUDE" <> compiledIndexType <> " (" <> compiledExcludeElements <> ")" <> case predicate of
     Just expression -> " WHERE (" <> compileExpression expression <> ")"
     Nothing -> ""
