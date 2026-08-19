@@ -25,7 +25,7 @@ import Data.String.Conversions (cs)
 import Data.Maybe (isJust, catMaybes, isNothing, listToMaybe)
 import Data.Either (lefts, rights)
 import Data.Functor (($>))
-import Data.Char (isAlpha, isAlphaNum, isSpace, toLower)
+import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace, toLower)
 import qualified Data.List as List
 import Control.Monad (when)
 import Text.Megaparsec
@@ -446,6 +446,16 @@ parseColumn = do
                 lexeme "NOT"
                 lexeme "NULL"
                 parseColumnAttributes column { notNull = True } primaryKey
+            -- PostgreSQL 18 stores NOT NULL constraints in pg_constraint, so pg_dump now
+            -- prints their name whenever it differs from the name the server would
+            -- generate itself. A generated name is truncated to the 63 byte identifier
+            -- limit, which makes every long table plus column pair dump as
+            -- `email text CONSTRAINT users_email_not_null NOT NULL`. The name carries no
+            -- information the schema needs, so accept and drop it.
+            , do
+                lexeme "CONSTRAINT"
+                _constraintName <- identifier
+                parseColumnAttributes column primaryKey
             , do
                 lexeme "UNIQUE"
                 parseColumnAttributes column { isUnique = True } primaryKey
@@ -886,6 +896,7 @@ data FunctionOption
     = FunctionLanguage Text
     | FunctionSecurityDefiner
     | FunctionSettingOption FunctionSetting
+    | FunctionIgnoredOption
 
 createFunction = do
     lexeme "CREATE"
@@ -929,6 +940,7 @@ parseFunctionOption =
     try parseFunctionLanguage
     <|> try parseFunctionSecurityDefiner
     <|> try parseFunctionSetting
+    <|> try parseFunctionIgnoredOption
 
 parseFunctionLanguage :: Parser FunctionOption
 parseFunctionLanguage = do
@@ -949,6 +961,38 @@ parseFunctionSetting = do
     settingValue <- Text.strip . cs <$> someTill anySingle (lookAhead functionOptionBoundary)
     space
     pure (FunctionSettingOption FunctionSetting { settingName, settingValue })
+
+-- | Volatility, strictness, parallelism and cost attributes as printed by pg_dump.
+--
+-- The schema representation has no field for them, so they are parsed and dropped.
+-- Without this every dump containing a @STABLE@ or @IMMUTABLE@ function fails to
+-- parse at its @LANGUAGE sql STABLE@ line.
+parseFunctionIgnoredOption :: Parser FunctionOption
+parseFunctionIgnoredOption = do
+    choice
+        [ try (functionOptionBoundaryKeyword "IMMUTABLE")
+        , try (functionOptionBoundaryKeyword "STABLE")
+        , try (functionOptionBoundaryKeyword "VOLATILE")
+        , try (functionOptionBoundaryKeyword "LEAKPROOF")
+        , try (functionOptionBoundaryKeyword "WINDOW")
+        , try (functionOptionBoundaryKeyword "STRICT")
+        , try (functionOptionBoundaryKeyword "NOT" >> functionOptionBoundaryKeyword "LEAKPROOF")
+        , try (functionOptionBoundaryKeyword "CALLED" >> functionOptionBoundaryKeyword "ON" >> functionOptionBoundaryKeyword "NULL" >> functionOptionBoundaryKeyword "INPUT")
+        , try (functionOptionBoundaryKeyword "RETURNS" >> functionOptionBoundaryKeyword "NULL" >> functionOptionBoundaryKeyword "ON" >> functionOptionBoundaryKeyword "NULL" >> functionOptionBoundaryKeyword "INPUT")
+        , try (functionOptionBoundaryKeyword "SECURITY" >> functionOptionBoundaryKeyword "INVOKER")
+        , try (functionOptionBoundaryKeyword "PARALLEL" >> choice
+            [ try (functionOptionBoundaryKeyword "SAFE")
+            , try (functionOptionBoundaryKeyword "RESTRICTED")
+            , try (functionOptionBoundaryKeyword "UNSAFE")
+            ])
+        , try (functionOptionBoundaryKeyword "COST" >> functionOptionNumber)
+        , try (functionOptionBoundaryKeyword "ROWS" >> functionOptionNumber)
+        ]
+    pure FunctionIgnoredOption
+    where
+        functionOptionNumber = do
+            takeWhile1P (Just "number") (\c -> isDigit c || c == '.')
+            space
 
 functionOptionBoundary :: Parser ()
 functionOptionBoundary =
