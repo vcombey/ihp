@@ -643,6 +643,27 @@ spec = do
                     (TypeCastExpression (VarExpression "a") PInt)
                     (IntExpression 1)
 
+        it "should ignore a comment inside a statement" do
+            parseSql "CREATE TABLE users (\n    id UUID PRIMARY KEY, -- surrogate key\n    email TEXT NOT NULL /* the login */\n);" `shouldBe`
+                StatementCreateTable (table "users")
+                    { columns = [col "id" PUUID, (col "email" PText) { notNull = True }]
+                    , primaryKeyConstraint = PrimaryKeyConstraint ["id"]
+                    }
+
+        it "should keep a comment between two statements as its own statement" do
+            parseSqlStatements "CREATE TABLE a ();\n-- about b\nCREATE TABLE b ();" `shouldBe`
+                [ StatementCreateTable (table "a")
+                , Comment { content = " about b" }
+                , StatementCreateTable (table "b")
+                ]
+
+        it "should keep the comment behind a pg_dump restrict fence" do
+            parseSqlStatements "\\restrict aBcD1\n-- kept\nCREATE TABLE a ();" `shouldBe`
+                [ Comment { content = "" }
+                , Comment { content = " kept" }
+                , StatementCreateTable (table "a")
+                ]
+
         it "should parse a CHECK constraint combining comparisons with AND" do
             parseSql "CREATE TABLE t (a INT, b INT, CONSTRAINT t_positive CHECK (a > 0 AND b > 0));" `shouldBe`
                 StatementCreateTable (table "t")
