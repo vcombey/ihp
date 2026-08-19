@@ -612,6 +612,22 @@ spec = do
                     (TypeCastExpression (VarExpression "a") PInt)
                     (IntExpression 1)
 
+        it "should parse a referential action restricted to some columns" do
+            parseSql "CREATE TABLE t (a UUID, b UUID, CONSTRAINT t_fk FOREIGN KEY (a, b) REFERENCES o (a, b) ON DELETE SET NULL (b));" `shouldBe`
+                StatementCreateTable (table "t")
+                    { columns = [col "a" PUUID, col "b" PUUID]
+                    , constraints =
+                        [ CompositeForeignKeyConstraint
+                            { name = Just "t_fk"
+                            , columnNames = ["a", "b"]
+                            , referenceTable = "o"
+                            , referenceColumns = ["a", "b"]
+                            , onDelete = Just (SetNull ["b"])
+                            , onUpdate = Nothing
+                            }
+                        ]
+                    }
+
         it "should parse 'GRANT' and 'REVOKE' statements" do
             parseSql "GRANT SELECT ON TABLE users TO ihp_authenticated;" `shouldBe`
                 UnknownStatement { raw = "GRANT SELECT ON TABLE users TO ihp_authenticated" }

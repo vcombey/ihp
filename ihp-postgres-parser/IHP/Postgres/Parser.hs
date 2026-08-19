@@ -391,6 +391,12 @@ addConstraint tableName = do
     char ';'
     pure AddConstraint { tableName, constraint, deferrable, deferrableType }
 
+-- | The column list PostgreSQL 15 allows behind @SET NULL@ and @SET DEFAULT@,
+-- restricting the action to some of the foreign key's columns.
+referentialActionColumns :: Parser [Text]
+referentialActionColumns =
+    fromMaybe [] <$> optional (between (char '(' >> space) (char ')' >> space) (identifier `sepBy1` (char ',' >> space)))
+
 parseDeferrable :: Parser Bool
 parseDeferrable = (lexeme "NOT DEFERRABLE" $> False) <|> (lexeme "DEFERRABLE" $> True)
 
@@ -474,7 +480,7 @@ parseExcludeConstraint name = do
 parseOnDelete = choice
         [ (lexeme "NO" >> lexeme "ACTION") >> pure NoAction
         , (lexeme "RESTRICT" >> pure Restrict)
-        , (lexeme "SET" >> ((lexeme "NULL" >> pure SetNull) <|> (lexeme "DEFAULT" >> pure SetDefault)))
+        , (lexeme "SET" >> ((lexeme "NULL" >> (SetNull <$> referentialActionColumns)) <|> (lexeme "DEFAULT" >> (SetDefault <$> referentialActionColumns))))
         , (lexeme "CASCADE" >> pure Cascade)
         ]
 

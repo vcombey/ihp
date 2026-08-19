@@ -107,16 +107,20 @@ compileOnUpdate :: Maybe OnDelete -> Text
 compileOnUpdate Nothing = ""
 compileOnUpdate (Just NoAction) = " ON UPDATE NO ACTION"
 compileOnUpdate (Just Restrict) = " ON UPDATE RESTRICT"
-compileOnUpdate (Just SetNull) = " ON UPDATE SET NULL"
-compileOnUpdate (Just SetDefault) = " ON UPDATE SET DEFAULT"
+compileOnUpdate (Just (SetNull columnNames)) = " ON UPDATE SET NULL" <> compileReferentialActionColumns columnNames
+compileOnUpdate (Just (SetDefault columnNames)) = " ON UPDATE SET DEFAULT" <> compileReferentialActionColumns columnNames
 compileOnUpdate (Just Cascade) = " ON UPDATE CASCADE"
+
+compileReferentialActionColumns :: [Text] -> Text
+compileReferentialActionColumns [] = ""
+compileReferentialActionColumns columnNames = " (" <> intercalate ", " (map compileIdentifier columnNames) <> ")"
 
 compileOnDelete :: Maybe OnDelete -> Text
 compileOnDelete Nothing = ""
 compileOnDelete (Just NoAction) = "ON DELETE NO ACTION"
 compileOnDelete (Just Restrict) = "ON DELETE RESTRICT"
-compileOnDelete (Just SetNull) = "ON DELETE SET NULL"
-compileOnDelete (Just SetDefault) = "ON DELETE SET DEFAULT"
+compileOnDelete (Just (SetNull columnNames)) = "ON DELETE SET NULL" <> compileReferentialActionColumns columnNames
+compileOnDelete (Just (SetDefault columnNames)) = "ON DELETE SET DEFAULT" <> compileReferentialActionColumns columnNames
 compileOnDelete (Just Cascade) = "ON DELETE CASCADE"
 
 compileColumn :: PrimaryKeyConstraint -> Column -> Text
