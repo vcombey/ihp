@@ -107,6 +107,76 @@ spec = do
                         ]
                     }
 
+        it "should parse a CREATE FUNCTION returning SETOF" do
+            let sql = "CREATE FUNCTION search_ids(query text) RETURNS SETOF uuid\n    LANGUAGE sql STABLE\n    AS $$SELECT 1;$$;"
+            parseSql sql `shouldBe` CreateFunction
+                    { functionName = "search_ids"
+                    , functionArguments = [("query", PText)]
+                    , functionBody = "SELECT 1;"
+                    , orReplace = False
+                    , returns = PSetOf PUUID
+                    , language = "sql"
+                    , securityDefiner = False
+                    , functionSettings = []
+                    }
+
+        it "should parse a CREATE FUNCTION returning TABLE" do
+            let sql = "CREATE FUNCTION search_rows() RETURNS TABLE(id uuid, label text)\n    LANGUAGE sql STABLE\n    AS $$SELECT 1;$$;"
+            parseSql sql `shouldBe` CreateFunction
+                    { functionName = "search_rows"
+                    , functionArguments = []
+                    , functionBody = "SELECT 1;"
+                    , orReplace = False
+                    , returns = PReturnTable [("id", PUUID), ("label", PText)]
+                    , language = "sql"
+                    , securityDefiner = False
+                    , functionSettings = []
+                    }
+
+        it "should parse a composite FOREIGN KEY with ON UPDATE and ON DELETE" do
+            let sql = "ALTER TABLE ONLY items ADD CONSTRAINT items_ref_ticket FOREIGN KEY (ticket_id, organization_id) REFERENCES tickets(id, organization_id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;"
+            parseSql sql `shouldBe` AddConstraint
+                    { tableName = "items"
+                    , constraint = CompositeForeignKeyConstraint
+                        { name = Just "items_ref_ticket"
+                        , columnNames = ["ticket_id", "organization_id"]
+                        , referenceTable = "tickets"
+                        , referenceColumns = ["id", "organization_id"]
+                        , onDelete = Just Cascade
+                        , onUpdate = Just Cascade
+                        }
+                    , deferrable = Just True
+                    , deferrableType = Just InitiallyDeferred
+                    }
+
+        it "should parse a CREATE CONSTRAINT TRIGGER" do
+            let sql = "CREATE CONSTRAINT TRIGGER entry_lines_balance AFTER INSERT OR DELETE OR UPDATE ON entry_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION entry_is_balanced();"
+            parseSql sql `shouldBe` CreateConstraintTrigger
+                    { name = "entry_lines_balance"
+                    , eventWhen = After
+                    , event = [TriggerOnInsert, TriggerOnDelete, TriggerOnUpdate]
+                    , tableName = "entry_lines"
+                    , deferrable = Just True
+                    , deferrableType = Just InitiallyDeferred
+                    , for = ForEachRow
+                    , whenCondition = Nothing
+                    , functionName = "entry_is_balanced"
+                    , arguments = []
+                    }
+
+        it "should parse a CREATE TRIGGER restricted to specific columns" do
+            let sql = "CREATE TRIGGER sync_signature AFTER INSERT OR UPDATE OF organization_id, domain OR DELETE ON documents FOR EACH ROW EXECUTE FUNCTION sync_signature();"
+            parseSql sql `shouldBe` CreateTrigger
+                    { name = "sync_signature"
+                    , eventWhen = After
+                    , event = [TriggerOnInsert, TriggerOnUpdateOf ["organization_id", "domain"], TriggerOnDelete]
+                    , tableName = "documents"
+                    , for = ForEachRow
+                    , whenCondition = Nothing
+                    , functionName = "sync_signature"
+                    , arguments = []
+                    }
+
         it "should parse a CREATE TABLE with quoted identifiers" do
             parseSql "CREATE TABLE \"quoted name\" ();" `shouldBe` StatementCreateTable (table "quoted name")
 

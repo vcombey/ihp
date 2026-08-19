@@ -65,6 +65,8 @@ data Statement
     | DropDefaultValue { tableName :: Text, columnName :: Text }
     -- | CREATE TRIGGER ..;
     | CreateTrigger { name :: !Text, eventWhen :: !TriggerEventWhen, event :: ![TriggerEvent], tableName :: !Text, for :: !TriggerFor, whenCondition :: Maybe Expression, functionName :: !Text, arguments :: ![Expression] }
+    -- | CREATE CONSTRAINT TRIGGER .. AFTER .. ON .. DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ..;
+    | CreateConstraintTrigger { name :: !Text, eventWhen :: !TriggerEventWhen, event :: ![TriggerEvent], tableName :: !Text, deferrable :: Maybe Bool, deferrableType :: Maybe DeferrableType, for :: !TriggerFor, whenCondition :: Maybe Expression, functionName :: !Text, arguments :: ![Expression] }
     -- | CREATE EVENT TRIGGER ..;
     | CreateEventTrigger { name :: !Text, eventOn :: !Text, whenCondition :: Maybe Expression, functionName :: !Text, arguments :: ![Expression] }
     -- | DROP TRIGGER .. ON ..;
@@ -136,6 +138,15 @@ data Constraint
         , referenceTable :: !Text
         , referenceColumn :: !(Maybe Text)
         , onDelete :: !(Maybe OnDelete)
+        }
+    -- | FOREIGN KEY (a, b) REFERENCES referenceTable (x, y) ON DELETE onDelete;
+    | CompositeForeignKeyConstraint
+        { name :: !(Maybe Text)
+        , columnNames :: ![Text]
+        , referenceTable :: !Text
+        , referenceColumns :: ![Text]
+        , onDelete :: !(Maybe OnDelete)
+        , onUpdate :: !(Maybe OnDelete)
         }
     | UniqueConstraint
         { name :: !(Maybe Text)
@@ -245,6 +256,10 @@ data PostgresType
     | PArray PostgresType
     | PTrigger
     | PEventTrigger
+    -- | @RETURNS SETOF x@. Only valid as a function return type.
+    | PSetOf PostgresType
+    -- | @RETURNS TABLE (name type, ...)@. Only valid as a function return type.
+    | PReturnTable [(Text, PostgresType)]
     | PCustomType Text
     deriving (Eq, Show)
 
@@ -257,6 +272,8 @@ data TriggerEventWhen
 data TriggerEvent
     = TriggerOnInsert
     | TriggerOnUpdate
+    -- | @UPDATE OF column, column@. The trigger only fires for those columns.
+    | TriggerOnUpdateOf ![Text]
     | TriggerOnDelete
     | TriggerOnTruncate
     deriving (Eq, Show)
