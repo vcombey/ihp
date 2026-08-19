@@ -357,7 +357,7 @@ createTable = do
         constraints = rights allConstraints
 
     primaryKeyConstraint <- case filter fst taggedColumns of
-        [] -> case lefts allConstraints of
+        [] -> case map snd (lefts allConstraints) of
             [] -> pure $ PrimaryKeyConstraint []
             [primaryKeyConstraint] -> pure primaryKeyConstraint
             _ -> fail ("Multiple PRIMARY KEY constraints on table " <> cs name)
@@ -384,7 +384,7 @@ createEnumType = do
 
 addConstraint tableName = do
     constraint <- parseTableConstraint >>= \case
-      Left primaryKeyConstraint -> pure AlterTableAddPrimaryKey { name = Nothing, primaryKeyConstraint }
+      Left (name, primaryKeyConstraint) -> pure AlterTableAddPrimaryKey { name, primaryKeyConstraint }
       Right constraint -> pure constraint
     deferrable <- optional parseDeferrable
     deferrableType <- optional parseDeferrableType
@@ -409,7 +409,10 @@ parseTableConstraint = do
     name <- optional do
         lexeme "CONSTRAINT"
         identifier
-    (Left <$> parsePrimaryKeyConstraint) <|>
+    -- The primary key is returned with its name rather than as a bare
+    -- PrimaryKeyConstraint so that `ALTER TABLE … ADD CONSTRAINT x PRIMARY KEY`,
+    -- which is how pg_dump writes every primary key, keeps the name it declares.
+    (Left . (,) name <$> parsePrimaryKeyConstraint) <|>
       (Right <$> (parseForeignKeyConstraint name <|> parseUniqueConstraint name <|> parseCheckConstraint name <|> parseExcludeConstraint name))
 
 parsePrimaryKeyConstraint = do
