@@ -234,7 +234,7 @@ statement = do
     let alter = do
             lexeme "ALTER"
             alterTable <|> alterType <|> alterSequence
-    s <- setStatement <|> create <|> alter <|> selectStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
+    s <- setStatement <|> create <|> alter <|> selectStatement <|> try grantOrRevoke <|> try doStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
     space
     pure s
 
@@ -251,6 +251,47 @@ createExtension = do
         lexeme "public"
     char ';'
     pure CreateExtension { name, ifNotExists }
+
+-- | @GRANT@ and @REVOKE@, which the schema representation does not model.
+--
+-- Without them a schema that grants a role anything at all failed to parse, so
+-- the privilege statements had to be hidden inside an @EXECUTE@'d helper
+-- function that dropped itself afterwards. Neither statement can contain a
+-- semicolon, so the raw text runs up to the terminator.
+grantOrRevoke = do
+    keyword <- (lexeme "GRANT" $> "GRANT") <|> (lexeme "REVOKE" $> "REVOKE")
+    raw <- cs <$> someTill anySingle (char ';')
+    pure UnknownStatement { raw = Text.stripEnd (keyword <> " " <> raw) }
+
+-- | An anonymous @DO@ block. Its body is dollar quoted and contains semicolons,
+-- so the terminator is the closing delimiter rather than the first @;@.
+doStatement = do
+    lexeme "DO"
+    languageBefore <- optional (lexeme "LANGUAGE" >> identifier)
+    body <- dollarQuoted
+    space
+    languageAfter <- optional (lexeme "LANGUAGE" >> identifier)
+    char ';'
+    let language = maybe "" (\name -> "LANGUAGE " <> name <> " ") (languageBefore <|> languageAfter)
+    pure UnknownStatement { raw = "DO " <> language <> body }
+
+-- | A dollar quoted string, delimiter included, e.g. @$$ … $$@ or @$_$ … $_$@.
+--
+-- PostgreSQL picks a longer tag whenever the body contains the shorter
+-- delimiter, and a body may contain a lone @$@ as in @$1@, so neither the tag
+-- nor the body can be assumed to be @$$@ and @$@-free.
+dollarQuoted :: Parser Text
+dollarQuoted = do
+    delimiter <- dollarQuoteTag
+    body <- cs <$> manyTill anySingle (try (string delimiter))
+    pure (delimiter <> body <> delimiter)
+
+dollarQuoteTag :: Parser Text
+dollarQuoteTag = do
+    char '$'
+    tag <- takeWhileP (Just "dollar quote tag") (\c -> isAlphaNum c || c == '_')
+    char '$'
+    pure ("$" <> tag <> "$")
 
 createSchema = do
     lexeme "CREATE"
@@ -934,7 +975,7 @@ createFunction = do
 
     lexeme "AS"
     space
-    functionBody <- cs <$> between (char '$' >> char '$') (char '$' >> char '$') (many (anySingleBut '$'))
+    functionBody <- functionBodyText
     space
 
     language <- case languageBeforeBody of
@@ -952,6 +993,17 @@ createFunction = do
             pure (argumentName, argumentType)
         isSecurityDefiner FunctionSecurityDefiner = True
         isSecurityDefiner _ = False
+
+-- | The body of a function, without its dollar quote delimiter.
+--
+-- The delimiter is not always @$$@: PostgreSQL prints @$_$@ whenever the body
+-- contains @$$@, and a body may hold a lone @$@ as in a @$1@ parameter
+-- reference. The compiler picks a delimiter that the body does not contain, so
+-- dropping the original one here is lossless.
+functionBodyText :: Parser Text
+functionBodyText = do
+    delimiter <- dollarQuoteTag
+    cs <$> manyTill anySingle (try (string delimiter))
 
 -- | The return position of a function accepts two shapes a column never has:
 -- @RETURNS SETOF uuid@ and @RETURNS TABLE (name type, ...)@.
