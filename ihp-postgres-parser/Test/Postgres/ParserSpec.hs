@@ -97,6 +97,16 @@ spec = do
                     , inherits = Nothing
                     }
 
+        it "should parse a CREATE TABLE whose columns carry named NOT NULL constraints" do
+            let sql = "CREATE TABLE context_search_email_binary_signatures (\n                    embedding_provider text CONSTRAINT context_search_email_binary_signatu_embedding_provider_not_null NOT NULL,\n                    embedding_dimensions integer CONSTRAINT context_search_email_binary_signa_embedding_dimensions_not_null NOT NULL,\n                    embedding_model text\n                ); "
+            parseSql sql `shouldBe` StatementCreateTable (table "context_search_email_binary_signatures")
+                    { columns = [
+                        (col "embedding_provider" PText) { notNull = True }
+                        , (col "embedding_dimensions" PInt) { notNull = True }
+                        , col "embedding_model" PText
+                        ]
+                    }
+
         it "should parse a CREATE TABLE with quoted identifiers" do
             parseSql "CREATE TABLE \"quoted name\" ();" `shouldBe` StatementCreateTable (table "quoted name")
 
@@ -255,6 +265,24 @@ spec = do
                         [ FunctionSetting
                             { settingName = "search_path"
                             , settingValue = "public, private, pg_temp"
+                            }
+                        ]
+                    }
+
+        it "should parse CREATE FUNCTION with volatility and parallelism attributes" do
+            let sql = "CREATE FUNCTION current_organization_id() RETURNS uuid\n    LANGUAGE sql STABLE PARALLEL SAFE SECURITY DEFINER\n    SET search_path = public, pg_temp\n    AS $$SELECT 1;$$;"
+            parseSql sql `shouldBe` CreateFunction
+                    { functionName = "current_organization_id"
+                    , functionArguments = []
+                    , functionBody = "SELECT 1;"
+                    , orReplace = False
+                    , returns = PUUID
+                    , language = "sql"
+                    , securityDefiner = True
+                    , functionSettings =
+                        [ FunctionSetting
+                            { settingName = "search_path"
+                            , settingValue = "public, pg_temp"
                             }
                         ]
                     }
