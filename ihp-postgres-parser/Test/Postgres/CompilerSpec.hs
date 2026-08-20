@@ -21,7 +21,7 @@ spec = do
             compileSql [StatementCreateTable (table "users")] `shouldBe` "CREATE TABLE users (\n\n);\n"
 
         it "should compile a CREATE EXTENSION for the UUID extension" do
-            compileSql [CreateExtension { name = "uuid-ossp", ifNotExists = True }] `shouldBe` "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";\n"
+            compileSql [CreateExtension { name = "uuid-ossp", ifNotExists = True, extensionOptions = [] }] `shouldBe` "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";\n"
 
         it "should compile a line comment" do
             compileSql [Comment { content = " Comment value" }] `shouldBe` "-- Comment value\n"
@@ -224,6 +224,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = True
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -243,6 +244,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = True
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -325,7 +327,7 @@ spec = do
 
         it "should compile 'CREATE SEQUENCE ..' statements" do
             let sql = "CREATE SEQUENCE a;\n"
-            let statements = [ CreateSequence { name = "a" } ]
+            let statements = [ CreateSequence { name = "a", sequenceOptions = [] } ]
             compileSql statements `shouldBe` sql
 
         it "should compile 'DROP TYPE ..;' statements" do
@@ -377,6 +379,21 @@ spec = do
             it "keeps the name of a constraint declared inside CREATE TABLE" do
                 roundTrip "CREATE TABLE users (\n    age INT,\n    CONSTRAINT users_age_check CHECK (age > 0)\n);"
 
+            it "keeps PostgreSQL 18 named NOT NULL constraints" do
+                roundTrip "CREATE TABLE users (\n    email TEXT CONSTRAINT users_email_not_null NOT NULL\n);"
+
+            it "keeps sequence options" do
+                roundTrip "CREATE SEQUENCE property_ids AS BIGINT START WITH 1000000000000 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1;"
+
+            it "keeps the scale of numeric literals" do
+                roundTrip "CREATE TABLE fees (\n    vat NUMERIC(7,4) DEFAULT 20.0000 NOT NULL\n);"
+
+            it "keeps PostGIS geometry modifiers" do
+                roundTrip "CREATE TABLE locations (\n    geom GEOMETRY(Point, 4326)\n);"
+
+            it "keeps apostrophes in string literals" do
+                roundTrip "ALTER TABLE fees ADD CHECK (label <> 'taxe d''enlevement');"
+
             -- The operands come back parenthesised, which is the compiler's canonical
             -- form for AND and parses to the same expression.
             it "keeps a CHECK constraint combining comparisons with AND" do
@@ -389,11 +406,35 @@ spec = do
             it "keeps an operator it has no constructor for" do
                 roundTrip "ALTER TABLE t ADD CONSTRAINT t_code CHECK (code ~ '^[A-Z]{3}$');"
 
+            it "keeps POSITION's SQL-standard IN syntax" do
+                roundTrip "ALTER TABLE users ADD CONSTRAINT users_email_at CHECK (POSITION('@' IN email) > 1);"
+
             it "keeps a referential action restricted to some columns" do
                 roundTrip "ALTER TABLE t ADD CONSTRAINT t_fk FOREIGN KEY (a, b) REFERENCES o (a, b) ON DELETE SET NULL (b);"
 
             it "keeps GRANT and REVOKE statements" do
                 roundTrip "REVOKE ALL ON FUNCTION public.touch_updated_at() FROM PUBLIC;"
+
+            it "keeps extension schema, version and cascade options" do
+                roundTrip "CREATE EXTENSION IF NOT EXISTS postgis WITH SCHEMA public VERSION '3.4.2' CASCADE;"
+
+            it "keeps SQL COMMENT statements executable" do
+                compileSql [parseSql "COMMENT ON TABLE users IS 'Owner''s records';"]
+                    `shouldBe` "COMMENT ON TABLE users IS 'Owner''s records';\n"
+
+            it "keeps non-public table schemas instead of moving objects to public" do
+                roundTrip "CREATE TABLE private.tokens (id UUID);"
+                roundTrip "ALTER TABLE private.tokens ENABLE ROW LEVEL SECURITY;"
+
+            it "keeps unmodelled SQL containing semicolons" do
+                roundTrip "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$BEGIN PERFORM 1; END$$;"
+
+            it "keeps function attributes" do
+                roundTrip "CREATE FUNCTION f() RETURNS BOOLEAN IMMUTABLE PARALLEL SAFE COST 5 AS $$SELECT true;$$ language sql;"
+
+            it "keeps trigger WHEN conditions" do
+                roundTrip "CREATE TRIGGER t BEFORE UPDATE ON users FOR EACH ROW WHEN (OLD.email <> NEW.email) EXECUTE FUNCTION changed();"
+                roundTrip "CREATE CONSTRAINT TRIGGER ct AFTER UPDATE ON users DEFERRABLE FOR EACH ROW WHEN (OLD.email <> NEW.email) EXECUTE FUNCTION changed();"
 
             it "picks a dollar quote the function body does not contain" do
                 compileSql [(function "f") { functionBody = " BEGIN RETURN $$x$$; END; ", language = "plpgsql" }]

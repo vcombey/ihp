@@ -1514,6 +1514,26 @@ CREATE POLICY "Users can read and edit their own record" ON public.users USING (
                 |]
                 diffSchemas targetSchema actualSchema `shouldBe` []
 
+            it "should ignore pg_dump defaults and generated NOT NULL names" do
+                let targetSchema = sql [i|
+                    CREATE SEQUENCE users_id_seq;
+                    CREATE TABLE users (name TEXT NOT NULL);
+                |]
+                let actualSchema = sql [i|
+                    CREATE SEQUENCE public.users_id_seq
+                        AS bigint
+                        START WITH 1
+                        INCREMENT BY 1
+                        NO MINVALUE
+                        NO MAXVALUE
+                        CACHE 1
+                        NO CYCLE;
+                    CREATE TABLE public.users (
+                        name text CONSTRAINT users_name_not_null NOT NULL
+                    );
+                |]
+                diffSchemas targetSchema actualSchema `shouldBe` []
+
 sql :: Text -> [Statement]
 sql code = case Megaparsec.runParser Parser.parseDDL "" code of
     Left parsingFailed -> error (cs $ Megaparsec.errorBundlePretty parsingFailed)

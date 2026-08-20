@@ -34,7 +34,7 @@ compileSql statements = statements
 compileStatement :: Statement -> Text
 compileStatement (StatementCreateTable CreateTable { name, columns, primaryKeyConstraint, constraints, unlogged, inherits }) = "CREATE" <> (if unlogged then " UNLOGGED" else "") <> " TABLE " <> compileIdentifier name <> " (\n" <> intercalate ",\n" (map (\col -> "    " <> compileColumn primaryKeyConstraint col) columns <> maybe [] ((:[]) . indent) (compilePrimaryKeyConstraint primaryKeyConstraint) <> map (indent . compileTableConstraint) constraints) <> "\n)" <> maybe "" (\parent -> " INHERITS (" <> compileIdentifier parent <> ")") inherits <> ";"
 compileStatement CreateEnumType { name, values } = "CREATE TYPE " <> compileIdentifier name <> " AS ENUM (" <> intercalate ", " (values & map TextExpression & map compileExpression) <> ");"
-compileStatement CreateExtension { name, ifNotExists } = "CREATE EXTENSION " <> (if ifNotExists then "IF NOT EXISTS " else "") <> compileIdentifier name <> ";"
+compileStatement CreateExtension { name, ifNotExists, extensionOptions } = "CREATE EXTENSION " <> (if ifNotExists then "IF NOT EXISTS " else "") <> compileIdentifier name <> mconcat (map ((" " <>) . compileExtensionOption) extensionOptions) <> ";"
 compileStatement AddConstraint { tableName, constraint = UniqueConstraint { name = Nothing, columnNames } } = "ALTER TABLE " <> compileIdentifier tableName <> " ADD UNIQUE (" <> intercalate ", " columnNames <> ")" <> ";"
 -- | An unnamed constraint is added without a name rather than crashing on the
 -- missing one. PostgreSQL generates the name itself, which is what the schema
@@ -47,11 +47,11 @@ compileStatement RenameColumn { tableName, from, to } = "ALTER TABLE " <> compil
 compileStatement DropTable { tableName } = "DROP TABLE " <> compileIdentifier tableName <> ";"
 compileStatement Comment { content } = "--" <> content
 compileStatement CreateIndex { indexName, unique, tableName, columns, whereClause, indexType, nullsDistinct } = "CREATE" <> (if unique then " UNIQUE " else " ") <> "INDEX " <> compileIdentifier indexName <> " ON " <> compileIdentifier tableName <> (maybe "" (\indexType -> " USING " <> compileIndexType indexType) indexType) <> " (" <> (intercalate ", " (map compileIndexColumn columns)) <> ")" <> (if nullsDistinct then "" else " NULLS NOT DISTINCT") <> (case whereClause of Just expression -> " WHERE " <> compileExpression expression; Nothing -> "") <> ";"
-compileStatement CreateFunction { functionName, functionArguments, functionBody, orReplace, returns, language, securityDefiner, functionSettings } = "CREATE " <> (if orReplace then "OR REPLACE " else "") <> "FUNCTION " <> functionName <> "(" <> (functionArguments & map (\(argName, argType) -> argName <> " " <> compilePostgresType argType) & intercalate  ", ") <> ")" <> " RETURNS " <> compilePostgresType returns <> (if securityDefiner then " SECURITY DEFINER" else "") <> mconcat (map compileFunctionSetting functionSettings) <> " AS " <> dollarQuote functionBody <> functionBody <> dollarQuote functionBody <> " language " <> language <> ";"
+compileStatement CreateFunction { functionName, functionArguments, functionBody, orReplace, returns, language, securityDefiner, functionAttributes, functionSettings } = "CREATE " <> (if orReplace then "OR REPLACE " else "") <> "FUNCTION " <> functionName <> "(" <> (functionArguments & map (\(argName, argType) -> argName <> " " <> compilePostgresType argType) & intercalate  ", ") <> ")" <> " RETURNS " <> compilePostgresType returns <> (if securityDefiner then " SECURITY DEFINER" else "") <> mconcat (map (" " <>) functionAttributes) <> mconcat (map compileFunctionSetting functionSettings) <> " AS " <> dollarQuote functionBody <> functionBody <> dollarQuote functionBody <> " language " <> language <> ";"
 compileStatement EnableRowLevelSecurity { tableName } = "ALTER TABLE " <> compileIdentifier tableName <> " ENABLE ROW LEVEL SECURITY;"
 compileStatement ForceRowLevelSecurity { tableName } = "ALTER TABLE " <> compileIdentifier tableName <> " FORCE ROW LEVEL SECURITY;"
 compileStatement CreatePolicy { name, action, tableName, roles, using, check } = "CREATE POLICY " <> compileIdentifier name <> " ON " <> compileIdentifier tableName <> maybe "" (\action -> " FOR " <> compilePolicyAction action) action <> (if null roles then "" else " TO " <> intercalate ", " (map compileIdentifier roles)) <> maybe "" (\expr -> " USING (" <> compileExpression expr <> ")") using <> maybe "" (\expr -> " WITH CHECK (" <> compileExpression expr <> ")") check <> ";"
-compileStatement CreateSequence { name } = "CREATE SEQUENCE " <> compileIdentifier name <> ";"
+compileStatement CreateSequence { name, sequenceOptions } = "CREATE SEQUENCE " <> compileIdentifier name <> (if null sequenceOptions then "" else " " <> intercalate " " (map compileSequenceOption sequenceOptions)) <> ";"
 compileStatement DropConstraint { tableName, constraintName } = "ALTER TABLE " <> compileIdentifier tableName <> " DROP CONSTRAINT " <> compileIdentifier constraintName <> ";"
 compileStatement DropEnumType { name } = "DROP TYPE " <> compileIdentifier name <> ";"
 compileStatement DropIndex { indexName } = "DROP INDEX " <> compileIdentifier indexName <> ";"
@@ -62,8 +62,8 @@ compileStatement DropPolicy { tableName, policyName } =  "DROP POLICY " <> compi
 compileStatement SetDefaultValue { tableName, columnName, value } = "ALTER TABLE " <> compileIdentifier tableName <> " ALTER COLUMN " <> compileIdentifier columnName <> " SET DEFAULT " <> compileExpression value <> ";"
 compileStatement DropDefaultValue { tableName, columnName } = "ALTER TABLE " <> compileIdentifier tableName <> " ALTER COLUMN " <> compileIdentifier columnName <> " DROP DEFAULT;"
 compileStatement AddValueToEnumType { enumName, newValue } = "ALTER TYPE " <> compileIdentifier enumName <> " ADD VALUE " <> compileExpression (TextExpression newValue) <> ";"
-compileStatement CreateTrigger { name, eventWhen, event, tableName, for, whenCondition, functionName, arguments } = "CREATE TRIGGER " <> compileIdentifier name <> " " <> compileTriggerEventWhen eventWhen <> " " <> intercalate " OR " (map compileTriggerEvent event) <> " ON " <> compileIdentifier tableName <> " " <> compileTriggerFor for <> " EXECUTE FUNCTION " <> compileExpression (CallExpression functionName arguments) <> ";"
-compileStatement CreateConstraintTrigger { name, eventWhen, event, tableName, deferrable, deferrableType, for, whenCondition, functionName, arguments } = "CREATE CONSTRAINT TRIGGER " <> compileIdentifier name <> " " <> compileTriggerEventWhen eventWhen <> " " <> intercalate " OR " (map compileTriggerEvent event) <> " ON " <> compileIdentifier tableName <> compileDeferrable deferrable deferrableType <> " " <> compileTriggerFor for <> " EXECUTE FUNCTION " <> compileExpression (CallExpression functionName arguments) <> ";"
+compileStatement CreateTrigger { name, eventWhen, event, tableName, for, whenCondition, functionName, arguments } = "CREATE TRIGGER " <> compileIdentifier name <> " " <> compileTriggerEventWhen eventWhen <> " " <> intercalate " OR " (map compileTriggerEvent event) <> " ON " <> compileIdentifier tableName <> " " <> compileTriggerFor for <> compileTriggerWhen whenCondition <> " EXECUTE FUNCTION " <> compileExpression (CallExpression functionName arguments) <> ";"
+compileStatement CreateConstraintTrigger { name, eventWhen, event, tableName, deferrable, deferrableType, for, whenCondition, functionName, arguments } = "CREATE CONSTRAINT TRIGGER " <> compileIdentifier name <> " " <> compileTriggerEventWhen eventWhen <> " " <> intercalate " OR " (map compileTriggerEvent event) <> " ON " <> compileIdentifier tableName <> compileDeferrable deferrable deferrableType <> " " <> compileTriggerFor for <> compileTriggerWhen whenCondition <> " EXECUTE FUNCTION " <> compileExpression (CallExpression functionName arguments) <> ";"
 compileStatement Begin = "BEGIN;"
 compileStatement Commit = "COMMIT;"
 compileStatement DropFunction { functionName } = "DROP FUNCTION " <> compileIdentifier functionName <> ";"
@@ -146,14 +146,14 @@ compileOnDelete (Just (SetDefaultColumns columnNames)) = "ON DELETE SET DEFAULT"
 compileOnDelete (Just Cascade) = "ON DELETE CASCADE"
 
 compileColumn :: PrimaryKeyConstraint -> Column -> Text
-compileColumn primaryKeyConstraint Column { name, columnType, defaultValue, notNull, isUnique, generator } =
+compileColumn primaryKeyConstraint Column { name, columnType, defaultValue, notNull, notNullConstraintName, isUnique, generator } =
     unwords (catMaybes
         [ Just (compileIdentifier name)
         , Just (compilePostgresType columnType)
         , fmap compileDefaultValue defaultValue
         , fmap compileGenerator generator
         , primaryKeyColumnConstraint
-        , if notNull then Just "NOT NULL" else Nothing
+        , if notNull then Just (maybe "NOT NULL" (\constraintName -> "CONSTRAINT " <> compileIdentifier constraintName <> " NOT NULL") notNullConstraintName) else Nothing
         , if isUnique then Just "UNIQUE" else Nothing
         ])
     where
@@ -180,13 +180,15 @@ dollarQuote body = go 0
             in if delimiter `Text.isInfixOf` body then go (underscores + 1) else delimiter
 
 compileExpression :: Expression -> Text
-compileExpression (TextExpression value) = "'" <> value <> "'"
+compileExpression (TextExpression value) = "'" <> Text.replace "'" "''" value <> "'"
 compileExpression (VarExpression name) =
         if nameContainsSpaces
             then compileIdentifier name
             else name
     where
         nameContainsSpaces = Text.any (== ' ') name
+compileExpression (CallExpression func [InExpression needle haystack])
+    | Text.toUpper func == "POSITION" = func <> "(" <> compileExpressionWithOptionalParenthese needle <> " IN " <> compileExpressionWithOptionalParenthese haystack <> ")"
 compileExpression (CallExpression func args) = func <> "(" <> intercalate ", " (map compileExpressionWithOptionalParenthese args) <> ")"
 compileExpression (NotEqExpression a b) = compileExpression a <> " <> " <> compileExpression b
 compileExpression (EqExpression a b) = compileEqualityOperand a <> " = " <> compileEqualityOperand b
@@ -204,6 +206,7 @@ compileExpression (LessThanOrEqualToExpression a b) = compileExpressionWithOptio
 compileExpression (GreaterThanExpression a b) = compileExpressionWithOptionalParenthese a <> " > " <> compileExpressionWithOptionalParenthese b
 compileExpression (GreaterThanOrEqualToExpression a b) = compileExpressionWithOptionalParenthese a <> " >= " <> compileExpressionWithOptionalParenthese b
 compileExpression (DoubleExpression double) = tshow double
+compileExpression (NumericExpression value) = value
 compileExpression (IntExpression integer) = tshow integer
 compileExpression (TypeCastExpression value type_) = compileExpression value <> "::" <> compilePostgresType type_
 compileExpression (SelectExpression Select { columns, from, whereClause }) = "SELECT " <> intercalate ", " (map compileExpression columns) <> " FROM " <> compileExpression from <> " WHERE " <> compileExpression whereClause
@@ -229,6 +232,7 @@ compileExpressionWithOptionalParenthese expr@(CallExpression {}) = compileExpres
 compileExpressionWithOptionalParenthese expr@(TextExpression {}) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(IntExpression {}) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(DoubleExpression {}) = compileExpression expr
+compileExpressionWithOptionalParenthese expr@(NumericExpression {}) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(DotExpression (VarExpression {}) b) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(ConcatenationExpression a b ) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(InArrayExpression values) = compileExpression expr
@@ -258,6 +262,7 @@ compilePostgresType PDouble = "DOUBLE PRECISION"
 compilePostgresType PPoint = "POINT"
 compilePostgresType PPolygon = "POLYGON"
 compilePostgresType PGeometry = "GEOMETRY"
+compilePostgresType (PGeometryWithModifier modifier) = "GEOMETRY(" <> modifier <> ")"
 compilePostgresType PDate = "DATE"
 compilePostgresType PBinary = "BYTEA"
 compilePostgresType PTime = "TIME"
@@ -554,6 +559,10 @@ compileTriggerFor :: TriggerFor -> Text
 compileTriggerFor ForEachRow = "FOR EACH ROW"
 compileTriggerFor ForEachStatement = "FOR EACH STATEMENT"
 
+compileTriggerWhen :: Maybe Expression -> Text
+compileTriggerWhen Nothing = ""
+compileTriggerWhen (Just condition) = " WHEN (" <> compileExpression condition <> ")"
+
 compilePolicyAction :: PolicyAction -> Text
 compilePolicyAction PolicyForAll = "ALL"
 compilePolicyAction PolicyForSelect = "SELECT"
@@ -580,6 +589,22 @@ compileIndexType Ivfflat = "IVFFLAT"
 
 compileFunctionSetting :: FunctionSetting -> Text
 compileFunctionSetting FunctionSetting { settingName, settingValue } = " SET " <> settingName <> " = " <> settingValue
+
+compileSequenceOption :: SequenceOption -> Text
+compileSequenceOption (SequenceAs type_) = "AS " <> compilePostgresType type_
+compileSequenceOption (SequenceStart value) = "START WITH " <> compileExpression value
+compileSequenceOption (SequenceIncrement value) = "INCREMENT BY " <> compileExpression value
+compileSequenceOption SequenceNoMinValue = "NO MINVALUE"
+compileSequenceOption SequenceNoMaxValue = "NO MAXVALUE"
+compileSequenceOption (SequenceMinValue value) = "MINVALUE " <> compileExpression value
+compileSequenceOption (SequenceMaxValue value) = "MAXVALUE " <> compileExpression value
+compileSequenceOption (SequenceCache value) = "CACHE " <> compileExpression value
+compileSequenceOption (SequenceCycle enabled) = if enabled then "CYCLE" else "NO CYCLE"
+
+compileExtensionOption :: ExtensionOption -> Text
+compileExtensionOption (ExtensionSchema schema) = "WITH SCHEMA " <> compileIdentifier schema
+compileExtensionOption (ExtensionVersion version) = "VERSION " <> compileExpression (TextExpression version)
+compileExtensionOption ExtensionCascade = "CASCADE"
 
 compileIndexColumn :: IndexColumn -> Text
 compileIndexColumn IndexColumn { column, columnOperatorClass, columnOrder } =

@@ -487,7 +487,7 @@ normalizeStatement AddConstraint { tableName, constraint, deferrable, deferrable
 normalizeStatement CreateEnumType { name, values } = [ CreateEnumType { name = Text.toLower name, values = map Text.toLower values } ]
 normalizeStatement CreatePolicy { name, action, tableName, roles, using, check } = [ CreatePolicy { name = truncateIdentifier name, tableName, roles = sort (map Text.toLower roles), using = (unqualifyExpression tableName . normalizeExpression) <$> using, check = (unqualifyExpression tableName . normalizeExpression) <$> check, action = normalizePolicyAction action } ]
 normalizeStatement CreateIndex { columns, indexType, indexName, whereClause, tableName, .. } = [ CreateIndex { columns = map normalizeIndexColumn columns, indexType = normalizeIndexType indexType, indexName = truncateIdentifier indexName, whereClause = (unqualifyExpression tableName . normalizeExpression) <$> whereClause, tableName, .. } ]
-normalizeStatement CreateFunction { functionSettings, .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionBody = removeIndentation $ normalizeNewLines functionBody, functionSettings = map normalizeFunctionSetting functionSettings, .. } ]
+normalizeStatement CreateFunction { functionAttributes, functionSettings, .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionAttributes = map Text.toUpper functionAttributes, functionBody = removeIndentation $ normalizeNewLines functionBody, functionSettings = map normalizeFunctionSetting functionSettings, .. } ]
     where
         -- pg_dump prints @SET search_path TO 'public', 'pg_temp'@ where Schema.sql
         -- writes @SET search_path = public, pg_temp@. Compare them without quotes.
@@ -495,11 +495,22 @@ normalizeStatement CreateFunction { functionSettings, .. } = [ CreateFunction { 
             FunctionSetting { settingName, settingValue = settingValue |> Text.splitOn "," |> map (Text.dropAround (== '\'') . Text.strip) |> Text.intercalate ", " }
 normalizeStatement CreateTrigger { event, .. } = [ CreateTrigger { event = normalizeTriggerEvents event, .. } ]
 normalizeStatement CreateConstraintTrigger { event, .. } = [ CreateConstraintTrigger { event = normalizeTriggerEvents event, .. } ]
+normalizeStatement CreateSequence { .. } = [ CreateSequence { sequenceOptions = filter (not . isDefaultSequenceOption) sequenceOptions, .. } ]
 normalizeStatement otherwise = [otherwise]
 
 -- | @INSERT OR UPDATE OR DELETE@ and @INSERT OR DELETE OR UPDATE@ are the same trigger.
 normalizeTriggerEvents :: [TriggerEvent] -> [TriggerEvent]
 normalizeTriggerEvents events = sortOn tshow events
+
+isDefaultSequenceOption :: SequenceOption -> Bool
+isDefaultSequenceOption (SequenceAs PBigInt) = True
+isDefaultSequenceOption (SequenceStart (IntExpression 1)) = True
+isDefaultSequenceOption (SequenceIncrement (IntExpression 1)) = True
+isDefaultSequenceOption SequenceNoMinValue = True
+isDefaultSequenceOption SequenceNoMaxValue = True
+isDefaultSequenceOption (SequenceCache (IntExpression 1)) = True
+isDefaultSequenceOption (SequenceCycle False) = True
+isDefaultSequenceOption _ = False
 
 normalizePolicyAction (Just PolicyForAll) = Nothing
 normalizePolicyAction otherwise = otherwise
@@ -579,7 +590,7 @@ normalizeConstraint tableName CheckConstraint { name, checkExpression } = CheckC
 normalizeConstraint _ otherwise = otherwise
 
 normalizeColumn :: CreateTable -> Column -> (Column, [Statement])
-normalizeColumn table Column { name, columnType, defaultValue, notNull, isUnique, generator } = (Column { name = normalizeName name, columnType = normalizeSqlType columnType, defaultValue = normalizedDefaultValue, notNull, isUnique = False, generator = normalizeColumnGenerator <$> generator }, uniqueConstraint)
+normalizeColumn table Column { name, columnType, defaultValue, notNull, isUnique, generator } = (Column { name = normalizeName name, columnType = normalizeSqlType columnType, defaultValue = normalizedDefaultValue, notNull, notNullConstraintName = Nothing, isUnique = False, generator = normalizeColumnGenerator <$> generator }, uniqueConstraint)
     where
         uniqueConstraint =
             if isUnique
@@ -615,6 +626,7 @@ normalizeExpression (LessThanOrEqualToExpression a b) = LessThanOrEqualToExpress
 normalizeExpression (GreaterThanExpression a b) = GreaterThanExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression (GreaterThanOrEqualToExpression a b) = GreaterThanOrEqualToExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression e@(DoubleExpression {}) = e
+normalizeExpression e@(NumericExpression {}) = e
 normalizeExpression e@(IntExpression {}) = e
 normalizeExpression (ConcatenationExpression a b) = ConcatenationExpression (normalizeExpression a) (normalizeExpression b)
 -- Enum default values from pg_dump always have an explicit type cast. Inside the Schema.sql they typically don't have those.
@@ -664,6 +676,7 @@ unqualifyExpression scope expression = doUnqualify expression
         doUnqualify (GreaterThanExpression a b) = GreaterThanExpression (doUnqualify a) (doUnqualify b)
         doUnqualify (GreaterThanOrEqualToExpression a b) = GreaterThanOrEqualToExpression (doUnqualify a) (doUnqualify b)
         doUnqualify e@(DoubleExpression {}) = e
+        doUnqualify e@(NumericExpression {}) = e
         doUnqualify e@(IntExpression {}) = e
         doUnqualify (ConcatenationExpression a b) = ConcatenationExpression (doUnqualify a) (doUnqualify b)
         doUnqualify (TypeCastExpression a b) = TypeCastExpression (doUnqualify a) b
@@ -705,6 +718,7 @@ resolveAlias (Just alias) fromExpression expression =
         e@(GreaterThanExpression a b) -> GreaterThanExpression (rec a) (rec b)
         e@(GreaterThanOrEqualToExpression a b) -> GreaterThanOrEqualToExpression (rec a) (rec b)
         e@(DoubleExpression {}) -> e
+        e@(NumericExpression {}) -> e
         e@(IntExpression {}) -> e
         e@(TypeCastExpression a b) -> (TypeCastExpression (rec a) b)
         e@(SelectExpression Select { columns, from, whereClause, alias }) -> SelectExpression Select { columns = rec <$> columns, from = rec from, whereClause = rec whereClause, alias = alias }

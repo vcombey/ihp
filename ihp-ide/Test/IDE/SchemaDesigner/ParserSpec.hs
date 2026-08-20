@@ -17,13 +17,13 @@ tests = do
             parseSql "CREATE TABLE users ();"  `shouldBe` StatementCreateTable (table "users")
 
         it "should parse an CREATE EXTENSION for the UUID extension" do
-            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True }
+            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True, extensionOptions = [] }
 
         it "should parse an CREATE EXTENSION with schema suffix" do
-            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True }
+            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True, extensionOptions = [ExtensionSchema "public"] }
 
         it "should parse an CREATE EXTENSION without quotes" do
-            parseSql "CREATE EXTENSION IF NOT EXISTS fuzzystrmatch WITH SCHEMA public;" `shouldBe` CreateExtension { name = "fuzzystrmatch", ifNotExists = True }
+            parseSql "CREATE EXTENSION IF NOT EXISTS fuzzystrmatch WITH SCHEMA public;" `shouldBe` CreateExtension { name = "fuzzystrmatch", ifNotExists = True, extensionOptions = [ExtensionSchema "public"] }
 
         it "should parse a line comment" do
             parseSql "-- Comment value" `shouldBe` Comment { content = " Comment value" }
@@ -537,9 +537,9 @@ tests = do
                     , inherits = Nothing
                     }
 
-        it "should fail to parse a CREATE TABLE statement with an empty UNIQUE () constraint" do
-            (evaluate (parseSql "CREATE TABLE user_followers (id UUID, UNIQUE());")) `shouldThrow` anyException
-            pure ()
+        it "should preserve a CREATE TABLE statement the structured parser rejects" do
+            parseSql "CREATE TABLE user_followers (id UUID, UNIQUE());"
+                `shouldBe` UnknownStatement { raw = "CREATE TABLE user_followers (id UUID, UNIQUE())" }
 
         it "should parse a CREATE TABLE statement with a multi-column PRIMARY KEY (a, b) constraint" do
             parseSql "CREATE TABLE user_followers (user_id UUID NOT NULL, follower_id UUID NOT NULL, PRIMARY KEY (user_id, follower_id));"  `shouldBe` StatementCreateTable (table "user_followers")
@@ -550,13 +550,13 @@ tests = do
                     , primaryKeyConstraint = PrimaryKeyConstraint [ "user_id", "follower_id" ]
                     }
 
-        it "should fail to parse a CREATE TABLE statement with PRIMARY KEY column and table constraints" do
-            (evaluate (parseSql "CREATE TABLE user_followers (id UUID PRIMARY KEY, PRIMARY KEY(id));")) `shouldThrow` anyException
-            pure ()
+        it "should preserve conflicting primary-key syntax for PostgreSQL to validate" do
+            parseSql "CREATE TABLE user_followers (id UUID PRIMARY KEY, PRIMARY KEY(id));"
+                `shouldBe` UnknownStatement { raw = "CREATE TABLE user_followers (id UUID PRIMARY KEY, PRIMARY KEY(id))" }
 
-        it "should fail to parse a CREATE TABLE statement with an empty PRIMARY KEY () constraint" do
-            (evaluate (parseSql "CREATE TABLE user_followers (id UUID, PRIMARY KEY ());")) `shouldThrow` anyException
-            pure ()
+        it "should preserve an empty primary-key constraint for PostgreSQL to validate" do
+            parseSql "CREATE TABLE user_followers (id UUID, PRIMARY KEY ());"
+                `shouldBe` UnknownStatement { raw = "CREATE TABLE user_followers (id UUID, PRIMARY KEY ())" }
 
         it "should parse a CREATE TABLE statement with a serial id" do
             parseSql "CREATE TABLE orders (\n    id SERIAL PRIMARY KEY NOT NULL\n);\n" `shouldBe` StatementCreateTable (table "orders")
@@ -603,12 +603,12 @@ tests = do
 
         it "should parse a CREATE TABLE statement with a PostGIS geometry(subtype, srid) column" do
             parseSql "CREATE TABLE locations (\n    geom geometry(Point, 4326)\n);\n" `shouldBe` StatementCreateTable (table "locations")
-                    { columns = [ col "geom" PGeometry ]
+                    { columns = [ col "geom" (PGeometryWithModifier "Point, 4326") ]
                     }
 
         it "should parse a CREATE TABLE statement with a PostGIS geometry(subtype) column" do
             parseSql "CREATE TABLE areas (\n    shape geometry(MultiPolygon)\n);\n" `shouldBe` StatementCreateTable (table "areas")
-                    { columns = [ col "shape" PGeometry ]
+                    { columns = [ col "shape" (PGeometryWithModifier "MultiPolygon") ]
                     }
 
         it "should parse a CREATE INDEX statement" do
@@ -845,7 +845,7 @@ $$;
         it "should parse a decimal default value with a type-cast" do
             let sql = "CREATE TABLE a(electricity_unit_price DOUBLE PRECISION DEFAULT 0.17::double precision NOT NULL);"
             let statements =
-                    [ StatementCreateTable (table "a") { columns = [(col "electricity_unit_price" PDouble) { defaultValue = Just (TypeCastExpression (DoubleExpression 0.17) PDouble), notNull = True }] }
+                    [ StatementCreateTable (table "a") { columns = [(col "electricity_unit_price" PDouble) { defaultValue = Just (TypeCastExpression (NumericExpression "0.17") PDouble), notNull = True }] }
                     ]
             parseSqlStatements sql `shouldBe` statements
 
@@ -909,10 +909,10 @@ $$;
             parseSql "ALTER TABLE tasks DROP CONSTRAINT tasks_title_key;" `shouldBe` DropConstraint { tableName = "tasks", constraintName = "tasks_title_key" }
 
         it "should parse 'CREATE SEQUENCE ..' statements" do
-            parseSql "CREATE SEQUENCE a;" `shouldBe` CreateSequence { name = "a" }
+            parseSql "CREATE SEQUENCE a;" `shouldBe` CreateSequence { name = "a", sequenceOptions = [] }
 
         it "should parse 'CREATE SEQUENCE ..' statements with qualified name" do
-            parseSql "CREATE SEQUENCE public.a;" `shouldBe` CreateSequence { name = "a" }
+            parseSql "CREATE SEQUENCE public.a;" `shouldBe` CreateSequence { name = "a", sequenceOptions = [] }
 
         it "should parse 'CREATE SEQUENCE .. AS .. START WITH .. INCREMENT BY .. NO MINVALUE NO MAXVALUE CACHE ..;'" do
             let sql = [trimming|
@@ -924,7 +924,17 @@ $$;
                     NO MAXVALUE
                     CACHE 1;
             |]
-            parseSql sql `shouldBe` CreateSequence { name = "a" }
+            parseSql sql `shouldBe` CreateSequence
+                { name = "a"
+                , sequenceOptions =
+                    [ SequenceAs PInt
+                    , SequenceStart (IntExpression 1)
+                    , SequenceIncrement (IntExpression 1)
+                    , SequenceNoMinValue
+                    , SequenceNoMaxValue
+                    , SequenceCache (IntExpression 1)
+                    ]
+                }
 
         it "should parse 'SET' statements" do
             parseSql "SET statement_timeout = 0;" `shouldBe` Set { name = "statement_timeout", value = IntExpression 0 }
@@ -933,7 +943,7 @@ $$;
         it "should parse 'SELECT' statements" do
             parseSql "SELECT pg_catalog.set_config('search_path', '', false);" `shouldBe` SelectStatement { query = "pg_catalog.set_config('search_path', '', false)" }
         it "should parse 'COMMENT' statements" do
-            parseSql "COMMENT ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers (UUIDs)';" `shouldBe` Comment { content = "ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers (UUIDs)'" }
+            parseSql "COMMENT ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers (UUIDs)';" `shouldBe` UnknownStatement { raw = "COMMENT ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers (UUIDs)'" }
 
         it "should parse a column with a default value that has a qualified function call" do
             let sql = cs [plain|
@@ -1026,11 +1036,11 @@ COMMENT ON EXTENSION "uuid-ossp" IS 'generate universally unique identifiers (UU
                     , Comment {content = ""}
                     , Comment {content = " Name: uuid-ossp; Type: EXTENSION; Schema: -; Owner: -"}
                     , Comment {content = ""}
-                    , CreateExtension {name = "uuid-ossp", ifNotExists = True}
+                    , CreateExtension {name = "uuid-ossp", ifNotExists = True, extensionOptions = [ExtensionSchema "public"]}
                     , Comment {content = ""}
                     , Comment {content = " Name: EXTENSION \"uuid-ossp\"; Type: COMMENT; Schema: -; Owner: -"}
                     , Comment {content = ""}
-                    , Comment {content = "ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers (UUIDs)'"}
+                    , UnknownStatement {raw = "COMMENT ON EXTENSION \"uuid-ossp\" IS 'generate universally unique identifiers (UUIDs)'"}
                     ]
             parseSqlStatements sql `shouldBe` statements
 
@@ -1144,10 +1154,10 @@ COMMENT ON EXTENSION "uuid-ossp" IS 'generate universally unique identifiers (UU
             parseExpression "-1" `shouldBe` (IntExpression (-1))
 
         it "should parse positive DoubleExpression's" do
-            parseExpression "1.337" `shouldBe` (DoubleExpression 1.337)
+            parseExpression "1.337" `shouldBe` NumericExpression "1.337"
 
         it "should parse negative DoubleExpression's" do
-            parseExpression "-1.337" `shouldBe` (DoubleExpression (-1.337))
+            parseExpression "-1.337" `shouldBe` NumericExpression "-1.337"
 
         it "should parse lower-cased SELECT expressions" do
             parseExpression "(select company_id from users where id = ihp_user_id())" `shouldBe` SelectExpression (Select {columns = [VarExpression "company_id"], from = VarExpression "users", alias = Nothing, whereClause = EqExpression (VarExpression "id") (CallExpression "ihp_user_id" [])})
