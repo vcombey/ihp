@@ -383,6 +383,9 @@ spec = do
                 compileSql [parseSql "ALTER TABLE t ADD CONSTRAINT t_positive CHECK (a > 0 AND b > 0);"]
                     `shouldBe` "ALTER TABLE t ADD CONSTRAINT t_positive CHECK ((a > 0) AND (b > 0));\n"
 
+            it "keeps boolean IS expressions grouped inside equality" do
+                roundTrip "ALTER TABLE t ADD CONSTRAINT t_pair CHECK ((a IS NULL) = (b IS NULL));"
+
             it "keeps an operator it has no constructor for" do
                 roundTrip "ALTER TABLE t ADD CONSTRAINT t_code CHECK (code ~ '^[A-Z]{3}$');"
 

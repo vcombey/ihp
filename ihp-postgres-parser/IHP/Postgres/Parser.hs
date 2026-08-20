@@ -246,13 +246,21 @@ parseDDL = optional Char.space >> (manyTill statement eof)
 
 statement = do
     Char.space
-    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createPolicyFallback <|> try createSchema <|> try createView <|> try createSequence
+    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createPolicyFallback <|> try createSchema <|> try createView <|> try createSequence <|> unknownStatement "CREATE"
     let alter = do
             lexeme "ALTER"
             alterTable <|> alterType <|> alterSequence
-    s <- setStatement <|> create <|> alter <|> selectStatement <|> try grantOrRevoke <|> try doStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
+    s <- setStatement <|> create <|> try alter <|> unknownStatement "ALTER" <|> selectStatement <|> try grantOrRevoke <|> try doStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
     Char.space
     pure s
+
+-- | Preserve valid PostgreSQL DDL that IHP does not model, such as foreign
+-- servers, covering indexes, or @NOT VALID@ constraints.
+unknownStatement :: Text -> Parser Statement
+unknownStatement keyword = do
+    symbol' keyword
+    raw <- cs <$> someTill anySingle (char ';')
+    pure UnknownStatement { raw = Text.stripEnd (keyword <> " " <> raw) }
 
 
 createExtension = do
@@ -465,27 +473,24 @@ parseExcludeConstraint name = do
     pure ExcludeConstraint { name, excludeElements, predicate, indexType }
     where
         excludeElement = do
-            element <- identifier
-            space
-            lexeme "WITH"
-            space
+            element <- Text.stripEnd . cs <$> someTill anySingle (try (space >> string' "WITH" >> space))
             operator <- parseCommutativeInfixOperator
             pure ExcludeConstraintElement { element, operator }
 
-        parseCommutativeInfixOperator = choice $ map lexeme
-            [ "="
-            , "<>"
-            , "!="
-            , "AND"
-            , "OR"
-            ]
+        parseCommutativeInfixOperator = lexeme do
+            try identifier <|> takeWhile1P (Just "operator") (`elem` ("+-*/<>=~!@#%^&|`?" :: String))
 
 parseOnDelete = choice
         [ (lexeme "NO" >> lexeme "ACTION") >> pure NoAction
         , (lexeme "RESTRICT" >> pure Restrict)
-        , (lexeme "SET" >> ((lexeme "NULL" >> (SetNull <$> referentialActionColumns)) <|> (lexeme "DEFAULT" >> (SetDefault <$> referentialActionColumns))))
+        , (lexeme "SET" >> ((lexeme "NULL" >> parseReferentialAction SetNull SetNullColumns) <|> (lexeme "DEFAULT" >> parseReferentialAction SetDefault SetDefaultColumns)))
         , (lexeme "CASCADE" >> pure Cascade)
         ]
+
+parseReferentialAction :: OnDelete -> ([Text] -> OnDelete) -> Parser OnDelete
+parseReferentialAction allColumns selectedColumns = do
+    columns <- referentialActionColumns
+    pure if null columns then allColumns else selectedColumns columns
 
 parseColumn :: Parser (Bool, Column)
 parseColumn = do
@@ -532,6 +537,10 @@ parseColumn = do
             , do
                 lexeme "CONSTRAINT"
                 _constraintName <- identifier
+                parseColumnAttributes column primaryKey
+            , do
+                lexeme "COLLATE"
+                _collation <- qualifiedIdentifier
                 parseColumnAttributes column primaryKey
             , do
                 lexeme "UNIQUE"
@@ -584,7 +593,7 @@ sqlType = choice $ map optionalArray
                     pure PTimestampWithTimezone
 
                 timestampZ' = do
-                    try (symbol' "TIMESTAMPZ")
+                    try (symbol' "TIMESTAMPTZ") <|> try (symbol' "TIMESTAMPZ")
                     pure PTimestampWithTimezone
 
                 timestamp' = do
@@ -765,7 +774,7 @@ intervalFields =  [ "YEAR TO MONTH", "DAY TO HOUR", "DAY TO MINUTE", "DAY TO SEC
                    , "YEAR",  "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"]
 
 
-term = parens expression <|> try variadicExpr <|> try arrayExpr <|> try callExpr <|> try doubleExpr <|> try intExpr <|> selectExpr <|> varExpr <|> (textExpr <* optional space)
+term = parens expression <|> try variadicExpr <|> try arrayExpr <|> try typedLiteralExpr <|> try callExpr <|> try doubleExpr <|> try intExpr <|> selectExpr <|> varExpr <|> (textExpr <* optional space)
     where
         parens f = between (char '(' >> space) (char ')' >> space) f
 
@@ -775,8 +784,9 @@ table = [
             -- with their table name and `makeExprParser`'s `Postfix` only
             -- applies one postfix per term. They bind tighter than every infix
             -- operator so that e.g. `a::integer + 1` casts `a` and not the sum.
-            [ Postfix (foldl1 (flip (.)) <$> some (typeCastOp <|> dotOp <|> inOp))
+            [ Postfix (foldl1 (flip (.)) <$> some (typeCastOp <|> dotOp <|> try notInOp <|> try betweenOp <|> inOp))
             ],
+            [ operator "->>", operator "->" ],
             [ operator "*", operator "/", operator "%" ],
             [ operator "+", operator "-" ],
             [ binary  "<>"  NotEqExpression
@@ -794,6 +804,8 @@ table = [
             -- Regular expression matching. Longest operator first, otherwise
             -- `~` would match the prefix of `~*` and leave a stray `*`.
             , operator "!~*", operator "!~", operator "~*", operator "~"
+            , operator "?", operator "&&"
+            , keywordOperator "AT TIME ZONE"
             , keywordOperator "NOT LIKE", keywordOperator "NOT ILIKE"
             , keywordOperator "LIKE", keywordOperator "ILIKE"
 
@@ -834,6 +846,19 @@ table = [
             right <- try inArrayExpression <|> expression
             pure $ \expr -> InExpression expr right
 
+        notInOp = do
+            lexeme "NOT"
+            lexeme "IN"
+            right <- try inArrayExpression <|> expression
+            pure $ \expr -> BinaryOperatorExpression "NOT IN" expr right
+
+        betweenOp = do
+            lexeme "BETWEEN"
+            lower <- term
+            lexeme "AND"
+            upper <- term
+            pure $ \expr -> AndExpression (GreaterThanOrEqualToExpression expr lower) (LessThanOrEqualToExpression expr upper)
+
 -- | Parses a SQL expression
 --
 -- This parser makes use of makeExprParser as described in https://hackage.haskell.org/package/parser-combinators-1.2.0/docs/Control-Monad-Combinators-Expr.html
@@ -854,6 +879,14 @@ doubleExpr = DoubleExpression <$> lexeme (Lexer.signed spaceConsumer Lexer.float
 
 intExpr :: Parser Expression
 intExpr = IntExpression <$> lexeme (Lexer.signed spaceConsumer Lexer.decimal)
+
+-- | PostgreSQL's @TYPE 'value'@ literal syntax, normalized to the equivalent
+-- cast that the existing AST already represents.
+typedLiteralExpr :: Parser Expression
+typedLiteralExpr = do
+    literalType <- sqlType
+    value <- textExpr <* space
+    pure (TypeCastExpression value literalType)
 
 callExpr :: Parser Expression
 callExpr = do
@@ -1005,7 +1038,7 @@ createFunction = do
     orReplace <- isJust <$> optional (lexeme "OR" >> lexeme "REPLACE")
     lexeme "FUNCTION"
     functionName <- functionIdentifier
-    functionArguments <- between (char '(') (char ')') (functionArgument `sepBy` (char ',' >> space))
+    functionArguments <- between (char '(' >> space) (space >> char ')') (functionArgument `sepBy` (char ',' >> space))
     space
     lexeme "RETURNS"
     returns <- functionReturnType
@@ -1055,7 +1088,7 @@ functionReturnType = choice
     [ try (lexeme "SETOF" >> (PSetOf <$> sqlType))
     , try do
         lexeme "TABLE"
-        columns <- between (char '(') (char ')') (returnTableColumn `sepBy` (char ',' >> space))
+        columns <- between (char '(' >> space) (space >> char ')') (returnTableColumn `sepBy` (char ',' >> space))
         pure (PReturnTable columns)
     , sqlType
     ]

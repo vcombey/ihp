@@ -124,8 +124,10 @@ compileOnUpdate :: Maybe OnDelete -> Text
 compileOnUpdate Nothing = ""
 compileOnUpdate (Just NoAction) = " ON UPDATE NO ACTION"
 compileOnUpdate (Just Restrict) = " ON UPDATE RESTRICT"
-compileOnUpdate (Just (SetNull columnNames)) = " ON UPDATE SET NULL" <> compileReferentialActionColumns columnNames
-compileOnUpdate (Just (SetDefault columnNames)) = " ON UPDATE SET DEFAULT" <> compileReferentialActionColumns columnNames
+compileOnUpdate (Just SetNull) = " ON UPDATE SET NULL"
+compileOnUpdate (Just (SetNullColumns columnNames)) = " ON UPDATE SET NULL" <> compileReferentialActionColumns columnNames
+compileOnUpdate (Just SetDefault) = " ON UPDATE SET DEFAULT"
+compileOnUpdate (Just (SetDefaultColumns columnNames)) = " ON UPDATE SET DEFAULT" <> compileReferentialActionColumns columnNames
 compileOnUpdate (Just Cascade) = " ON UPDATE CASCADE"
 
 compileReferentialActionColumns :: [Text] -> Text
@@ -136,8 +138,10 @@ compileOnDelete :: Maybe OnDelete -> Text
 compileOnDelete Nothing = ""
 compileOnDelete (Just NoAction) = "ON DELETE NO ACTION"
 compileOnDelete (Just Restrict) = "ON DELETE RESTRICT"
-compileOnDelete (Just (SetNull columnNames)) = "ON DELETE SET NULL" <> compileReferentialActionColumns columnNames
-compileOnDelete (Just (SetDefault columnNames)) = "ON DELETE SET DEFAULT" <> compileReferentialActionColumns columnNames
+compileOnDelete (Just SetNull) = "ON DELETE SET NULL"
+compileOnDelete (Just (SetNullColumns columnNames)) = "ON DELETE SET NULL" <> compileReferentialActionColumns columnNames
+compileOnDelete (Just SetDefault) = "ON DELETE SET DEFAULT"
+compileOnDelete (Just (SetDefaultColumns columnNames)) = "ON DELETE SET DEFAULT" <> compileReferentialActionColumns columnNames
 compileOnDelete (Just Cascade) = "ON DELETE CASCADE"
 
 compileColumn :: PrimaryKeyConstraint -> Column -> Text
@@ -184,7 +188,7 @@ compileExpression (VarExpression name) =
         nameContainsSpaces = Text.any (== ' ') name
 compileExpression (CallExpression func args) = func <> "(" <> intercalate ", " (map compileExpressionWithOptionalParenthese args) <> ")"
 compileExpression (NotEqExpression a b) = compileExpression a <> " <> " <> compileExpression b
-compileExpression (EqExpression a b) = compileExpressionWithOptionalParenthese a <> " = " <> compileExpressionWithOptionalParenthese b
+compileExpression (EqExpression a b) = compileEqualityOperand a <> " = " <> compileEqualityOperand b
 compileExpression (IsExpression a (NotExpression b)) = compileExpressionWithOptionalParenthese a <> " IS NOT " <> compileExpressionWithOptionalParenthese b -- 'IS (NOT NULL)' => 'IS NOT NULL'
 compileExpression (IsExpression a b) = compileExpressionWithOptionalParenthese a <> " IS " <> compileExpressionWithOptionalParenthese b
 compileExpression (InExpression a b) = compileExpressionWithOptionalParenthese a <> " IN " <> compileExpressionWithOptionalParenthese b
@@ -206,6 +210,10 @@ compileExpression (ExistsExpression a) = "EXISTS " <> compileExpressionWithOptio
 compileExpression (DotExpression a b) = compileExpressionWithOptionalParenthese a <> "." <> compileIdentifier b
 compileExpression (ConcatenationExpression a b) = compileExpressionWithOptionalParenthese a <> " || " <> compileExpressionWithOptionalParenthese b
 compileExpression (BinaryOperatorExpression operator a b) = compileExpressionWithOptionalParenthese a <> " " <> operator <> " " <> compileExpressionWithOptionalParenthese b
+
+compileEqualityOperand :: Expression -> Text
+compileEqualityOperand expression@(IsExpression {}) = "(" <> compileExpression expression <> ")"
+compileEqualityOperand expression = compileExpressionWithOptionalParenthese expression
 
 compileExpressionWithOptionalParenthese :: Expression -> Text
 compileExpressionWithOptionalParenthese expr@(VarExpression {}) = compileExpression expr
