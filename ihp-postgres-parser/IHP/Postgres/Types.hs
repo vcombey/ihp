@@ -116,12 +116,13 @@ data Column = Column
 data OnDelete
     = NoAction
     | Restrict
-    -- | @SET NULL@, optionally restricted to some of the foreign key's columns
-    -- as in @ON DELETE SET NULL (tenant_id)@, which PostgreSQL 15 introduced.
-    -- The empty list is the unrestricted form.
-    | SetNull [Text]
-    -- | @SET DEFAULT@, with the same optional column list.
-    | SetDefault [Text]
+    | SetNull
+    -- | @SET NULL@ restricted to some of the foreign key's columns, as in
+    -- @ON DELETE SET NULL (tenant_id)@, which PostgreSQL 15 introduced.
+    | SetNullColumns [Text]
+    | SetDefault
+    -- | @SET DEFAULT@ restricted to some of the foreign key's columns.
+    | SetDefaultColumns [Text]
     | Cascade
     deriving (Show, Eq)
 

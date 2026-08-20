@@ -133,6 +133,19 @@ spec = do
                     , functionSettings = []
                     }
 
+        it "should allow function arguments and return columns to start on a new line" do
+            let sql = "CREATE FUNCTION search_rows(\n    query text\n) RETURNS TABLE(\n    id uuid\n) LANGUAGE sql AS $$SELECT 1;$$;"
+            parseSql sql `shouldBe` CreateFunction
+                    { functionName = "search_rows"
+                    , functionArguments = [("query", PText)]
+                    , functionBody = "SELECT 1;"
+                    , orReplace = False
+                    , returns = PReturnTable [("id", PUUID)]
+                    , language = "sql"
+                    , securityDefiner = False
+                    , functionSettings = []
+                    }
+
         it "should parse a composite FOREIGN KEY with ON UPDATE and ON DELETE" do
             let sql = "ALTER TABLE ONLY items ADD CONSTRAINT items_ref_ticket FOREIGN KEY (ticket_id, organization_id) REFERENCES tickets(id, organization_id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;"
             parseSql sql `shouldBe` AddConstraint
@@ -243,6 +256,12 @@ spec = do
             parseSql "CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT uuid_generate_v4() NOT NULL);" `shouldBe` StatementCreateTable (table "orders")
                     { columns = [ (col "id" PUUID) { defaultValue = Just (CallExpression "uuid_generate_v4" []), notNull = True } ]
                     , primaryKeyConstraint = PrimaryKeyConstraint ["id"]
+                    }
+
+        it "should accept a column collation" do
+            parseSql "CREATE TABLE ranks (position_key TEXT COLLATE \"C\" NOT NULL);" `shouldBe`
+                StatementCreateTable (table "ranks")
+                    { columns = [(col "position_key" PText) { notNull = True }]
                     }
 
         it "should parse a CREATE INDEX statement" do
@@ -625,6 +644,36 @@ spec = do
             parseExpression "code ~ '^[A-Z]{3}$'" `shouldBe`
                 BinaryOperatorExpression "~" (VarExpression "code") (TextExpression "^[A-Z]{3}$")
 
+        it "should parse PostgreSQL JSON operators" do
+            parseExpression "metadata ->> 'kind' = 'invoice'" `shouldBe`
+                EqExpression
+                    (BinaryOperatorExpression "->>" (VarExpression "metadata") (TextExpression "kind"))
+                    (TextExpression "invoice")
+            parseExpression "metadata ? 'kind'" `shouldBe`
+                BinaryOperatorExpression "?" (VarExpression "metadata") (TextExpression "kind")
+
+        it "should parse BETWEEN and NOT IN" do
+            parseExpression "month BETWEEN 1 AND 12" `shouldBe`
+                AndExpression
+                    (GreaterThanOrEqualToExpression (VarExpression "month") (IntExpression 1))
+                    (LessThanOrEqualToExpression (VarExpression "month") (IntExpression 12))
+            parseExpression "kind NOT IN ('draft', 'void')" `shouldBe`
+                BinaryOperatorExpression "NOT IN"
+                    (VarExpression "kind")
+                    (InArrayExpression [TextExpression "draft", TextExpression "void"])
+
+        it "should parse typed PostgreSQL literals" do
+            parseExpression "closed_at - INTERVAL '30 days' > opened_at" `shouldBe`
+                GreaterThanExpression
+                    (BinaryOperatorExpression "-"
+                        (VarExpression "closed_at")
+                        (TypeCastExpression (TextExpression "30 days") (PInterval Nothing)))
+                    (VarExpression "opened_at")
+            parseExpression "TIMESTAMPTZ '2026-08-09 18:00:00+00'" `shouldBe`
+                TypeCastExpression
+                    (TextExpression "2026-08-09 18:00:00+00")
+                    PTimestampWithTimezone
+
         it "should prefer the longest regular expression operator" do
             parseExpression "code !~* 'x'" `shouldBe`
                 BinaryOperatorExpression "!~*" (VarExpression "code") (TextExpression "x")
@@ -653,11 +702,38 @@ spec = do
                             , columnNames = ["a", "b"]
                             , referenceTable = "o"
                             , referenceColumns = ["a", "b"]
-                            , onDelete = Just (SetNull ["b"])
+                            , onDelete = Just (SetNullColumns ["b"])
                             , onUpdate = Nothing
                             }
                         ]
                     }
+
+        it "should parse expression-based EXCLUDE constraints" do
+            parseSql "ALTER TABLE bookings ADD CONSTRAINT bookings_no_overlap EXCLUDE USING gist (room_id WITH =, daterange(starts_on, ends_on) WITH &&);" `shouldBe`
+                AddConstraint
+                    { tableName = "bookings"
+                    , constraint = ExcludeConstraint
+                        { name = Just "bookings_no_overlap"
+                        , excludeElements =
+                            [ ExcludeConstraintElement { element = "room_id", operator = "=" }
+                            , ExcludeConstraintElement { element = "daterange(starts_on, ends_on)", operator = "&&" }
+                            ]
+                        , predicate = Nothing
+                        , indexType = Just Gist
+                        }
+                    , deferrable = Nothing
+                    , deferrableType = Nothing
+                    }
+
+        it "should preserve valid DDL the schema AST does not model" do
+            parseSql "CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw;" `shouldBe`
+                UnknownStatement { raw = "CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw" }
+            parseSql "CREATE INDEX users_email_idx ON users (email) INCLUDE (name);" `shouldBe`
+                UnknownStatement { raw = "CREATE INDEX users_email_idx ON users (email) INCLUDE (name)" }
+            parseSql "ALTER TABLE users ADD CONSTRAINT users_email_check CHECK (email <> '') NOT VALID;" `shouldBe`
+                UnknownStatement { raw = "ALTER TABLE users ADD CONSTRAINT users_email_check CHECK (email <> '') NOT VALID" }
+            parseSql "ALTER TABLE users ADD CONSTRAINT users_a_check CHECK (a > 0), ADD CONSTRAINT users_b_check CHECK (b > 0);" `shouldBe`
+                UnknownStatement { raw = "ALTER TABLE users ADD CONSTRAINT users_a_check CHECK (a > 0), ADD CONSTRAINT users_b_check CHECK (b > 0)" }
 
         it "should ignore a comment inside a statement" do
             parseSql "CREATE TABLE users (\n    id UUID PRIMARY KEY, -- surrogate key\n    email TEXT NOT NULL /* the login */\n);" `shouldBe`
