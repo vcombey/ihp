@@ -379,6 +379,7 @@ suggestPolicy schema (StatementCreateTable CreateTable { name = tableName, colum
     | isJust (find isUserIdColumn columns)  = CreatePolicy
         { name = "Users can manage their " <> tableName
         , action = Nothing
+        , roles = []
         , tableName
         , using = Just compareUserId
         , check = Just compareUserId
@@ -397,6 +398,7 @@ suggestPolicy schema (StatementCreateTable CreateTable { name = tableName, colum
             columnWithFKAndRefTableToPolicy (column, ForeignKeyConstraint { referenceColumn }, CreateTable { name = refTableName, columns = refTableColumns }) | isJust (find isUserIdColumn refTableColumns) = Just CreatePolicy
                     { name = "Users can manage the " <> tableName <> " if they can see the " <> tableNameToModelName refTableName
                     , action = Nothing
+                    , roles = []
                     , tableName
                     , using = Just delegateCheck
                     , check = Just delegateCheck
@@ -600,6 +602,7 @@ deleteColumn DeleteColumnOptions { .. } schema =
                 isRef (IntExpression _) = False
                 isRef (TypeCastExpression a _) = isRef a
                 isRef (SelectExpression _) = False
+                isRef (ScalarSelectExpression a) = isRef a
                 isRef (DotExpression a _) = isRef a
                 isRef (ConcatenationExpression a b) = isRef a || isRef b
         deletePolicyReferencingPolicy otherwise = True
@@ -662,6 +665,7 @@ isIndexStatementReferencingTableColumn statement tableName columnName = isRefere
             IntExpression _ -> False
             TypeCastExpression a _ -> expressionReferencesColumn a
             SelectExpression _ -> False
+            ScalarSelectExpression a -> expressionReferencesColumn a
             DotExpression a _ -> expressionReferencesColumn a
             ConcatenationExpression a b -> expressionReferencesColumn a || expressionReferencesColumn b
 
