@@ -17,7 +17,7 @@ data Statement
     -- | DROP TYPE name;
     | DropEnumType { name :: Text }
     -- | CREATE EXTENSION IF NOT EXISTS "name";
-    | CreateExtension { name :: Text, ifNotExists :: Bool }
+    | CreateExtension { name :: Text, ifNotExists :: Bool, extensionOptions :: [ExtensionOption] }
     -- | ALTER TABLE tableName ADD CONSTRAINT constraint;
     | AddConstraint { tableName :: Text, constraint :: Constraint, deferrable :: Maybe Bool, deferrableType :: Maybe DeferrableType }
     -- | ALTER TABLE tableName DROP CONSTRAINT constraintName;
@@ -36,7 +36,7 @@ data Statement
     -- | DROP INDEX indexName;
     | DropIndex { indexName :: Text }
     -- | CREATE OR REPLACE FUNCTION functionName(param1 TEXT, param2 INT) RETURNS TRIGGER AS $$functionBody$$ language plpgsql;
-    | CreateFunction { functionName :: Text, functionArguments :: [(Text, PostgresType)], functionBody :: Text, orReplace :: Bool, returns :: PostgresType, language :: Text, securityDefiner :: Bool, functionSettings :: [FunctionSetting] }
+    | CreateFunction { functionName :: Text, functionArguments :: [(Text, PostgresType)], functionBody :: Text, orReplace :: Bool, returns :: PostgresType, language :: Text, securityDefiner :: Bool, functionAttributes :: [Text], functionSettings :: [FunctionSetting] }
     -- | ALTER TABLE tableName ENABLE ROW LEVEL SECURITY;
     | EnableRowLevelSecurity { tableName :: Text }
     -- CREATE POLICY name ON tableName USING using WITH CHECK check;
@@ -46,7 +46,7 @@ data Statement
     -- SELECT query;
     | SelectStatement { query :: Text }
     -- CREATE SEQUENCE name;
-    | CreateSequence { name :: Text }
+    | CreateSequence { name :: Text, sequenceOptions :: [SequenceOption] }
     -- ALTER TABLE tableName RENAME COLUMN from TO to;
     | RenameColumn { tableName :: Text, from :: Text, to :: Text }
     -- ALTER TYPE enumName ADD VALUE newValue;
@@ -91,6 +91,24 @@ data FunctionSetting = FunctionSetting
     }
     deriving (Eq, Show)
 
+data SequenceOption
+    = SequenceAs PostgresType
+    | SequenceStart Expression
+    | SequenceIncrement Expression
+    | SequenceNoMinValue
+    | SequenceNoMaxValue
+    | SequenceMinValue Expression
+    | SequenceMaxValue Expression
+    | SequenceCache Expression
+    | SequenceCycle Bool
+    deriving (Eq, Show)
+
+data ExtensionOption
+    = ExtensionSchema Text
+    | ExtensionVersion Text
+    | ExtensionCascade
+    deriving (Eq, Show)
+
 data CreateTable
   = CreateTable
       { name :: Text
@@ -107,6 +125,7 @@ data Column = Column
     , columnType :: PostgresType
     , defaultValue :: Maybe Expression
     , notNull :: Bool
+    , notNullConstraintName :: Maybe Text
     , isUnique :: Bool
     , generator :: Maybe ColumnGenerator
     }
@@ -215,6 +234,8 @@ data Expression =
     | GreaterThanOrEqualToExpression Expression Expression
     -- | Double literal value, e.g. 0.1337
     | DoubleExpression Double
+    -- | Exact SQL decimal literal, retaining significant scale and exponent.
+    | NumericExpression Text
     -- | Integer literal value, e.g. 1337
     | IntExpression Int
     -- | value::type
@@ -252,6 +273,7 @@ data PostgresType
     | PPoint
     | PPolygon
     | PGeometry
+    | PGeometryWithModifier Text
     | PDate
     | PBinary
     | PTime
@@ -332,6 +354,7 @@ col columnName columnType = Column
     , columnType = columnType
     , defaultValue = Nothing
     , notNull = False
+    , notNullConstraintName = Nothing
     , isUnique = False
     , generator = Nothing
     }
@@ -346,6 +369,7 @@ function functionName = CreateFunction
     , returns = PTrigger
     , language = "plpgsql"
     , securityDefiner = False
+    , functionAttributes = []
     , functionSettings = []
     }
 

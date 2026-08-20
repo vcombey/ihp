@@ -27,6 +27,7 @@ addTable tableName uuidFunction list = list <> [StatementCreateTable CreateTable
             , columnType = PUUID
             , defaultValue = Just (CallExpression uuidFunction [])
             , notNull = True
+            , notNullConstraintName = Nothing
             , isUnique = False
             , generator = Nothing
             }]
@@ -205,6 +206,7 @@ newColumn AddColumnOptions { .. } = Column
     , columnType = arrayifytype isArray columnType
     , defaultValue = defaultValue
     , notNull = (not allowNull)
+    , notNullConstraintName = Nothing
     , isUnique = isUnique
     , generator = Nothing
     }
@@ -534,6 +536,7 @@ addUpdatedAtTrigger tableName schema =
                 , returns = PTrigger
                 , language = "plpgsql"
                 , securityDefiner = False
+                , functionAttributes = []
                 , functionSettings = []
                 }
 
@@ -597,6 +600,7 @@ deleteColumn DeleteColumnOptions { .. } schema =
                 isRef (GreaterThanExpression a b) = isRef a || isRef b
                 isRef (GreaterThanOrEqualToExpression a b) = isRef a || isRef b
                 isRef (DoubleExpression _) = False
+                isRef (NumericExpression _) = False
                 isRef (IntExpression _) = False
                 isRef (TypeCastExpression a _) = isRef a
                 isRef (SelectExpression _) = False
@@ -660,6 +664,7 @@ isIndexStatementReferencingTableColumn statement tableName columnName = isRefere
             GreaterThanExpression a b -> expressionReferencesColumn a || expressionReferencesColumn b
             GreaterThanOrEqualToExpression a b -> expressionReferencesColumn a || expressionReferencesColumn b
             DoubleExpression _ -> False
+            NumericExpression _ -> False
             IntExpression _ -> False
             TypeCastExpression a _ -> expressionReferencesColumn a
             SelectExpression _ -> False

@@ -22,36 +22,36 @@ spec = do
             parseSql "CREATE TABLE users ();"  `shouldBe` StatementCreateTable (table "users")
 
         it "should parse an CREATE EXTENSION for the UUID extension" do
-            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True }
+            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True, extensionOptions = [] }
 
         it "should preserve a missing IF NOT EXISTS clause" do
-            parseSql "CREATE EXTENSION \"uuid-ossp\";" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = False }
+            parseSql "CREATE EXTENSION \"uuid-ossp\";" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = False, extensionOptions = [] }
 
         it "should parse an CREATE EXTENSION with schema suffix" do
-            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True }
+            parseSql "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public;" `shouldBe` CreateExtension { name = "uuid-ossp", ifNotExists = True, extensionOptions = [ExtensionSchema "public"] }
 
         describe "parseCreateExtensionMigration" do
             it "accepts one or more extension statements and comments" do
                 parseCreateExtensionMigration "-- Required for earthdistance\nCREATE EXTENSION IF NOT EXISTS cube;\nCREATE EXTENSION IF NOT EXISTS \"earthdistance\" WITH SCHEMA public;"
                     `shouldBe` Right
-                        [ CreateExtension { name = "cube", ifNotExists = True }
-                        , CreateExtension { name = "earthdistance", ifNotExists = True }
+                        [ CreateExtension { name = "cube", ifNotExists = True, extensionOptions = [] }
+                        , CreateExtension { name = "earthdistance", ifNotExists = True, extensionOptions = [ExtensionSchema "public"] }
                         ]
 
             it "is case insensitive" do
                 parseCreateExtensionMigration "create extension if not exists PG_TRGM;"
-                    `shouldBe` Right [CreateExtension { name = "pg_trgm", ifNotExists = True }]
+                    `shouldBe` Right [CreateExtension { name = "pg_trgm", ifNotExists = True, extensionOptions = [] }]
 
             it "accepts PostgreSQL extension options" do
                 parseCreateExtensionMigration "CREATE EXTENSION IF NOT EXISTS PostGIS WITH SCHEMA public VERSION '3.4.2' CASCADE;"
-                    `shouldBe` Right [CreateExtension { name = "postgis", ifNotExists = True }]
+                    `shouldBe` Right [CreateExtension { name = "postgis", ifNotExists = True, extensionOptions = [ExtensionSchema "public", ExtensionVersion "3.4.2", ExtensionCascade] }]
 
                 parseCreateExtensionMigration "CREATE EXTENSION IF NOT EXISTS postgis WITH VERSION stable CASCADE;"
-                    `shouldBe` Right [CreateExtension { name = "postgis", ifNotExists = True }]
+                    `shouldBe` Right [CreateExtension { name = "postgis", ifNotExists = True, extensionOptions = [ExtensionVersion "stable", ExtensionCascade] }]
 
             it "preserves quoted extension names" do
                 parseCreateExtensionMigration "CREATE EXTENSION IF NOT EXISTS \"MixedCase\";"
-                    `shouldBe` Right [CreateExtension { name = "MixedCase", ifNotExists = True }]
+                    `shouldBe` Right [CreateExtension { name = "MixedCase", ifNotExists = True, extensionOptions = [] }]
 
             it "rejects a mixed migration" do
                 parseCreateExtensionMigration "CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE TABLE users ();"
@@ -101,8 +101,8 @@ spec = do
             let sql = "CREATE TABLE context_search_email_binary_signatures (\n                    embedding_provider text CONSTRAINT context_search_email_binary_signatu_embedding_provider_not_null NOT NULL,\n                    embedding_dimensions integer CONSTRAINT context_search_email_binary_signa_embedding_dimensions_not_null NOT NULL,\n                    embedding_model text\n                ); "
             parseSql sql `shouldBe` StatementCreateTable (table "context_search_email_binary_signatures")
                     { columns = [
-                        (col "embedding_provider" PText) { notNull = True }
-                        , (col "embedding_dimensions" PInt) { notNull = True }
+                        (col "embedding_provider" PText) { notNull = True, notNullConstraintName = Just "context_search_email_binary_signatu_embedding_provider_not_null" }
+                        , (col "embedding_dimensions" PInt) { notNull = True, notNullConstraintName = Just "context_search_email_binary_signa_embedding_dimensions_not_null" }
                         , col "embedding_model" PText
                         ]
                     }
@@ -117,6 +117,7 @@ spec = do
                     , returns = PSetOf PUUID
                     , language = "sql"
                     , securityDefiner = False
+                    , functionAttributes = ["STABLE"]
                     , functionSettings = []
                     }
 
@@ -130,6 +131,7 @@ spec = do
                     , returns = PReturnTable [("id", PUUID), ("label", PText)]
                     , language = "sql"
                     , securityDefiner = False
+                    , functionAttributes = ["STABLE"]
                     , functionSettings = []
                     }
 
@@ -143,6 +145,7 @@ spec = do
                     , returns = PReturnTable [("id", PUUID)]
                     , language = "sql"
                     , securityDefiner = False
+                    , functionAttributes = []
                     , functionSettings = []
                     }
 
@@ -244,11 +247,9 @@ spec = do
                     , primaryKeyConstraint = PrimaryKeyConstraint ["id"]
                     }
 
-        it "should accept a column collation" do
+        it "should preserve a table with an unmodelled column collation" do
             parseSql "CREATE TABLE ranks (position_key TEXT COLLATE \"C\" NOT NULL);" `shouldBe`
-                StatementCreateTable (table "ranks")
-                    { columns = [(col "position_key" PText) { notNull = True }]
-                    }
+                UnknownStatement { raw = "CREATE TABLE ranks (position_key TEXT COLLATE \"C\" NOT NULL)" }
 
         it "should parse a CREATE INDEX statement" do
             parseSql "CREATE INDEX users_index ON users (user_name);\n" `shouldBe` CreateIndex
@@ -350,6 +351,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = True
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -368,6 +370,7 @@ spec = do
                     , returns = PUUID
                     , language = "sql"
                     , securityDefiner = True
+                    , functionAttributes = ["STABLE", "PARALLEL SAFE"]
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -386,6 +389,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = False
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "TimeZone"
@@ -404,6 +408,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = True
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -423,6 +428,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = True
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -442,6 +448,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = True
+                    , functionAttributes = []
                     , functionSettings =
                         [ FunctionSetting
                             { settingName = "search_path"
@@ -462,6 +469,7 @@ spec = do
                     , returns = PTrigger
                     , language = "plpgsql"
                     , securityDefiner = False
+                    , functionAttributes = []
                     , functionSettings = []
                     }
 
@@ -559,7 +567,22 @@ spec = do
             parseSql "DROP TYPE colors;" `shouldBe` DropEnumType { name = "colors" }
 
         it "should parse 'CREATE SEQUENCE ..' statements" do
-            parseSql "CREATE SEQUENCE a;" `shouldBe` CreateSequence { name = "a" }
+            parseSql "CREATE SEQUENCE a;" `shouldBe` CreateSequence { name = "a", sequenceOptions = [] }
+
+        it "should parse all pg_dump sequence options as structured data" do
+            parseSql "CREATE SEQUENCE public.a AS bigint START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE CACHE 1 NO CYCLE;"
+                `shouldBe` CreateSequence
+                    { name = "a"
+                    , sequenceOptions =
+                        [ SequenceAs PBigInt
+                        , SequenceStart (IntExpression 1)
+                        , SequenceIncrement (IntExpression 1)
+                        , SequenceNoMinValue
+                        , SequenceNoMaxValue
+                        , SequenceCache (IntExpression 1)
+                        , SequenceCycle False
+                        ]
+                    }
 
         it "should parse 'BEGIN' statements" do
             parseSql "BEGIN;" `shouldBe` Begin
@@ -579,11 +602,11 @@ spec = do
         it "should parse negative IntExpression's" do
             parseExpression "-1" `shouldBe` (IntExpression (-1))
 
-        it "should parse positive DoubleExpression's" do
-            parseExpression "1.337" `shouldBe` (DoubleExpression 1.337)
+        it "should parse positive decimal expressions without losing scale" do
+            parseExpression "1.337" `shouldBe` NumericExpression "1.337"
 
-        it "should parse negative DoubleExpression's" do
-            parseExpression "-1.337" `shouldBe` (DoubleExpression (-1.337))
+        it "should parse negative decimal expressions without losing scale" do
+            parseExpression "-1.337" `shouldBe` NumericExpression "-1.337"
 
         it "should parse an operator behind an integer literal" do
             parseExpression "a > 0 AND b > 0" `shouldBe`
@@ -594,8 +617,8 @@ spec = do
         it "should parse an operator behind a double literal" do
             parseExpression "a > 0.5 AND b > 0.5" `shouldBe`
                 AndExpression
-                    (GreaterThanExpression (VarExpression "a") (DoubleExpression 0.5))
-                    (GreaterThanExpression (VarExpression "b") (DoubleExpression 0.5))
+                    (GreaterThanExpression (VarExpression "a") (NumericExpression "0.5"))
+                    (GreaterThanExpression (VarExpression "b") (NumericExpression "0.5"))
 
         it "should parse arithmetic operators" do
             parseExpression "a + b <= 100" `shouldBe`
@@ -703,6 +726,10 @@ spec = do
                 UnknownStatement { raw = "ALTER TABLE users ADD CONSTRAINT users_email_check CHECK (email <> '') NOT VALID" }
             parseSql "ALTER TABLE users ADD CONSTRAINT users_a_check CHECK (a > 0), ADD CONSTRAINT users_b_check CHECK (b > 0);" `shouldBe`
                 UnknownStatement { raw = "ALTER TABLE users ADD CONSTRAINT users_a_check CHECK (a > 0), ADD CONSTRAINT users_b_check CHECK (b > 0)" }
+
+        it "should keep SQL COMMENT statements distinct from line comments" do
+            parseSql "COMMENT ON TABLE users IS 'Owner''s records';" `shouldBe`
+                UnknownStatement { raw = "COMMENT ON TABLE users IS 'Owner''s records'" }
 
         it "should parse 'GRANT' and 'REVOKE' statements" do
             parseSql "GRANT SELECT ON TABLE users TO ihp_authenticated;" `shouldBe`

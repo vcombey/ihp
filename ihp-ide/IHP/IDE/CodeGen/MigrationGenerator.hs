@@ -462,8 +462,19 @@ normalizeStatement AddConstraint { tableName, constraint, deferrable, deferrable
 normalizeStatement CreateEnumType { name, values } = [ CreateEnumType { name = Text.toLower name, values = map Text.toLower values } ]
 normalizeStatement CreatePolicy { name, action, tableName, using, check } = [ CreatePolicy { name = truncateIdentifier name, tableName, using = (unqualifyExpression tableName . normalizeExpression) <$> using, check = (unqualifyExpression tableName . normalizeExpression) <$> check, action = normalizePolicyAction action } ]
 normalizeStatement CreateIndex { columns, indexType, indexName, .. } = [ CreateIndex { columns = map normalizeIndexColumn columns, indexType = normalizeIndexType indexType, indexName = truncateIdentifier indexName, .. } ]
-normalizeStatement CreateFunction { .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionBody = removeIndentation $ normalizeNewLines functionBody, .. } ]
+normalizeStatement CreateFunction { .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionAttributes = map Text.toUpper functionAttributes, functionBody = removeIndentation $ normalizeNewLines functionBody, .. } ]
+normalizeStatement CreateSequence { .. } = [ CreateSequence { sequenceOptions = filter (not . isDefaultSequenceOption) sequenceOptions, .. } ]
 normalizeStatement otherwise = [otherwise]
+
+isDefaultSequenceOption :: SequenceOption -> Bool
+isDefaultSequenceOption (SequenceAs PBigInt) = True
+isDefaultSequenceOption (SequenceStart (IntExpression 1)) = True
+isDefaultSequenceOption (SequenceIncrement (IntExpression 1)) = True
+isDefaultSequenceOption SequenceNoMinValue = True
+isDefaultSequenceOption SequenceNoMaxValue = True
+isDefaultSequenceOption (SequenceCache (IntExpression 1)) = True
+isDefaultSequenceOption (SequenceCycle False) = True
+isDefaultSequenceOption _ = False
 
 normalizePolicyAction (Just PolicyForAll) = Nothing
 normalizePolicyAction otherwise = otherwise
@@ -542,7 +553,7 @@ normalizeConstraint tableName constraint@(UniqueConstraint { name = Just uniqueN
 normalizeConstraint _ otherwise = otherwise
 
 normalizeColumn :: CreateTable -> Column -> (Column, [Statement])
-normalizeColumn table Column { name, columnType, defaultValue, notNull, isUnique, generator } = (Column { name = normalizeName name, columnType = normalizeSqlType columnType, defaultValue = normalizedDefaultValue, notNull, isUnique = False, generator = normalizeColumnGenerator <$> generator }, uniqueConstraint)
+normalizeColumn table Column { name, columnType, defaultValue, notNull, isUnique, generator } = (Column { name = normalizeName name, columnType = normalizeSqlType columnType, defaultValue = normalizedDefaultValue, notNull, notNullConstraintName = Nothing, isUnique = False, generator = normalizeColumnGenerator <$> generator }, uniqueConstraint)
     where
         uniqueConstraint =
             if isUnique
@@ -577,6 +588,7 @@ normalizeExpression (LessThanOrEqualToExpression a b) = LessThanOrEqualToExpress
 normalizeExpression (GreaterThanExpression a b) = GreaterThanExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression (GreaterThanOrEqualToExpression a b) = GreaterThanOrEqualToExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression e@(DoubleExpression {}) = e
+normalizeExpression e@(NumericExpression {}) = e
 normalizeExpression e@(IntExpression {}) = e
 normalizeExpression (ConcatenationExpression a b) = ConcatenationExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression (BinaryOperatorExpression operator a b) = BinaryOperatorExpression operator (normalizeExpression a) (normalizeExpression b)
@@ -626,6 +638,7 @@ unqualifyExpression scope expression = doUnqualify expression
         doUnqualify (GreaterThanExpression a b) = GreaterThanExpression (doUnqualify a) (doUnqualify b)
         doUnqualify (GreaterThanOrEqualToExpression a b) = GreaterThanOrEqualToExpression (doUnqualify a) (doUnqualify b)
         doUnqualify e@(DoubleExpression {}) = e
+        doUnqualify e@(NumericExpression {}) = e
         doUnqualify e@(IntExpression {}) = e
         doUnqualify (ConcatenationExpression a b) = ConcatenationExpression (doUnqualify a) (doUnqualify b)
         doUnqualify (BinaryOperatorExpression operator a b) = BinaryOperatorExpression operator (doUnqualify a) (doUnqualify b)
@@ -667,6 +680,7 @@ resolveAlias (Just alias) fromExpression expression =
         e@(GreaterThanExpression a b) -> GreaterThanExpression (rec a) (rec b)
         e@(GreaterThanOrEqualToExpression a b) -> GreaterThanOrEqualToExpression (rec a) (rec b)
         e@(DoubleExpression {}) -> e
+        e@(NumericExpression {}) -> e
         e@(IntExpression {}) -> e
         e@(TypeCastExpression a b) -> (TypeCastExpression (rec a) b)
         e@(SelectExpression Select { columns, from, whereClause, alias }) -> SelectExpression Select { columns = rec <$> columns, from = rec from, whereClause = rec whereClause, alias = alias }
