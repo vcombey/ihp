@@ -249,6 +249,7 @@ diffSchemas targetSchema' actualSchema' = (drop <> create)
         toDropStatement CreateFunction { functionName } = Just DropFunction { functionName }
         toDropStatement CreateTrigger { name, tableName } = Just DropTrigger { name, tableName }
         toDropStatement CreateEventTrigger { name } = Just DropEventTrigger { name }
+        toDropStatement CreateConstraintTrigger { name, tableName } = Just DropTrigger { name, tableName }
         toDropStatement otherwise = Nothing
 
 
@@ -266,6 +267,8 @@ diffSchemas targetSchema' actualSchema' = (drop <> create)
 
 removeNoise = filter \case
         Comment {} -> False
+        Set {} -> False
+        SelectStatement {} -> False
         StatementCreateTable { unsafeGetCreateTable = CreateTable { name = "schema_migrations" } }      -> False
         AddConstraint { tableName = "schema_migrations" }                                               -> False
         CreateFunction { functionName } | "notify_" `Text.isPrefixOf` functionName                      -> False
@@ -450,9 +453,31 @@ parseDumpedSql sql =
         Right r -> Right r
 
 normalizeSchema :: [Statement] -> [Statement]
-normalizeSchema statements = map normalizeStatement statements
+normalizeSchema statements = map normalizeStatement (foldAddColumns statements)
         |> concat
         |> normalizePrimaryKeys
+
+-- | Folds @ALTER TABLE x ADD COLUMN y@ into the @CREATE TABLE x@ statement.
+--
+-- A Schema.sql can declare a column through a separate ALTER TABLE, while pg_dump
+-- always prints the complete CREATE TABLE. Without folding, such a column shows up
+-- as a spurious DROP COLUMN plus ADD COLUMN pair in every generated migration.
+foldAddColumns :: [Statement] -> [Statement]
+foldAddColumns statements = mapMaybe fold statements
+    where
+        addedColumns :: [(Text, Column)]
+        addedColumns = statements |> mapMaybe \case
+            AddColumn { tableName, column } -> Just (tableName, column)
+            _ -> Nothing
+
+        fold :: Statement -> Maybe Statement
+        fold AddColumn { tableName } | not (null (columnsFor tableName)) = Nothing
+        fold (StatementCreateTable { unsafeGetCreateTable = table@(CreateTable { name, columns }) }) | not (null (columnsFor name)) =
+            Just (StatementCreateTable { unsafeGetCreateTable = table { columns = columns <> columnsFor name } })
+        fold statement = Just statement
+
+        columnsFor :: Text -> [Column]
+        columnsFor tableName = [column | (table, column) <- addedColumns, table == tableName]
 
 normalizeStatement :: Statement -> [Statement]
 normalizeStatement StatementCreateTable { unsafeGetCreateTable = table } = StatementCreateTable { unsafeGetCreateTable = normalizedTable } : normalizeTableRest
@@ -460,10 +485,21 @@ normalizeStatement StatementCreateTable { unsafeGetCreateTable = table } = State
         (normalizedTable, normalizeTableRest) = normalizeTable table
 normalizeStatement AddConstraint { tableName, constraint, deferrable, deferrableType } = [ AddConstraint { tableName, constraint = normalizeConstraint tableName constraint, deferrable, deferrableType } ]
 normalizeStatement CreateEnumType { name, values } = [ CreateEnumType { name = Text.toLower name, values = map Text.toLower values } ]
-normalizeStatement CreatePolicy { name, action, tableName, using, check } = [ CreatePolicy { name = truncateIdentifier name, tableName, using = (unqualifyExpression tableName . normalizeExpression) <$> using, check = (unqualifyExpression tableName . normalizeExpression) <$> check, action = normalizePolicyAction action } ]
-normalizeStatement CreateIndex { columns, indexType, indexName, .. } = [ CreateIndex { columns = map normalizeIndexColumn columns, indexType = normalizeIndexType indexType, indexName = truncateIdentifier indexName, .. } ]
-normalizeStatement CreateFunction { .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionBody = removeIndentation $ normalizeNewLines functionBody, .. } ]
+normalizeStatement CreatePolicy { name, action, tableName, roles, using, check } = [ CreatePolicy { name = truncateIdentifier name, tableName, roles = sort (map Text.toLower roles), using = (unqualifyExpression tableName . normalizeExpression) <$> using, check = (unqualifyExpression tableName . normalizeExpression) <$> check, action = normalizePolicyAction action } ]
+normalizeStatement CreateIndex { columns, indexType, indexName, whereClause, tableName, .. } = [ CreateIndex { columns = map normalizeIndexColumn columns, indexType = normalizeIndexType indexType, indexName = truncateIdentifier indexName, whereClause = (unqualifyExpression tableName . normalizeExpression) <$> whereClause, tableName, .. } ]
+normalizeStatement CreateFunction { functionSettings, .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionBody = removeIndentation $ normalizeNewLines functionBody, functionSettings = map normalizeFunctionSetting functionSettings, .. } ]
+    where
+        -- pg_dump prints @SET search_path TO 'public', 'pg_temp'@ where Schema.sql
+        -- writes @SET search_path = public, pg_temp@. Compare them without quotes.
+        normalizeFunctionSetting FunctionSetting { settingName, settingValue } =
+            FunctionSetting { settingName, settingValue = settingValue |> Text.splitOn "," |> map (Text.dropAround (== '\'') . Text.strip) |> Text.intercalate ", " }
+normalizeStatement CreateTrigger { event, .. } = [ CreateTrigger { event = normalizeTriggerEvents event, .. } ]
+normalizeStatement CreateConstraintTrigger { event, .. } = [ CreateConstraintTrigger { event = normalizeTriggerEvents event, .. } ]
 normalizeStatement otherwise = [otherwise]
+
+-- | @INSERT OR UPDATE OR DELETE@ and @INSERT OR DELETE OR UPDATE@ are the same trigger.
+normalizeTriggerEvents :: [TriggerEvent] -> [TriggerEvent]
+normalizeTriggerEvents events = sortOn tshow events
 
 normalizePolicyAction (Just PolicyForAll) = Nothing
 normalizePolicyAction otherwise = otherwise
@@ -493,7 +529,7 @@ normalizeTable table@(CreateTable { .. }) = ( CreateTable { columns = fst normal
         normalizedCheckConstraints :: [Either Statement Constraint]
         normalizedCheckConstraints = constraints
                 |> map \case
-                    checkConstraint@(CheckConstraint {}) -> Left AddConstraint { tableName = name, constraint = checkConstraint, deferrable = Nothing, deferrableType = Nothing }
+                    checkConstraint@(CheckConstraint {}) -> Left AddConstraint { tableName = name, constraint = normalizeConstraint name checkConstraint, deferrable = Nothing, deferrableType = Nothing }
                     otherConstraint -> Right otherConstraint
 
         normalizedTableConstraints :: [Constraint]
@@ -539,6 +575,7 @@ normalizeConstraint tableName constraint@(UniqueConstraint { name = Just uniqueN
             if uniqueName == defaultName
                 then constraint { name = Nothing }
                 else constraint
+normalizeConstraint tableName CheckConstraint { name, checkExpression } = CheckConstraint { name, checkExpression = unqualifyExpression tableName (normalizeExpression checkExpression) }
 normalizeConstraint _ otherwise = otherwise
 
 normalizeColumn :: CreateTable -> Column -> (Column, [Statement])
@@ -566,6 +603,7 @@ normalizeExpression e@(TextExpression {}) = e
 normalizeExpression (VarExpression var) = VarExpression (Text.toLower var)
 normalizeExpression (CallExpression function args) = CallExpression (Text.toLower function) (map normalizeExpression args)
 normalizeExpression (NotEqExpression a b) = NotEqExpression (normalizeExpression a) (normalizeExpression b)
+normalizeExpression (EqExpression a (CallExpression fn [ArrayLiteralExpression items])) | Text.toLower fn == "any" = InExpression (normalizeExpression a) (InArrayExpression (map normalizeExpression items))
 normalizeExpression (EqExpression a b) = EqExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression (AndExpression a b) = AndExpression (normalizeExpression a) (normalizeExpression b)
 normalizeExpression (IsExpression a b) = IsExpression (normalizeExpression a) (normalizeExpression b)
@@ -585,6 +623,7 @@ normalizeExpression (ConcatenationExpression a b) = ConcatenationExpression (nor
 -- 'job_status_not_started'::public.job_status => 'job_status_not_started'
 --
 normalizeExpression (TypeCastExpression a b) = normalizeExpression a
+normalizeExpression (ScalarSelectExpression scalar) = ScalarSelectExpression (normalizeExpression scalar)
 normalizeExpression (SelectExpression Select { columns, from, whereClause, alias }) = SelectExpression Select { columns = resolveAlias' <$> (normalizeExpression <$> columns), from = normalizeFrom from, whereClause = resolveAlias' (normalizeExpression whereClause), alias = Nothing }
     where
         -- Turns a `SELECT 1 FROM a` into `SELECT 1 FROM public.a`
@@ -628,6 +667,7 @@ unqualifyExpression scope expression = doUnqualify expression
         doUnqualify e@(IntExpression {}) = e
         doUnqualify (ConcatenationExpression a b) = ConcatenationExpression (doUnqualify a) (doUnqualify b)
         doUnqualify (TypeCastExpression a b) = TypeCastExpression (doUnqualify a) b
+        doUnqualify (ScalarSelectExpression scalar) = ScalarSelectExpression (doUnqualify scalar)
         doUnqualify e@(SelectExpression Select { columns, from, whereClause, alias }) =
             let recurse = case from of
                     VarExpression fromName -> doUnqualify . unqualifyExpression fromName
@@ -668,6 +708,7 @@ resolveAlias (Just alias) fromExpression expression =
         e@(IntExpression {}) -> e
         e@(TypeCastExpression a b) -> (TypeCastExpression (rec a) b)
         e@(SelectExpression Select { columns, from, whereClause, alias }) -> SelectExpression Select { columns = rec <$> columns, from = rec from, whereClause = rec whereClause, alias = alias }
+        (ScalarSelectExpression scalar) -> ScalarSelectExpression (rec scalar)
         e@(DotExpression a b) -> DotExpression (rec a) b
         e@(ExistsExpression a) -> ExistsExpression (rec a)
         e@(ConcatenationExpression a b) -> ConcatenationExpression (rec a) (rec b)

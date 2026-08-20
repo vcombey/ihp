@@ -177,6 +177,20 @@ spec = do
                     , arguments = []
                     }
 
+        it "should parse a CREATE POLICY with a TO role list" do
+            let sql = "CREATE POLICY org_access ON tickets FOR ALL TO ihp_authenticated USING (organization_id = ANY((SELECT elron_rls_user_organization_ids())::UUID[]));"
+            parseSql sql `shouldBe` CreatePolicy
+                    { name = "org_access"
+                    , tableName = "tickets"
+                    , action = Just PolicyForAll
+                    , roles = ["ihp_authenticated"]
+                    , using = Just (EqExpression (VarExpression "organization_id") (CallExpression "ANY" [TypeCastExpression (ScalarSelectExpression (CallExpression "elron_rls_user_organization_ids" [])) (PArray PUUID)]))
+                    , check = Nothing
+                    }
+
+        it "should parse ALTER TABLE .. FORCE ROW LEVEL SECURITY" do
+            parseSql "ALTER TABLE tickets FORCE ROW LEVEL SECURITY;" `shouldBe` ForceRowLevelSecurity { tableName = "tickets" }
+
         it "should parse a CREATE TABLE with quoted identifiers" do
             parseSql "CREATE TABLE \"quoted name\" ();" `shouldBe` StatementCreateTable (table "quoted name")
 

@@ -807,7 +807,14 @@ selectExpr :: Parser Expression
 selectExpr = do
     symbol' "SELECT"
     columns <- expression `sepBy` (char ',' >> space)
-    symbol' "FROM"
+    fromKeyword <- optional (symbol' "FROM")
+    case (fromKeyword, columns) of
+        (Nothing, [scalar]) -> pure (ScalarSelectExpression scalar)
+        (Nothing, _) -> fail "SELECT without FROM must select exactly one expression"
+        (Just _, _) -> selectExprWithFrom columns
+
+selectExprWithFrom :: [Expression] -> Parser Expression
+selectExprWithFrom columns = do
     from <- expression
 
 
@@ -1250,7 +1257,7 @@ forceRowLevelSecurity tableName = do
     lexeme "LEVEL"
     lexeme "SECURITY"
     char ';'
-    pure UnknownStatement { raw = Text.stripEnd ("ALTER TABLE " <> tableName <> " FORCE ROW LEVEL SECURITY") }
+    pure ForceRowLevelSecurity { tableName }
 
 createPolicy = do
     lexeme "CREATE"
@@ -1260,6 +1267,10 @@ createPolicy = do
     tableName <- qualifiedIdentifier
 
     action <- optional (lexeme "FOR" >> policyAction)
+
+    roles <- optional do
+        lexeme "TO"
+        qualifiedIdentifier `sepBy1` (char ',' >> space)
 
     using <- optional do
         lexeme "USING"
@@ -1272,7 +1283,7 @@ createPolicy = do
 
     char ';'
 
-    pure CreatePolicy { name, action, tableName, using, check }
+    pure CreatePolicy { name, action, tableName, roles = fromMaybe [] roles, using, check }
 
 policyAction =
     (lexeme "ALL" >> pure PolicyForAll)

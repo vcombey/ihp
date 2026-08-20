@@ -34,5 +34,8 @@ usage = putStrLn "Usage: new-migration [DESCRIPTION]"
 
 ensureIsInAppDirectory :: IO ()
 ensureIsInAppDirectory = do
+    -- Multi-executable projects have no root Main.hs, but every IHP project has a
+    -- Schema.sql: that is the file this generator actually works with.
     mainHsExists <- Directory.doesFileExist "Main.hs"
-    unless mainHsExists (fail "You have to be in a project directory to run the generator")
+    schemaExists <- Directory.doesFileExist "Application/Schema.sql"
+    unless (mainHsExists || schemaExists) (fail "You have to be in a project directory to run the generator")

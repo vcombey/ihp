@@ -294,7 +294,7 @@ updatePolicy UpdatePolicyOptions { .. } statements =
         statements
         |> map updatePolicy'
     where
-        updatePolicy' policy@CreatePolicy { name = pName, action, tableName = pTable } | pName == currentName && pTable == tableName = CreatePolicy { tableName, action, name, using, check }
+        updatePolicy' policy@CreatePolicy { name = pName, action, tableName = pTable } | pName == currentName && pTable == tableName = CreatePolicy { tableName, action, roles = policy.roles, name, using, check }
         updatePolicy' otherwise                                                                                              = otherwise
 
 data AddPolicyOptions = AddPolicyOptions
@@ -307,7 +307,7 @@ data AddPolicyOptions = AddPolicyOptions
 addPolicy :: AddPolicyOptions -> Schema -> Schema
 addPolicy AddPolicyOptions { .. } statements = statements <> createPolicyStatement
     where
-        createPolicyStatement = [ CreatePolicy { tableName, action = Nothing, name, using, check } ]
+        createPolicyStatement = [ CreatePolicy { tableName, action = Nothing, roles = [], name, using, check } ]
 
 data DeletePolicyOptions = DeletePolicyOptions
     { tableName :: !Text
@@ -451,7 +451,7 @@ suggestPolicy schema (StatementCreateTable CreateTable { name = tableName, colum
                         _ -> error "resolveFK: expected StatementCreateTable"
             resolveFK _ = Nothing
 
-            emptyPolicy = CreatePolicy { name = "", action = Nothing, tableName, using = Nothing, check = Nothing }
+            emptyPolicy = CreatePolicy { name = "", action = Nothing, roles = [], tableName, using = Nothing, check = Nothing }
 suggestPolicy _ _ = error "suggestPolicy: expected StatementCreateTable"
 
 isUserIdColumn :: Column -> Bool
