@@ -252,7 +252,7 @@ statement = do
     let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createSequence <|> unknownStatement "CREATE"
     let alter = do
             lexeme "ALTER"
-            alterTable <|> alterType <|> alterSequence
+            alterTable <|> alterType
     s <- setStatement <|> create <|> try alter <|> unknownStatement "ALTER" <|> selectStatement <|> unknownStatement "GRANT" <|> unknownStatement "REVOKE" <|> unknownStatement "DO" <|> unknownStatement "COMMENT" <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
     Char.space
     pure s
