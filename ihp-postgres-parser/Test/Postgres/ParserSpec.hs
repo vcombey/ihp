@@ -165,6 +165,21 @@ spec = do
                     , deferrableType = Just InitiallyDeferred
                     }
 
+        it "should preserve a non-public schema on a foreign-key target" do
+            let sql = "ALTER TABLE jobs ADD CONSTRAINT jobs_ref_source FOREIGN KEY (source_id) REFERENCES private.sources(id) ON DELETE CASCADE;"
+            parseSql sql `shouldBe` AddConstraint
+                    { tableName = "jobs"
+                    , constraint = ForeignKeyConstraint
+                        { name = Just "jobs_ref_source"
+                        , columnName = "source_id"
+                        , referenceTable = "private.sources"
+                        , referenceColumn = Just "id"
+                        , onDelete = Just Cascade
+                        }
+                    , deferrable = Nothing
+                    , deferrableType = Nothing
+                    }
+
         it "should parse a CREATE CONSTRAINT TRIGGER" do
             let sql = "CREATE CONSTRAINT TRIGGER entry_lines_balance AFTER INSERT OR DELETE OR UPDATE ON entry_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION entry_is_balanced();"
             parseSql sql `shouldBe` CreateConstraintTrigger

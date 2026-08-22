@@ -64,6 +64,21 @@ spec = do
                     }
             compileSql [statement] `shouldBe` "ALTER TABLE users ADD CONSTRAINT users_ref_company_id FOREIGN KEY (company_id) REFERENCES companies (id) ON DELETE CASCADE;\n"
 
+        it "should compile a schema-qualified foreign-key target without quoting the dot" do
+            let statement = AddConstraint
+                    { tableName = "jobs"
+                    , constraint = ForeignKeyConstraint
+                        { name = Just "jobs_ref_source"
+                        , columnName = "source_id"
+                        , referenceTable = "private.sources"
+                        , referenceColumn = Just "id"
+                        , onDelete = Just Cascade
+                        }
+                    , deferrable = Nothing
+                    , deferrableType = Nothing
+                    }
+            compileSql [statement] `shouldBe` "ALTER TABLE jobs ADD CONSTRAINT jobs_ref_source FOREIGN KEY (source_id) REFERENCES private.sources (id) ON DELETE CASCADE;\n"
+
         it "should compile ALTER TABLE .. ADD CONSTRAINT .. CHECK .." do
             let statement = AddConstraint
                     { tableName = "posts"

@@ -91,8 +91,8 @@ compileTableConstraint constraint =
     maybe "" (\name -> "CONSTRAINT " <> compileIdentifier name <> " ") constraint.name <> compileConstraint constraint
 
 compileConstraint :: Constraint -> Text
-compileConstraint ForeignKeyConstraint { columnName, referenceTable, referenceColumn, onDelete } = "FOREIGN KEY (" <> compileIdentifier columnName <> ") REFERENCES " <> compileIdentifier referenceTable <> (if isJust referenceColumn then " (" <> fromJust referenceColumn <> ")" else "") <> " " <> compileOnDelete onDelete
-compileConstraint CompositeForeignKeyConstraint { columnNames, referenceTable, referenceColumns, onDelete, onUpdate } = "FOREIGN KEY (" <> intercalate ", " (map compileIdentifier columnNames) <> ") REFERENCES " <> compileIdentifier referenceTable <> (if null referenceColumns then "" else " (" <> intercalate ", " (map compileIdentifier referenceColumns) <> ")") <> compileOnUpdate onUpdate <> " " <> compileOnDelete onDelete
+compileConstraint ForeignKeyConstraint { columnName, referenceTable, referenceColumn, onDelete } = "FOREIGN KEY (" <> compileIdentifier columnName <> ") REFERENCES " <> compileQualifiedIdentifier referenceTable <> (if isJust referenceColumn then " (" <> fromJust referenceColumn <> ")" else "") <> " " <> compileOnDelete onDelete
+compileConstraint CompositeForeignKeyConstraint { columnNames, referenceTable, referenceColumns, onDelete, onUpdate } = "FOREIGN KEY (" <> intercalate ", " (map compileIdentifier columnNames) <> ") REFERENCES " <> compileQualifiedIdentifier referenceTable <> (if null referenceColumns then "" else " (" <> intercalate ", " (map compileIdentifier referenceColumns) <> ")") <> compileOnUpdate onUpdate <> " " <> compileOnDelete onDelete
 compileConstraint UniqueConstraint { columnNames } = "UNIQUE(" <> intercalate ", " columnNames <> ")"
 compileConstraint CheckConstraint { checkExpression } = "CHECK (" <> compileExpression checkExpression <> ")"
 -- | Not 'compilePrimaryKeyConstraint': that one answers "does this table need a
@@ -291,6 +291,9 @@ compilePostgresType (PReturnTable columns) = "TABLE(" <> intercalate ", " (map c
     where
         compileReturnTableColumn (columnName, columnType) = compileIdentifier columnName <> " " <> compilePostgresType columnType
 compilePostgresType (PCustomType theType) = theType
+
+compileQualifiedIdentifier :: Text -> Text
+compileQualifiedIdentifier = Text.intercalate "." . map compileIdentifier . Text.splitOn "."
 
 compileIdentifier :: Text -> Text
 compileIdentifier identifier = if identifierNeedsQuoting then tshow identifier else identifier

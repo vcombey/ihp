@@ -413,7 +413,7 @@ parseForeignKeyConstraint name = do
     lexeme "KEY"
     columnNames <- between (char '(' >> space) (char ')' >> space) (identifier `sepBy1` (char ',' >> space))
     lexeme "REFERENCES"
-    referenceTable <- qualifiedIdentifier
+    referenceTable <- referenceTableIdentifier
     referenceColumns <- optional $ between (char '(' >> space) (char ')' >> space) (identifier `sepBy1` (char ',' >> space))
     -- pg_dump prints ON UPDATE before ON DELETE, hand written SQL does the opposite.
     referentialActions <- many $ try do
@@ -1412,6 +1412,20 @@ selectStatement = do
 qualifiedIdentifier = do
     optional (try (lexeme "public" >> char '.' >> space))
     identifier
+
+-- | Preserve a non-public schema on a foreign-key target while still
+-- normalizing the default @public@ schema.  The schema compiler needs the
+-- unqualified model name, while the SQL compiler must be able to emit the
+-- original qualified reference again.
+referenceTableIdentifier :: Parser Text
+referenceTableIdentifier = do
+    schemaOrName <- identifier
+    maybeName <- optional (char '.' >> space >> identifier)
+    pure $ case maybeName of
+        Nothing -> schemaOrName
+        Just name
+            | schemaOrName == "public" -> name
+            | otherwise -> schemaOrName <> "." <> name
 
 -- | Parses a (possibly schema-qualified) function name.
 --
