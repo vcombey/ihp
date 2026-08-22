@@ -642,7 +642,7 @@ findTableByName tableName =
         |> headMay
 
 unqualifiedTableName :: Text -> Text
-unqualifiedTableName = last . Text.splitOn "."
+unqualifiedTableName = Text.takeWhileEnd (/= '.')
 
 -- | Returns @True@ when a FK constraint references the primary key of the target table.
 -- FK constraints pointing at non-PK columns (e.g., REFERENCES users(email)) return @False@.
