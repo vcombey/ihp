@@ -125,7 +125,7 @@ recordType schema (StatementCreateTable table@(CreateTable { name, columns })) =
                 , type_ = NonNullType (ListType (NonNullType (NamedType (tableNameToModelName fkTable))))
                 }
         foreignKeyToHasManyField _ = Nothing
-        unqualifiedTableName = last . Text.splitOn "."
+        unqualifiedTableName = Text.takeWhileEnd (/= '.')
 recordType _ _ = Nothing
 
 newRecordTypes :: [Statement] -> [Definition]
