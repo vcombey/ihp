@@ -243,7 +243,7 @@ haskellType table@CreateTable { name = tableName, primaryKeyConstraint } column@
             actualType =
                 case findForeignKeyConstraint table column of
                     Just fk@(ForeignKeyConstraint { referenceTable, referenceColumn })
-                        | isForeignKeyReferencingPK fk -> "(" <> primaryKeyTypeName referenceTable <> ")"
+                        | isForeignKeyReferencingPK fk -> "(" <> primaryKeyTypeName (unqualifiedTableName referenceTable) <> ")"
                         | otherwise ->
                             -- FK references a non-PK column; use the referenced column's actual type
                             case referenceColumn >>= \refCol -> findTableByName referenceTable >>= \t -> find (\c -> c.name == refCol) t.columns of
@@ -820,7 +820,7 @@ columnsReferencingTable theTableName =
         statements
         |> mapMaybe \case
             AddConstraint { tableName, constraint = fk@ForeignKeyConstraint { columnName, referenceTable, referenceColumn } }
-                | referenceTable == theTableName && isForeignKeyReferencingPK fk && not (tableName `member` noCodegenTables)
+                | unqualifiedTableName referenceTable == theTableName && isForeignKeyReferencingPK fk && not (tableName `member` noCodegenTables)
                 -> Just (tableName, columnName, referenceColumn)
             _ -> Nothing
 
@@ -862,9 +862,12 @@ findTableByName tableName =
     let (Schema statements) = ?schema
     in statements
         |> mapMaybe (\case
-            StatementCreateTable table@CreateTable { name } | name == tableName -> Just table
+            StatementCreateTable table@CreateTable { name } | name == unqualifiedTableName tableName -> Just table
             _ -> Nothing)
         |> headMay
+
+unqualifiedTableName :: Text -> Text
+unqualifiedTableName = last . Text.splitOn "."
 
 -- | Returns @True@ when a FK constraint references the primary key of the target table.
 -- FK constraints pointing at non-PK columns (e.g., REFERENCES users(email)) return @False@.

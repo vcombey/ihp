@@ -4,6 +4,7 @@ import IHP.Prelude hiding (Type)
 import IHP.GraphQL.Types
 
 import IHP.Postgres.Types
+import qualified Data.Text as Text
 
 
 type SqlSchema = [Statement]
@@ -116,7 +117,7 @@ recordType schema (StatementCreateTable table@(CreateTable { name, columns })) =
             schema
             |> mapMaybe foreignKeyToHasManyField
 
-        foreignKeyToHasManyField (AddConstraint { tableName = fkTable, constraint = ForeignKeyConstraint { columnName = localColumn, referenceTable }}) | referenceTable == name = 
+        foreignKeyToHasManyField (AddConstraint { tableName = fkTable, constraint = ForeignKeyConstraint { columnName = localColumn, referenceTable }}) | unqualifiedTableName referenceTable == name =
             Just FieldDefinition
                 { description = Nothing
                 , name = lcfirst (tableNameToControllerName fkTable)
@@ -124,6 +125,7 @@ recordType schema (StatementCreateTable table@(CreateTable { name, columns })) =
                 , type_ = NonNullType (ListType (NonNullType (NamedType (tableNameToModelName fkTable))))
                 }
         foreignKeyToHasManyField _ = Nothing
+        unqualifiedTableName = last . Text.splitOn "."
 recordType _ _ = Nothing
 
 newRecordTypes :: [Statement] -> [Definition]
