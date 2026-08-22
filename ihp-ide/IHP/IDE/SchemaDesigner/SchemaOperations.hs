@@ -609,6 +609,7 @@ deleteColumn DeleteColumnOptions { .. } schema =
                 isRef (ScalarSelectExpression a) = isRef a
                 isRef (DotExpression a _) = isRef a
                 isRef (ConcatenationExpression a b) = isRef a || isRef b
+                isRef (BinaryOperatorExpression _ a b) = isRef a || isRef b
         deletePolicyReferencingPolicy otherwise = True
 
 -- | Returns True if a CreateIndex statement references a specific column
@@ -673,6 +674,7 @@ isIndexStatementReferencingTableColumn statement tableName columnName = isRefere
             ScalarSelectExpression a -> expressionReferencesColumn a
             DotExpression a _ -> expressionReferencesColumn a
             ConcatenationExpression a b -> expressionReferencesColumn a || expressionReferencesColumn b
+            BinaryOperatorExpression _ a b -> expressionReferencesColumn a || expressionReferencesColumn b
 
 doesHaveExistingPolicies :: [Statement] -> Text -> Bool
 doesHaveExistingPolicies statements tableName = statements
