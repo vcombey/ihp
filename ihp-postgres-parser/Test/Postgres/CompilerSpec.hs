@@ -304,6 +304,10 @@ spec = do
             let statements = [EnableRowLevelSecurity { tableName = "tasks" }]
             compileSql statements `shouldBe` sql
 
+        it "should compile 'FORCE ROW LEVEL SECURITY' statements" do
+            compileSql [ForceRowLevelSecurity { tableName = "tasks" }]
+                `shouldBe` "ALTER TABLE tasks FORCE ROW LEVEL SECURITY;\n"
+
         it "should compile 'CREATE POLICY' statements" do
             let sql = "CREATE POLICY \"Users can manage their tasks\" ON tasks USING (user_id = ihp_user_id()) WITH CHECK (user_id = ihp_user_id());\n"
             let p = (policy "Users can manage their tasks" "tasks")
@@ -319,6 +323,28 @@ spec = do
                         )
                     }
             compileSql [p] `shouldBe` sql
+
+        it "should compile policy roles and scalar subqueries" do
+            let p = (policy "org_access" "tickets")
+                    { action = Just PolicyForAll
+                    , roles = ["ihp_authenticated"]
+                    , using = Just (EqExpression (VarExpression "organization_id") (CallExpression "ANY" [TypeCastExpression (ScalarSelectExpression (CallExpression "user_organization_ids" [])) (PArray PUUID)]))
+                    }
+            compileSql [p] `shouldBe` "CREATE POLICY org_access ON tickets FOR ALL TO ihp_authenticated USING (organization_id = ANY((SELECT user_organization_ids())::UUID[]));\n"
+
+        it "should compile the PUBLIC policy role as a keyword" do
+            compileSql [(policy "public_read" "tickets") { roles = ["PUBLIC"] }]
+                `shouldBe` "CREATE POLICY public_read ON tickets TO PUBLIC;\n"
+
+        it "should preserve SELECT aliases inside policies" do
+            let select = SelectExpression Select
+                    { columns = [DotExpression (VarExpression "member") "organization_id"]
+                    , from = VarExpression "organization_memberships"
+                    , alias = Just "member"
+                    , whereClause = EqExpression (DotExpression (VarExpression "member") "user_id") (CallExpression "ihp_user_id" [])
+                    }
+            compileSql [(policy "member_access" "tickets") { using = Just (ExistsExpression select) }]
+                `shouldBe` "CREATE POLICY member_access ON tickets USING (EXISTS (SELECT member.organization_id FROM organization_memberships AS member WHERE member.user_id = ihp_user_id()));\n"
 
         it "should compile 'DROP TABLE ..' statements" do
             let sql = "DROP TABLE tasks;\n"

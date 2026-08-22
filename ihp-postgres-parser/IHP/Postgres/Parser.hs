@@ -899,10 +899,15 @@ selectExpr :: Parser Expression
 selectExpr = do
     symbol' "SELECT"
     columns <- expression `sepBy` (char ',' >> space)
-    symbol' "FROM"
+    fromKeyword <- optional (symbol' "FROM")
+    case (fromKeyword, columns) of
+        (Nothing, [scalar]) -> pure (ScalarSelectExpression scalar)
+        (Nothing, _) -> fail "SELECT without FROM must select exactly one expression"
+        (Just _, _) -> selectExprWithFrom columns
+
+selectExprWithFrom :: [Expression] -> Parser Expression
+selectExprWithFrom columns = do
     from <- expression
-
-
     let whereClause alias = do
             symbol' "WHERE"
             whereClause <- expression
@@ -1294,7 +1299,7 @@ alterTable = do
     let alter = do
             lexeme "ALTER"
             alterColumn tableName
-    enableRowLevelSecurity tableName <|> add <|> drop <|> rename <|> alter
+    enableRowLevelSecurity tableName <|> forceRowLevelSecurity tableName <|> add <|> drop <|> rename <|> alter
 
 alterType = do
     lexeme "TYPE"
@@ -1349,6 +1354,14 @@ enableRowLevelSecurity tableName = do
     char ';'
     pure EnableRowLevelSecurity { tableName }
 
+forceRowLevelSecurity tableName = do
+    lexeme "FORCE"
+    lexeme "ROW"
+    lexeme "LEVEL"
+    lexeme "SECURITY"
+    char ';'
+    pure ForceRowLevelSecurity { tableName }
+
 createPolicy = do
     lexeme "CREATE"
     lexeme "POLICY"
@@ -1357,6 +1370,10 @@ createPolicy = do
     tableName <- qualifiedIdentifier
 
     action <- optional (lexeme "FOR" >> policyAction)
+
+    roles <- fromMaybe [] <$> optional do
+        lexeme "TO"
+        qualifiedIdentifier `sepBy1` (char ',' >> space)
 
     using <- optional do
         lexeme "USING"
@@ -1369,7 +1386,7 @@ createPolicy = do
 
     char ';'
 
-    pure CreatePolicy { name, action, tableName, using, check }
+    pure CreatePolicy { name, action, tableName, roles, using, check }
 
 policyAction =
     (lexeme "ALL" >> pure PolicyForAll)

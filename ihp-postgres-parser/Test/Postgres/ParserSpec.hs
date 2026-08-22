@@ -522,6 +522,9 @@ spec = do
         it "should parse 'ENABLE ROW LEVEL SECURITY' statements" do
             parseSql "ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;" `shouldBe` EnableRowLevelSecurity { tableName = "tasks" }
 
+        it "should parse 'FORCE ROW LEVEL SECURITY' statements" do
+            parseSql "ALTER TABLE tasks FORCE ROW LEVEL SECURITY;" `shouldBe` ForceRowLevelSecurity { tableName = "tasks" }
+
         it "should parse 'CREATE POLICY' statements" do
             parseSql "CREATE POLICY \"Users can manage their tasks\" ON tasks USING (user_id = ihp_user_id()) WITH CHECK (user_id = ihp_user_id());" `shouldBe`
                     (policy "Users can manage their tasks" "tasks")
@@ -535,6 +538,14 @@ spec = do
                             (VarExpression "user_id")
                             (CallExpression "ihp_user_id" [])
                         )
+                    }
+
+        it "should preserve policy roles and scalar subqueries" do
+            parseSql "CREATE POLICY org_access ON tickets FOR ALL TO ihp_authenticated USING (organization_id = ANY((SELECT user_organization_ids())::UUID[]));" `shouldBe`
+                (policy "org_access" "tickets")
+                    { action = Just PolicyForAll
+                    , roles = ["ihp_authenticated"]
+                    , using = Just (EqExpression (VarExpression "organization_id") (CallExpression "ANY" [TypeCastExpression (ScalarSelectExpression (CallExpression "user_organization_ids" [])) (PArray PUUID)]))
                     }
 
         -- pg_dump qualifies every column with its table name, so policies

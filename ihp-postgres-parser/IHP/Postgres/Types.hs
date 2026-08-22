@@ -39,8 +39,10 @@ data Statement
     | CreateFunction { functionName :: Text, functionArguments :: [(Text, PostgresType)], functionBody :: Text, orReplace :: Bool, returns :: PostgresType, language :: Text, securityDefiner :: Bool, functionAttributes :: [Text], functionSettings :: [FunctionSetting] }
     -- | ALTER TABLE tableName ENABLE ROW LEVEL SECURITY;
     | EnableRowLevelSecurity { tableName :: Text }
+    -- | ALTER TABLE tableName FORCE ROW LEVEL SECURITY;
+    | ForceRowLevelSecurity { tableName :: Text }
     -- CREATE POLICY name ON tableName USING using WITH CHECK check;
-    | CreatePolicy { name :: Text, tableName :: Text, action :: Maybe PolicyAction, using :: Maybe Expression, check :: Maybe Expression }
+    | CreatePolicy { name :: Text, tableName :: Text, action :: Maybe PolicyAction, roles :: [Text], using :: Maybe Expression, check :: Maybe Expression }
     -- SET name = value;
     | Set { name :: Text, value :: Expression }
     -- SELECT query;
@@ -241,6 +243,8 @@ data Expression =
     -- | value::type
     | TypeCastExpression Expression PostgresType
     | SelectExpression Select
+    -- | A scalar subquery without FROM, e.g. @(SELECT current_setting('a'))@.
+    | ScalarSelectExpression Expression
     | DotExpression Expression Text
     | ConcatenationExpression Expression Expression -- ^ a || b
     -- | An infix operator the schema representation does not model on its own,
@@ -383,6 +387,7 @@ policy name tableName = CreatePolicy
     { name = name
     , tableName = tableName
     , action = Nothing
+    , roles = []
     , using = Nothing
     , check = Nothing
     }
