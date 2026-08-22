@@ -50,7 +50,7 @@ compileStatement CreateIndex { indexName, unique, tableName, columns, whereClaus
 compileStatement CreateFunction { functionName, functionArguments, functionBody, orReplace, returns, language, securityDefiner, functionAttributes, functionSettings } = "CREATE " <> (if orReplace then "OR REPLACE " else "") <> "FUNCTION " <> functionName <> "(" <> (functionArguments & map (\(argName, argType) -> argName <> " " <> compilePostgresType argType) & intercalate  ", ") <> ")" <> " RETURNS " <> compilePostgresType returns <> (if securityDefiner then " SECURITY DEFINER" else "") <> mconcat (map (" " <>) functionAttributes) <> mconcat (map compileFunctionSetting functionSettings) <> " AS " <> dollarQuote functionBody <> functionBody <> dollarQuote functionBody <> " language " <> language <> ";"
 compileStatement EnableRowLevelSecurity { tableName } = "ALTER TABLE " <> compileIdentifier tableName <> " ENABLE ROW LEVEL SECURITY;"
 compileStatement ForceRowLevelSecurity { tableName } = "ALTER TABLE " <> compileIdentifier tableName <> " FORCE ROW LEVEL SECURITY;"
-compileStatement CreatePolicy { name, action, tableName, roles, using, check } = "CREATE POLICY " <> compileIdentifier name <> " ON " <> compileIdentifier tableName <> maybe "" (\action -> " FOR " <> compilePolicyAction action) action <> (if null roles then "" else " TO " <> intercalate ", " (map compileIdentifier roles)) <> maybe "" (\expr -> " USING (" <> compileExpression expr <> ")") using <> maybe "" (\expr -> " WITH CHECK (" <> compileExpression expr <> ")") check <> ";"
+compileStatement CreatePolicy { name, action, tableName, roles, using, check } = "CREATE POLICY " <> compileIdentifier name <> " ON " <> compileIdentifier tableName <> maybe "" (\action -> " FOR " <> compilePolicyAction action) action <> (if null roles then "" else " TO " <> intercalate ", " (map compilePolicyRole roles)) <> maybe "" (\expr -> " USING (" <> compileExpression expr <> ")") using <> maybe "" (\expr -> " WITH CHECK (" <> compileExpression expr <> ")") check <> ";"
 compileStatement CreateSequence { name, sequenceOptions } = "CREATE SEQUENCE " <> compileIdentifier name <> (if null sequenceOptions then "" else " " <> intercalate " " (map compileSequenceOption sequenceOptions)) <> ";"
 compileStatement DropConstraint { tableName, constraintName } = "ALTER TABLE " <> compileIdentifier tableName <> " DROP CONSTRAINT " <> compileIdentifier constraintName <> ";"
 compileStatement DropEnumType { name } = "DROP TYPE " <> compileIdentifier name <> ";"
@@ -208,9 +208,10 @@ compileExpression (GreaterThanOrEqualToExpression a b) = compileExpressionWithOp
 compileExpression (DoubleExpression double) = tshow double
 compileExpression (NumericExpression value) = value
 compileExpression (IntExpression integer) = tshow integer
+compileExpression (TypeCastExpression value@(ScalarSelectExpression {}) type_) = "(" <> compileExpression value <> ")::" <> compilePostgresType type_
 compileExpression (TypeCastExpression value type_) = compileExpression value <> "::" <> compilePostgresType type_
-compileExpression (SelectExpression Select { columns, from, whereClause }) = "SELECT " <> intercalate ", " (map compileExpression columns) <> " FROM " <> compileExpression from <> " WHERE " <> compileExpression whereClause
-compileExpression (ScalarSelectExpression scalar) = "SELECT " <> compileExpression scalar
+compileExpression (SelectExpression Select { columns, from, alias, whereClause }) = "SELECT " <> intercalate ", " (map compileExpression columns) <> " FROM " <> compileExpression from <> maybe "" (\alias -> " AS " <> compileIdentifier alias) alias <> " WHERE " <> compileExpression whereClause
+compileExpression (ScalarSelectExpression expression) = "SELECT " <> compileExpression expression
 compileExpression (ExistsExpression a) = "EXISTS " <> compileExpressionWithOptionalParenthese a
 compileExpression (DotExpression a b) = compileExpressionWithOptionalParenthese a <> "." <> compileIdentifier b
 compileExpression (ConcatenationExpression a b) = compileExpressionWithOptionalParenthese a <> " || " <> compileExpressionWithOptionalParenthese b
@@ -233,6 +234,8 @@ compileExpressionWithOptionalParenthese expr@(TextExpression {}) = compileExpres
 compileExpressionWithOptionalParenthese expr@(IntExpression {}) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(DoubleExpression {}) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(NumericExpression {}) = compileExpression expr
+compileExpressionWithOptionalParenthese expr@(ScalarSelectExpression {}) = "(" <> compileExpression expr <> ")"
+compileExpressionWithOptionalParenthese expr@(TypeCastExpression (ScalarSelectExpression {}) _) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(DotExpression (VarExpression {}) b) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(ConcatenationExpression a b ) = compileExpression expr
 compileExpressionWithOptionalParenthese expr@(InArrayExpression values) = compileExpression expr
@@ -569,6 +572,11 @@ compilePolicyAction PolicyForSelect = "SELECT"
 compilePolicyAction PolicyForInsert = "INSERT"
 compilePolicyAction PolicyForUpdate = "UPDATE"
 compilePolicyAction PolicyForDelete = "DELETE"
+
+compilePolicyRole :: Text -> Text
+compilePolicyRole role
+    | Text.toUpper role == "PUBLIC" = "PUBLIC"
+    | otherwise = compileIdentifier role
 
 compileGenerator :: ColumnGenerator -> Text
 compileGenerator ColumnGenerator { generate, stored } =

@@ -267,6 +267,9 @@ diffSchemas targetSchema' actualSchema' = (drop <> create)
 
 removeNoise = filter \case
         Comment {} -> False
+        -- Unmodelled SQL cannot be compared safely. It must be managed by an
+        -- explicit migration instead of being copied from Schema.sql or pg_dump.
+        UnknownStatement {} -> False
         Set {} -> False
         SelectStatement {} -> False
         StatementCreateTable { unsafeGetCreateTable = CreateTable { name = "schema_migrations" } }      -> False
@@ -465,19 +468,19 @@ normalizeSchema statements = map normalizeStatement (foldAddColumns statements)
 foldAddColumns :: [Statement] -> [Statement]
 foldAddColumns statements = mapMaybe fold statements
     where
+        createdTables = [name | StatementCreateTable { unsafeGetCreateTable = CreateTable { name } } <- statements]
         addedColumns :: [(Text, Column)]
         addedColumns = statements |> mapMaybe \case
             AddColumn { tableName, column } -> Just (tableName, column)
             _ -> Nothing
 
+        columnsFor tableName = [column | (table, column) <- addedColumns, table == tableName]
+
         fold :: Statement -> Maybe Statement
-        fold AddColumn { tableName } | not (null (columnsFor tableName)) = Nothing
+        fold AddColumn { tableName } | tableName `elem` createdTables = Nothing
         fold (StatementCreateTable { unsafeGetCreateTable = table@(CreateTable { name, columns }) }) | not (null (columnsFor name)) =
             Just (StatementCreateTable { unsafeGetCreateTable = table { columns = columns <> columnsFor name } })
         fold statement = Just statement
-
-        columnsFor :: Text -> [Column]
-        columnsFor tableName = [column | (table, column) <- addedColumns, table == tableName]
 
 normalizeStatement :: Statement -> [Statement]
 normalizeStatement StatementCreateTable { unsafeGetCreateTable = table } = StatementCreateTable { unsafeGetCreateTable = normalizedTable } : normalizeTableRest
@@ -487,12 +490,18 @@ normalizeStatement AddConstraint { tableName, constraint, deferrable, deferrable
 normalizeStatement CreateEnumType { name, values } = [ CreateEnumType { name = Text.toLower name, values = map Text.toLower values } ]
 normalizeStatement CreatePolicy { name, action, tableName, roles, using, check } = [ CreatePolicy { name = truncateIdentifier name, tableName, roles = sort (map Text.toLower roles), using = (unqualifyExpression tableName . normalizeExpression) <$> using, check = (unqualifyExpression tableName . normalizeExpression) <$> check, action = normalizePolicyAction action } ]
 normalizeStatement CreateIndex { columns, indexType, indexName, whereClause, tableName, .. } = [ CreateIndex { columns = map normalizeIndexColumn columns, indexType = normalizeIndexType indexType, indexName = truncateIdentifier indexName, whereClause = (unqualifyExpression tableName . normalizeExpression) <$> whereClause, tableName, .. } ]
-normalizeStatement CreateFunction { functionAttributes, functionSettings, .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionAttributes = map Text.toUpper functionAttributes, functionBody = removeIndentation $ normalizeNewLines functionBody, functionSettings = map normalizeFunctionSetting functionSettings, .. } ]
+normalizeStatement CreateFunction { functionSettings, .. } = [ CreateFunction { orReplace = False, language = Text.toUpper language, functionAttributes = map Text.toUpper functionAttributes, functionSettings = map normalizeFunctionSetting functionSettings, functionBody = removeIndentation $ normalizeNewLines functionBody, .. } ]
     where
-        -- pg_dump prints @SET search_path TO 'public', 'pg_temp'@ where Schema.sql
-        -- writes @SET search_path = public, pg_temp@. Compare them without quotes.
         normalizeFunctionSetting FunctionSetting { settingName, settingValue } =
-            FunctionSetting { settingName, settingValue = settingValue |> Text.splitOn "," |> map (Text.dropAround (== '\'') . Text.strip) |> Text.intercalate ", " }
+            FunctionSetting
+                { settingName = Text.toLower settingName
+                , settingValue = if Text.toLower settingName == "search_path"
+                    then normalizeSearchPath settingValue
+                    else settingValue
+                }
+        normalizeSearchPath value
+            | "'" `Text.isPrefixOf` value && "'" `Text.isSuffixOf` value = value |> Text.drop 1 |> Text.dropEnd 1 |> Text.splitOn "', '" |> Text.intercalate ", "
+            | otherwise = value |> Text.splitOn "," |> map Text.strip |> Text.intercalate ", "
 normalizeStatement CreateTrigger { event, .. } = [ CreateTrigger { event = normalizeTriggerEvents event, .. } ]
 normalizeStatement CreateConstraintTrigger { event, .. } = [ CreateConstraintTrigger { event = normalizeTriggerEvents event, .. } ]
 normalizeStatement CreateSequence { .. } = [ CreateSequence { sequenceOptions = filter (not . isDefaultSequenceOption) sequenceOptions, .. } ]
@@ -721,8 +730,8 @@ resolveAlias (Just alias) fromExpression expression =
         e@(NumericExpression {}) -> e
         e@(IntExpression {}) -> e
         e@(TypeCastExpression a b) -> (TypeCastExpression (rec a) b)
+        e@(ScalarSelectExpression scalar) -> ScalarSelectExpression (rec scalar)
         e@(SelectExpression Select { columns, from, whereClause, alias }) -> SelectExpression Select { columns = rec <$> columns, from = rec from, whereClause = rec whereClause, alias = alias }
-        (ScalarSelectExpression scalar) -> ScalarSelectExpression (rec scalar)
         e@(DotExpression a b) -> DotExpression (rec a) b
         e@(ExistsExpression a) -> ExistsExpression (rec a)
         e@(ConcatenationExpression a b) -> ConcatenationExpression (rec a) (rec b)

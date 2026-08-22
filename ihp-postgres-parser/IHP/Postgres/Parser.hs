@@ -908,8 +908,6 @@ selectExpr = do
 selectExprWithFrom :: [Expression] -> Parser Expression
 selectExprWithFrom columns = do
     from <- expression
-
-
     let whereClause alias = do
             symbol' "WHERE"
             whereClause <- expression
@@ -1301,7 +1299,7 @@ alterTable = do
     let alter = do
             lexeme "ALTER"
             alterColumn tableName
-    enableRowLevelSecurity tableName <|> add <|> drop <|> rename <|> alter
+    enableRowLevelSecurity tableName <|> forceRowLevelSecurity tableName <|> add <|> drop <|> rename <|> alter
 
 alterType = do
     lexeme "TYPE"
@@ -1373,7 +1371,7 @@ createPolicy = do
 
     action <- optional (lexeme "FOR" >> policyAction)
 
-    roles <- optional do
+    roles <- fromMaybe [] <$> optional do
         lexeme "TO"
         qualifiedIdentifier `sepBy1` (char ',' >> space)
 
@@ -1388,7 +1386,7 @@ createPolicy = do
 
     char ';'
 
-    pure CreatePolicy { name, action, tableName, roles = fromMaybe [] roles, using, check }
+    pure CreatePolicy { name, action, tableName, roles, using, check }
 
 policyAction =
     (lexeme "ALL" >> pure PolicyForAll)

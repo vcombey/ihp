@@ -39,6 +39,7 @@ data Statement
     | CreateFunction { functionName :: Text, functionArguments :: [(Text, PostgresType)], functionBody :: Text, orReplace :: Bool, returns :: PostgresType, language :: Text, securityDefiner :: Bool, functionAttributes :: [Text], functionSettings :: [FunctionSetting] }
     -- | ALTER TABLE tableName ENABLE ROW LEVEL SECURITY;
     | EnableRowLevelSecurity { tableName :: Text }
+    -- | ALTER TABLE tableName FORCE ROW LEVEL SECURITY;
     | ForceRowLevelSecurity { tableName :: Text }
     -- CREATE POLICY name ON tableName USING using WITH CHECK check;
     | CreatePolicy { name :: Text, tableName :: Text, action :: Maybe PolicyAction, roles :: [Text], using :: Maybe Expression, check :: Maybe Expression }
@@ -242,7 +243,7 @@ data Expression =
     -- | value::type
     | TypeCastExpression Expression PostgresType
     | SelectExpression Select
-    -- | A scalar subquery without FROM, e.g. @(SELECT current_setting('a'))@
+    -- | A scalar subquery without FROM, e.g. @(SELECT current_setting('a'))@.
     | ScalarSelectExpression Expression
     | DotExpression Expression Text
     | ConcatenationExpression Expression Expression -- ^ a || b

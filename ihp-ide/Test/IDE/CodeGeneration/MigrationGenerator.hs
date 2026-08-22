@@ -735,6 +735,82 @@ tests = do
 
                 diffSchemas targetSchema actualSchema `shouldBe` []
 
+            it "should ignore unmodelled statements instead of generating raw SQL migrations" do
+                let targetSchema = [UnknownStatement { raw = "CREATE TABLE private.tokens (id UUID)" }]
+                let actualSchema = [UnknownStatement { raw = "CREATE TABLE private.tokens (id uuid NOT NULL)" }]
+
+                diffSchemas targetSchema actualSchema `shouldBe` []
+
+            it "should ignore pg_dump session statements" do
+                let actualSchema = sql [i|
+                    SET statement_timeout = 0;
+                    SELECT pg_catalog.set_config('search_path', '', false);
+                |]
+
+                diffSchemas [] actualSchema `shouldBe` []
+
+            it "should fold separately added columns into CREATE TABLE" do
+                let targetSchema = sql [i|
+                    CREATE TABLE users (id UUID PRIMARY KEY NOT NULL);
+                    ALTER TABLE users ADD COLUMN email TEXT NOT NULL;
+                |]
+                let actualSchema = sql [i|
+                    CREATE TABLE public.users (
+                        id uuid NOT NULL,
+                        email text NOT NULL
+                    );
+                    ALTER TABLE ONLY public.users ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+                |]
+
+                diffSchemas targetSchema actualSchema `shouldBe` []
+
+            it "should keep an ADD COLUMN without a matching CREATE TABLE" do
+                let targetSchema = sql [i|ALTER TABLE users ADD COLUMN email TEXT NOT NULL;|]
+
+                diffSchemas targetSchema [] `shouldBe` targetSchema
+
+            it "should normalize policy roles and ANY arrays" do
+                let targetSchema = sql [i|
+                    CREATE POLICY org_access ON tickets TO ihp_authenticated USING (status IN ('open', 'closed'));
+                |]
+                let actualSchema = sql [i|
+                    CREATE POLICY org_access ON public.tickets FOR ALL TO ihp_authenticated USING (status = ANY (ARRAY['open'::text, 'closed'::text]));
+                |]
+
+                diffSchemas targetSchema actualSchema `shouldBe` []
+
+            it "should keep different policy role lists as a real diff" do
+                let targetSchema = sql [i|CREATE POLICY org_access ON tickets TO ihp_authenticated USING (true);|]
+                let actualSchema = sql [i|CREATE POLICY org_access ON tickets TO PUBLIC USING (true);|]
+
+                diffSchemas targetSchema actualSchema `shouldBe`
+                    [ DropPolicy { tableName = "tickets", policyName = "org_access" }
+                    , (policy "org_access" "tickets") { roles = ["ihp_authenticated"], using = Just (VarExpression "true") }
+                    ]
+
+            it "should normalize function settings and trigger event order" do
+                let targetSchema = sql [i|
+                    CREATE FUNCTION touch() RETURNS trigger SET search_path = public, pg_temp AS $$BEGIN RETURN NEW; END;$$ language plpgsql;
+                    CREATE TRIGGER touch_rows AFTER INSERT OR UPDATE OR DELETE ON users FOR EACH ROW EXECUTE FUNCTION touch();
+                |]
+                let actualSchema = sql [i|
+                    CREATE FUNCTION public.touch() RETURNS trigger SET search_path TO 'public', 'pg_temp' AS $$BEGIN RETURN NEW; END;$$ language plpgsql;
+                    CREATE TRIGGER touch_rows AFTER DELETE OR INSERT OR UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch();
+                |]
+
+                diffSchemas targetSchema actualSchema `shouldBe` []
+
+            it "should not normalize arbitrary function setting values" do
+                let targetSchema = sql [i|CREATE FUNCTION f() RETURNS trigger SET application_name = 'a,b' AS $$BEGIN RETURN NEW; END;$$ language plpgsql;|]
+                let actualSchema = sql [i|CREATE FUNCTION f() RETURNS trigger SET application_name = a, b AS $$BEGIN RETURN NEW; END;$$ language plpgsql;|]
+
+                diffSchemas targetSchema actualSchema `shouldNotBe` []
+
+            it "should not split a quoted search_path value containing a comma" do
+                let targetSchema = sql [i|CREATE FUNCTION f() RETURNS trigger SET search_path = 'a,b' AS $$BEGIN RETURN NEW; END;$$ language plpgsql;|]
+                let actualSchema = sql [i|CREATE FUNCTION f() RETURNS trigger SET search_path = a, b AS $$BEGIN RETURN NEW; END;$$ language plpgsql;|]
+
+                diffSchemas targetSchema actualSchema `shouldNotBe` []
 
             it "should normalize policy definitions" do
                 let targetSchema = sql [i|

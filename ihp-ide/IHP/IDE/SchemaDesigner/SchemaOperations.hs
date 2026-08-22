@@ -296,7 +296,7 @@ updatePolicy UpdatePolicyOptions { .. } statements =
         statements
         |> map updatePolicy'
     where
-        updatePolicy' policy@CreatePolicy { name = pName, action, tableName = pTable } | pName == currentName && pTable == tableName = CreatePolicy { tableName, action, roles = policy.roles, name, using, check }
+        updatePolicy' policy@CreatePolicy { name = pName, action, roles, tableName = pTable } | pName == currentName && pTable == tableName = CreatePolicy { tableName, action, roles, name, using, check }
         updatePolicy' otherwise                                                                                              = otherwise
 
 data AddPolicyOptions = AddPolicyOptions
