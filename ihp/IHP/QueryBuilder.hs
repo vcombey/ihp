@@ -13,6 +13,7 @@ This module re-exports all QueryBuilder submodules for backward compatibility.
 module IHP.QueryBuilder
 ( -- * Starting a Query
   query
+, queryRelation
   -- * Core Types
 , QueryBuilder (..)
 , Condition (..)
@@ -31,6 +32,7 @@ module IHP.QueryBuilder
 , toSQL
   -- * Filtering
 , filterWhere
+, filterWhereRelation
 , filterWhereCaseInsensitive
 , filterWhereNot
 , filterWhereIn
