@@ -148,18 +148,16 @@ relationQueryTableModule table =
     relationColumns =
         let Schema statements = ?schema
         in statements |> mapMaybe (\case
-            AddConstraint { tableName, constraint = constraint@ForeignKeyConstraint { columnName, referenceTable } }
-                | tableName == table.name && isForeignKeyReferencingPK constraint -> Just (columnName, referenceTable)
+            AddConstraint { tableName, constraint = constraint@ForeignKeyConstraint { columnName } }
+                | tableName == table.name && isForeignKeyReferencingPK constraint -> Just columnName
             _ -> Nothing
             ) |> ordNub
-    compileFilter (columnName, referenceTable) =
-        [ relationFilterFunctionName columnName <> " :: " <> nullableIdType <> " -> QueryBuilder.QueryBuilder " <> tshow table.name
+    compileFilter columnName =
+        [ relationFilterFunctionName columnName <> " :: " <> haskellType table column <> " -> QueryBuilder.QueryBuilder " <> tshow table.name
         , relationFilterFunctionName columnName <> " value = QueryBuilder.filterWhere (#"
             <> columnNameToFieldName columnName <> ", value) queryBuilder"
         ]
       where
-        nullableIdType = if column.notNull then idType else "Maybe (" <> idType <> ")"
-        idType = "Id' " <> tshow referenceTable
         column = allColumnsIncludingInherited table
             |> find (\candidate -> candidate.name == columnName)
             |> fromMaybe (error (cs $ "Could not find relation column " <> table.name <> "." <> columnName))
