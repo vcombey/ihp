@@ -132,6 +132,7 @@ relationQueryTableModule table =
     , Text.unlines
         [ "{-# LANGUAGE DataKinds, OverloadedLabels, TypeApplications #-}"
         , "module " <> moduleName <> " where"
+        , "import Prelude (Maybe)"
         , "import IHP.ModelSupport"
         , "import qualified IHP.QueryBuilder as QueryBuilder"
         , "import Generated.ActualTypes." <> modelName
