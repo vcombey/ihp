@@ -10,6 +10,7 @@ module IHP.IDE.GhciSupport
 ( -- * Spawning GHCi
   ghciArguments
 , ghciArgumentsForScript
+, devGhciExecutable
 , procGhci
 , withGhci
 , withGhciArguments
@@ -29,6 +30,7 @@ import qualified Control.Exception.Safe as Exception
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Builder as ByteString
 import qualified GHC.IO.Handle as Handle
+import qualified IHP.EnvVar as EnvVar
 import qualified System.Exit as Exit
 import qualified System.Posix.Signals as Signals
 import qualified System.Process as Process
@@ -64,13 +66,22 @@ ghciArgumentsForScript scriptPath =
     , "+RTS", "-A32m", "-n4m", "-H64m", "-Iw60", "-N4", "-Fd1"
     ]
 
+-- | Executable used for dev-mode GHCi processes. Set @IHP_DEV_GHCI@ to a
+-- project wrapper that configures a persistent object cache or build budget.
+-- The wrapper receives the standard GHCi arguments unchanged.
+devGhciExecutable :: IO FilePath
+devGhciExecutable = EnvVar.envOrDefault "IHP_DEV_GHCI" "ghci"
+
 -- | Build a 'Process.CreateProcess' that launches GHCi, optionally wrapped in
 -- @direnv exec .@ so dev-shell environment variables are inherited.
 procGhci :: Bool -> [String] -> Process.CreateProcess
-procGhci wrapWithDirenv args =
+procGhci = procGhciWithExecutable "ghci"
+
+procGhciWithExecutable :: FilePath -> Bool -> [String] -> Process.CreateProcess
+procGhciWithExecutable executable wrapWithDirenv args =
     if wrapWithDirenv
-        then Process.proc "direnv" (["exec", ".", "ghci"] <> args)
-        else Process.proc "ghci" args
+        then Process.proc "direnv" (["exec", ".", executable] <> args)
+        else Process.proc executable args
 
 -- | Spawn GHCi, wire up its stdio pipes, install a SIGTERM handler that
 -- gracefully tears down the GHCi process group, and run the callback with
@@ -93,7 +104,8 @@ withGhciArguments
     -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a)
     -> IO a
 withGhciArguments arguments wrapWithDirenv mainThreadId callback = do
-    let baseParams = procGhci wrapWithDirenv arguments
+    executable <- devGhciExecutable
+    let baseParams = procGhciWithExecutable executable wrapWithDirenv arguments
     let params = baseParams
             { Process.std_in = Process.CreatePipe
             , Process.std_out = Process.CreatePipe

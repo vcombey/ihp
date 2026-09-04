@@ -25,7 +25,7 @@ import Main.Utf8 (withUtf8)
 import qualified IHP.FrameworkConfig as FrameworkConfig
 import qualified Control.Concurrent.Chan.Unagi as Queue
 import IHP.IDE.FileWatcher
-import IHP.IDE.GhciSupport (ghciArguments)
+import IHP.IDE.GhciSupport (devGhciExecutable, ghciArguments)
 import qualified IHP.IDE.SplitMode as SplitMode
 import qualified IHP.IDE.WorkerSignal as WorkerSignal
 import qualified System.Environment as Env
@@ -189,7 +189,8 @@ fileWatcherParams liveReloadClients databaseNeedsMigration reloadGhciVar startSt
 
 withGHCI :: (?context :: Context) => Concurrent.ThreadId -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a) -> IO a
 withGHCI mainThreadId callback = do
-    baseParams <- procDirenvAware "ghci" ghciArguments
+    executable <- devGhciExecutable >>= encodeUtf
+    baseParams <- procDirenvAware executable ghciArguments
     let params = baseParams
             { Process.std_in = Process.CreatePipe
             , Process.std_out = Process.CreatePipe
