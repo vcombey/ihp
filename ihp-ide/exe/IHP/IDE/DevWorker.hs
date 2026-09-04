@@ -107,8 +107,8 @@ runWithJobs mainThreadId waitForReload = do
 -- GHCi the whole time the worker runs — including while we are blocked on
 -- @waitForReload@. @onMatch@ surfaces startup / crash without stopping them.
 -- Startup is bounded by a 60s timeout and a crash marker so a worker that
--- throws before logging "Starting worker" can no longer hang the process — we
--- log it and wait for the next reload signal to recover.
+-- throws before logging "Starting worker" can no longer hang the process.
+-- Transient startup failures retry in the already-loaded GHCi session.
 withRunningWorker :: Handle -> Handle -> Handle -> IO () -> IO ()
 withRunningWorker input output err waitForReload = do
     outputVar <- newMVar mempty
@@ -132,23 +132,30 @@ withRunningWorker input output err waitForReload = do
             Concurrent.threadDelay 100000
             void (tryPutMVar workerStopped ())
 
+    let retryDelay = 2 * 1000000
+
     let waitForWorkerStart = do
             outcome <- timeout (60 * 1000000) (Async.race (takeMVar started) (takeMVar crashed))
             case outcome of
-                Just (Left ()) -> putStrLn "[worker] worker started."
-                Just (Right ()) -> putStrLn "[worker] worker crashed during startup; waiting for a reload."
-                Nothing -> putStrLn "[worker] worker startup timed out after 60s; waiting for a reload."
-            -- Whether or not startup succeeded, block here until the next reload
-            -- signal. GHCi keeps being drained throughout (the readers below
-            -- race workerStopped, which stopApp only fills on bracket exit), so
-            -- a chatty worker can't wedge on a full pipe and a failed startup
-            -- recovers on the next file change instead of hanging.
-            waitForReload
+                Just (Left ()) -> do
+                    putStrLn "[worker] worker started."
+                    waitForReload
+                    pure False
+                Just (Right ()) -> do
+                    putStrLn "[worker] worker crashed during startup; retrying in 2s."
+                    pure True
+                Nothing -> do
+                    putStrLn "[worker] worker startup timed out after 60s; retrying in 2s."
+                    pure True
 
-    void $ runConcurrently $ (,,)
+    (shouldRetry, _, _) <- runConcurrently $ (,,)
         <$> Concurrently (bracket_ startApp stopApp waitForWorkerStart)
         <*> Concurrently (readHandleLines workerStopped outputVar output putForward onMatch)
         <*> Concurrently (readHandleLines workerStopped outputVar err putForward onMatch)
+
+    when shouldRetry do
+        Concurrent.threadDelay retryDelay
+        withRunningWorker input output err waitForReload
   where
     putForward line = ByteString.putStrLn ("[worker] " <> line)
 
