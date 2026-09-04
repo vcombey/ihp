@@ -4,6 +4,7 @@ module IHP.TypedSql.CompileTimeDatabase
     ( AutoDatabase (..)
     , autoDatabaseEnabled
     , dependentSchemaFiles
+    , dependentSchemaFilesForTables
     , withAutoDatabase
     ) where
 
@@ -25,6 +26,8 @@ import qualified Data.String.Conversions  as CS
 import           Data.Time.Clock          (diffUTCTime, getCurrentTime)
 import           Data.Word                (Word64)
 import           Prelude
+import qualified Data.Set                 as Set
+import qualified Data.Text                as Text
 import           Numeric                  (showHex)
 import           System.Directory         (canonicalizePath, createDirectory,
                                             createDirectoryIfMissing,
@@ -870,6 +873,37 @@ dependentSchemaFiles = do
     appSchema <- findAppSchema
     ihpSchema <- findIhpSchema
     pure (catMaybes [appSchema, ihpSchema])
+
+-- | Prefer generated dependencies scoped to the tables used by a typed query.
+-- Falls back to the full schema whenever the generated dependency set is not
+-- complete, which keeps standalone users and unsupported SQL shapes safe.
+dependentSchemaFilesForTables :: Maybe (Set.Set Text.Text) -> IO [FilePath]
+dependentSchemaFilesForTables Nothing = dependentSchemaFiles
+dependentSchemaFilesForTables (Just tables)
+    | Set.null tables = dependentSchemaFiles
+    | otherwise = do
+        findAppSchema >>= \case
+            Nothing -> dependentSchemaFiles
+            Just appSchema -> do
+                absoluteSchema <- canonicalizePath appSchema
+                let projectRoot = takeDirectory (takeDirectory absoluteSchema)
+                let generatedRoot = projectRoot </> "build" </> "Generated"
+                let globalDependency = generatedRoot </> "TypedSqlSchemaDependencies"
+                let tableDependencies =
+                        tables
+                            |> Set.toList
+                            |> map (\tableName ->
+                                generatedRoot
+                                    </> "ActualTypes"
+                                    </> CS.cs (tableNameToModelName tableName <> ".hs")
+                            )
+                let generatedDependencies = globalDependency : tableDependencies
+                generatedDependenciesExist <- and <$> mapM doesFileExist generatedDependencies
+                if not generatedDependenciesExist
+                    then dependentSchemaFiles
+                    else do
+                        ihpSchema <- findIhpSchema
+                        mapM canonicalizePath (generatedDependencies <> maybeToList ihpSchema)
 
 discoverSchemaInputs :: IO SchemaInputs
 discoverSchemaInputs = do

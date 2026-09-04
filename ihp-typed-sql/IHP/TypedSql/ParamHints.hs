@@ -5,6 +5,7 @@ module IHP.TypedSql.ParamHints
     , parseSql
     , extractParamHintsFromAst
     , extractJoinNullableTablesFromAst
+    , extractReferencedTablesFromAst
     , extractNonNullableComputedColumnsFromAst
     , resolveParamHintTypes
     , detectStarSelects
@@ -13,9 +14,10 @@ module IHP.TypedSql.ParamHints
 
 import           Data.Foldable                (toList)
 import           Data.Function                ((&))
+import qualified Data.Data                    as Data
 import qualified Data.List                   as List
 import qualified Data.Map.Strict             as Map
-import           Data.Maybe                   (catMaybes, mapMaybe)
+import           Data.Maybe                   (catMaybes, mapMaybe, maybeToList, isJust)
 import qualified Data.Set                    as Set
 import           Data.Text                    (Text)
 import qualified Data.Text                   as Text
@@ -63,6 +65,39 @@ exprListItems (Ast.ExprList items) = toList items
 
 setClauseListItems :: Ast.SetClauseList -> [Ast.SetClause]
 setClauseListItems (Ast.SetClauseList items) = toList items
+
+-- | Extract every base table referenced by a statement.
+--
+-- CTE names can shadow real tables, so statements containing CTEs fall back
+-- to the full schema dependency instead of risking a stale typed query.
+extractReferencedTablesFromAst :: Ast.PreparableStmt -> Maybe (Set.Set Text)
+extractReferencedTablesFromAst stmt
+    | containsCommonTableExpression stmt = Nothing
+    | Set.null tables = Nothing
+    | otherwise = Just tables
+  where
+    tables = Set.fromList
+        ( map relationExprName (collectRelationExpressions stmt)
+        <> map insertTargetName (collectInsertTargets stmt)
+        )
+
+    insertTargetName (Ast.InsertTarget qualifiedName _alias) =
+        qualifiedNameToText qualifiedName
+
+collectRelationExpressions :: Data.Data value => value -> [Ast.RelationExpr]
+collectRelationExpressions value =
+    maybeToList (Data.cast value)
+        <> concat (Data.gmapQ collectRelationExpressions value)
+
+collectInsertTargets :: Data.Data value => value -> [Ast.InsertTarget]
+collectInsertTargets value =
+    maybeToList (Data.cast value)
+        <> concat (Data.gmapQ collectInsertTargets value)
+
+containsCommonTableExpression :: Data.Data value => value -> Bool
+containsCommonTableExpression value =
+    isJust (Data.cast value :: Maybe Ast.CommonTableExpr)
+        || or (Data.gmapQ containsCommonTableExpression value)
 
 -- | Extract parameter hints by parsing SQL and walking the AST.
 -- Falls back to empty map if parsing fails.
