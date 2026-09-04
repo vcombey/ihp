@@ -18,7 +18,7 @@ import Data.Bits (bit)
 import Data.Maybe (fromJust)
 import Data.String.Conversions (cs)
 import "interpolate" Data.String.Interpolate (i)
-import IHP.NameSupport (tableNameToModelName, columnNameToFieldName, enumValueToControllerName)
+import IHP.NameSupport (tableNameToModelName, columnNameToFieldName, enumValueToControllerName, ucfirst)
 import qualified Data.Text as Text
 import qualified System.Directory.OsPath as Directory
 import IHP.HaskellSupport
@@ -48,6 +48,7 @@ compile = do
             -- unless (null validationErrors) (error $ "Schema.hs contains errors: " <> cs (unsafeHead validationErrors))
             Directory.createDirectoryIfMissing True "build/Generated"
             Directory.createDirectoryIfMissing True "build/Generated/ActualTypes"
+            Directory.createDirectoryIfMissing True "build/Generated/RelationQueries"
             Directory.createDirectoryIfMissing True "build/Generated/Statements"
 
             forEach (compileModules options (Schema statements)) \(path, body) -> do
@@ -61,6 +62,7 @@ compileModules options schema =
        ]
        <> actualTypesTableModules schema
        <> [ ("build/Generated/ActualTypes.hs", compileTypes options schema) ]
+       <> (if options.compileRelationSupport then relationQueryTableModules schema else [])
        <> tableModules options schema
        <> statementModules schema
        <> [ ("build/Generated/Statements.hs", compileStatementsIndex schema)
@@ -119,6 +121,48 @@ actualTypesTableModule table =
             import Generated.ActualTypes.PrimaryKeys
         |]
 
+relationQueryTableModules :: Schema -> [(OsPath, Text)]
+relationQueryTableModules schema =
+    let ?schema = schema
+    in applyTables relationQueryTableModule schema
+
+relationQueryTableModule :: (?schema :: Schema) => CreateTable -> (OsPath, Text)
+relationQueryTableModule table =
+    ( (OsPath.</>) "build/Generated/RelationQueries" (either (error . show) id (encodeUtf (cs modelName <> ".hs")))
+    , Text.unlines
+        [ "{-# LANGUAGE DataKinds, OverloadedLabels, TypeApplications #-}"
+        , "module " <> moduleName <> " where"
+        , "import IHP.ModelSupport"
+        , "import qualified IHP.QueryBuilder as QueryBuilder"
+        , "import Generated.ActualTypes." <> modelName
+        , ""
+        , "queryBuilder :: QueryBuilder.QueryBuilder " <> tshow table.name
+        , "queryBuilder = QueryBuilder.query @" <> modelName
+        , Text.unlines (concatMap compileFilter relationColumns)
+        ]
+    )
+  where
+    modelName = tableNameToModelName table.name
+    moduleName = "Generated.RelationQueries." <> modelName
+    relationColumns =
+        let Schema statements = ?schema
+        in statements |> mapMaybe (\case
+            AddConstraint { tableName, constraint = constraint@ForeignKeyConstraint { columnName, referenceTable } }
+                | tableName == table.name && isForeignKeyReferencingPK constraint -> Just (columnName, referenceTable)
+            _ -> Nothing
+            ) |> ordNub
+    compileFilter (columnName, referenceTable) =
+        [ relationFilterFunctionName columnName <> " :: " <> nullableIdType <> " -> QueryBuilder.QueryBuilder " <> tshow table.name
+        , relationFilterFunctionName columnName <> " value = QueryBuilder.filterWhere (#"
+            <> columnNameToFieldName columnName <> ", value) queryBuilder"
+        ]
+      where
+        nullableIdType = if column.notNull then idType else "Maybe (" <> idType <> ")"
+        idType = "Id' " <> tshow referenceTable
+        column = allColumnsIncludingInherited table
+            |> find (\candidate -> candidate.name == columnName)
+            |> fromMaybe (error (cs $ "Could not find relation column " <> table.name <> "." <> columnName))
+
 tableModules :: (?compilerOptions :: CompilerOptions) => CompilerOptions -> Schema -> [(OsPath, Text)]
 tableModules options schema =
     let ?schema = schema
@@ -139,6 +183,7 @@ tableModule options table =
         moduleName = "Generated." <> tableNameToModelName table.name
         modelName = tableNameToModelName table.name
         typesImports = generatedTypesImports table
+        relationImports = relationQueryImports table
         statementImports = Text.unlines
             [ "import qualified Generated.Statements.RowDecoder" <> modelName
             , "import qualified Generated.Statements.Create" <> modelName
@@ -152,6 +197,7 @@ tableModule options table =
             module $moduleName where
             $defaultImports
             $typesImports
+            $relationImports
             $statementImports
         |]
 
@@ -165,7 +211,7 @@ tableIncludeModule table =
             -- This file is auto generated and will be overriden regulary. Please edit `Application/Schema.sql` to change the Types\n"
             module $moduleName where
             $typesImports
-            import IHP.ModelSupport (Include, GetModelById)
+            import IHP.ModelSupport (Include, GetModelById, GetModelByTableName)
         |] <> "\n\n"
 
 
@@ -770,9 +816,8 @@ qualifiedConstructorNameFromTableName unqualifiedName = "Generated.ActualTypes."
 --
 -- These modules only reference the table's own record (qualified as
 -- @Generated.ActualTypes.<Model>@ — the alias import keeps those references
--- working), enums, primary keys and, with relation support enabled, the models
--- referencing this table (which appear unqualified in generated
--- @query \@Model@ expressions).
+-- working), enums and primary keys. Relation query construction lives in
+-- separate non-orphan modules with stable exported types.
 --
 -- Importing exactly these instead of the aggregator keeps a table module's
 -- interface hash independent of unrelated tables. That matters because these
@@ -781,7 +826,7 @@ qualifiedConstructorNameFromTableName unqualifiedName = "Generated.ActualTypes."
 -- transitively imported any per-table module was recompiled on every
 -- @Schema.sql@ change, no matter which table changed.
 generatedTypesImports :: (?schema :: Schema, ?compilerOptions :: CompilerOptions) => CreateTable -> Text
-generatedTypesImports table = Text.unlines (ownImports <> referencingImports)
+generatedTypesImports table = Text.unlines ownImports
     where
         modelName = tableNameToModelName table.name
         ownImports =
@@ -789,14 +834,18 @@ generatedTypesImports table = Text.unlines (ownImports <> referencingImports)
             , "import Generated.Enums"
             , "import Generated.ActualTypes.PrimaryKeys"
             ]
-        referencingImports =
-            if ?compilerOptions.compileRelationSupport
-                then columnsReferencingTable table.name
-                        |> map (\(refTableName, _, _) -> tableNameToModelName refTableName)
-                        |> filter (/= modelName)
-                        |> ordNub
-                        |> map ("import Generated.ActualTypes." <>)
-                else []
+
+relationQueryImports :: (?schema :: Schema, ?compilerOptions :: CompilerOptions) => CreateTable -> Text
+relationQueryImports table
+    | not ?compilerOptions.compileRelationSupport = ""
+    | otherwise = columnsReferencingTable table.name
+        |> map (\(refTableName, _, _) -> tableNameToModelName refTableName)
+        |> ordNub
+        |> map (\modelName -> "import qualified Generated.RelationQueries." <> modelName)
+        |> Text.unlines
+
+relationFilterFunctionName :: Text -> Text
+relationFilterFunctionName columnName = "filterBy" <> ucfirst (columnNameToFieldName columnName)
 
 --
 -- Trigger types don't have encoders as they're not real data columns.
@@ -937,7 +986,9 @@ compileFromRowHasqlInstance table@(CreateTable { name, columns }) =
 |]
 
 compileFromRowQueryBuilder :: (?schema :: Schema) => CreateTable -> (Text, Text, Maybe Text) -> Text
-compileFromRowQueryBuilder table (refTableName, refFieldName, maybeRefColumn) = "(QueryBuilder.filterWhere (#" <> columnNameToFieldName refFieldName <> ", " <> primaryKeyField <> ") (QueryBuilder.query @" <> tableNameToModelName refTableName <> "))"
+compileFromRowQueryBuilder table (refTableName, refFieldName, maybeRefColumn) =
+    "(Generated.RelationQueries." <> tableNameToModelName refTableName <> "."
+        <> relationFilterFunctionName refFieldName <> " " <> primaryKeyField <> ")"
     where
         primaryKeyField :: Text
         primaryKeyField = if refColumn.notNull then actualPrimaryKeyField else "Just " <> actualPrimaryKeyField
@@ -1034,7 +1085,9 @@ compileBuild table@(CreateTable { name }) =
         columns = allColumnsIncludingInherited table
         constructor = qualifiedConstructorNameFromTableName name
         qbDefaults = if ?compilerOptions.compileRelationSupport
-            then columnsReferencingTable name |> map (const "def") |> unwords
+            then columnsReferencingTable name
+                |> map (\(refTableName, _, _) -> "Generated.RelationQueries." <> tableNameToModelName refTableName <> ".queryBuilder")
+                |> unwords
             else ""
     in
         "instance Record " <> constructor <> " where\n"
@@ -1165,7 +1218,7 @@ compileInclude table@(CreateTable { name }) = (belongsToIncludes <> hasManyInclu
         compileBelongsTo column = includeType (columnNameToFieldName column.name) ("(GetModelById " <> columnNameToFieldName column.name <> ")")
 
         compileHasMany :: (Text, Text) -> Text
-        compileHasMany (refTableName, refColumnName) = includeType refColumnName ("[" <> tableNameToModelName refTableName <> "]")
+        compileHasMany (refTableName, refColumnName) = includeType refColumnName ("[GetModelByTableName " <> tshow refTableName <> "]")
 
 
 compileSetFieldInstances :: (?schema :: Schema, ?compilerOptions :: CompilerOptions) => CreateTable -> Text
@@ -1625,6 +1678,7 @@ statementModuleHeader table moduleName exports extraImports =
         , "module " <> moduleName <> " (" <> intercalate ", " exports <> ") where"
         , ""
         , generatedTypesImports table
+        , relationQueryImports table
         , statementModuleBaseImports
         ]
     <> extraImports
