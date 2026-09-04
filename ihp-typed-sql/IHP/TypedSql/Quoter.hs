@@ -27,12 +27,13 @@ import           IHP.Prelude
 import           IHP.Hasql.Encoders              ()
 
 import           IHP.TypedSql.Cardinality      (inferCardinality)
-import           IHP.TypedSql.CompileTimeDatabase (dependentSchemaFiles)
+import           IHP.TypedSql.CompileTimeDatabase (dependentSchemaFilesForTables)
 import           IHP.TypedSql.Decoders          (resultDecoderForColumns)
 import           IHP.TypedSql.Metadata          (DescribeColumn (..), DescribeResult (..), PgTypeInfo (..), TableMeta (..),
                                                  describeStatement)
 import           IHP.TypedSql.ParamHints        (extractParamHintsFromAst, extractJoinNullableTablesFromAst,
                                                  extractNonNullableComputedColumnsFromAst,
+                                                 extractReferencedTablesFromAst,
                                                  parseSql, resolveParamHintTypes, detectStarSelects,
                                                  detectInsertWithoutColumns)
 import           IHP.TypedSql.ParamEncoder      (typedSqlParam)
@@ -70,10 +71,11 @@ typedSqlStar =
 -- This is the heart of typedSql: parse placeholders, describe SQL, and assemble a TypedQuery.
 typedSqlExp :: Bool -> String -> TH.ExpQ
 typedSqlExp allowStar rawSql = do
-    schemaFiles <- TH.runIO dependentSchemaFiles
+    let PlaceholderPlan { ppDescribeSql, ppRuntimeSql, ppExprs } = planPlaceholders rawSql
+    let parsedAst = parseSql ppDescribeSql
+    schemaFiles <- TH.runIO (dependentSchemaFilesForTables (parsedAst >>= extractReferencedTablesFromAst))
     mapM_ TH.addDependentFile schemaFiles
 
-    let PlaceholderPlan { ppDescribeSql, ppRuntimeSql, ppExprs } = planPlaceholders rawSql
     parsedExprs <- mapM parseExpr ppExprs
 
     describeResultE <- TH.runIO $ Exception.try (describeStatement (CS.cs ppDescribeSql))
@@ -88,7 +90,6 @@ typedSqlExp allowStar rawSql = do
 
     paramTypes <- mapM (hsTypeForParam drTypes) drParams
 
-    let parsedAst = parseSql ppDescribeSql
     when (isNothing parsedAst) do
         TH.reportWarning "typedSql: could not parse SQL for type refinement; parameter hints and LEFT/RIGHT JOIN nullability detection are disabled for this query."
 
