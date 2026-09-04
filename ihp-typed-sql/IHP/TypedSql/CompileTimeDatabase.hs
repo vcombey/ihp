@@ -34,7 +34,8 @@ import           System.Directory         (canonicalizePath, createDirectory,
                                             removeFile, removePathForcibly)
 import           System.Environment       (lookupEnv)
 import           System.Exit              (ExitCode (ExitFailure, ExitSuccess))
-import           System.FilePath          (takeDirectory, takeFileName)
+import           System.FilePath          (makeRelative, takeDirectory,
+                                            takeFileName)
 import           System.IO                (Handle, IOMode (WriteMode), appendFile,
                                             hClose, withFile)
 import           System.IO.Temp           (createTempDirectory)
@@ -879,9 +880,10 @@ createConfiguredRoles tools database@AutoDatabase { adbPgHost } = do
 
 dependentSchemaFiles :: IO [FilePath]
 dependentSchemaFiles = do
-    appSchema <- findAppSchema
-    ihpSchema <- findIhpSchema
-    pure (catMaybes [appSchema, ihpSchema])
+    cwd <- getCurrentDirectory
+    appSchema <- findAppSchema >>= Prelude.traverse canonicalizePath
+    ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
+    pure (map (makeRelative cwd) (maybeToList appSchema) <> maybeToList ihpSchema)
 
 -- | Prefer generated dependencies scoped to the tables used by a typed query.
 -- Falls back to the full schema whenever the generated dependency set is not
@@ -917,8 +919,9 @@ dependentSchemaFilesForTables (Just (tables, cteNames)) = do
             if cteShadowsGeneratedTable || not generatedDependenciesExist
                 then dependentSchemaFiles
                 else do
-                    ihpSchema <- findIhpSchema
-                    mapM canonicalizePath (generatedDependencies <> maybeToList ihpSchema)
+                    cwd <- getCurrentDirectory
+                    ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
+                    pure (map (makeRelative cwd) generatedDependencies <> maybeToList ihpSchema)
 
 discoverSchemaInputs :: IO SchemaInputs
 discoverSchemaInputs = do
