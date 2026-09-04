@@ -49,20 +49,17 @@ parseSql sql =
         Left _err -> Nothing
         Right stmt -> Just stmt
 
--- | Extract every base table referenced by a statement.
---
--- CTE names can shadow real tables, so statements containing CTEs fall back
--- to the full schema dependency instead of risking a stale typed query.
-extractReferencedTablesFromAst :: Ast.PreparableStmt -> Maybe (Set.Set Text)
-extractReferencedTablesFromAst stmt
-    | containsCommonTableExpression stmt = Nothing
-    | Set.null tables = Nothing
-    | otherwise = Just tables
+-- | Extract every base table referenced by a statement together with CTE names.
+-- The caller uses the CTE names to conservatively reject aliases which shadow
+-- real generated tables.
+extractReferencedTablesFromAst :: Ast.PreparableStmt -> Maybe (Set.Set Text, Set.Set Text)
+extractReferencedTablesFromAst stmt = Just (tables, cteNames)
   where
+    cteNames = Set.fromList (map commonTableExpressionName (collectCommonTableExpressions stmt))
     tables = Set.fromList
         ( map relationExprName (collectRelationExpressions stmt)
         <> map insertTargetName (collectInsertTargets stmt)
-        )
+        ) `Set.difference` cteNames
 
     insertTargetName (Ast.InsertTarget qualifiedName _alias) =
         qualifiedNameToText qualifiedName
@@ -77,10 +74,14 @@ collectInsertTargets value =
     maybeToList (Data.cast value)
         <> concat (Data.gmapQ collectInsertTargets value)
 
-containsCommonTableExpression :: Data.Data value => value -> Bool
-containsCommonTableExpression value =
-    isJust (Data.cast value :: Maybe Ast.CommonTableExpr)
-        || or (Data.gmapQ containsCommonTableExpression value)
+collectCommonTableExpressions :: Data.Data value => value -> [Ast.CommonTableExpr]
+collectCommonTableExpressions value =
+    maybeToList (Data.cast value)
+        <> concat (Data.gmapQ collectCommonTableExpressions value)
+
+commonTableExpressionName :: Ast.CommonTableExpr -> Text
+commonTableExpressionName (Ast.CommonTableExpr name _columns _materialized _statement) =
+    identToText name
 
 -- | Extract parameter hints by parsing SQL and walking the AST.
 -- Falls back to empty map if parsing fails.

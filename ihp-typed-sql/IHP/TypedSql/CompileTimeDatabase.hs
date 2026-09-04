@@ -849,6 +849,7 @@ initializeDatabase tools schemaInputs database@AutoDatabase { adbRoot, adbPgHost
         ]
     runCheckedTracked tools database (dropdbPath tools)
         ["-h", adbPgHost, "-p", privatePostgreSqlPort, "--maintenance-db=app", "postgres"]
+    createConfiguredRoles tools database
     forM_ (catMaybes [siIhpSchema schemaInputs, Just (siAppSchema schemaInputs)]) \schemaFile ->
         runCheckedTracked tools database (psqlPath tools)
             [ "-v", "ON_ERROR_STOP=1", "-h", adbPgHost, "-p", privatePostgreSqlPort
@@ -856,6 +857,25 @@ initializeDatabase tools schemaInputs database@AutoDatabase { adbRoot, adbPgHost
             ]
     Prelude.writeFile (adbRoot </> "schema.hash") (siHash schemaInputs)
     pure database { adbSchemaHash = siHash schemaInputs }
+
+createConfiguredRoles :: PostgreSqlTools -> AutoDatabase -> IO ()
+createConfiguredRoles tools database@AutoDatabase { adbPgHost } = do
+    configured <- lookupEnv "IHP_TYPED_SQL_AUTO_DB_ROLES"
+    forM_ (maybe [] (concatMap Prelude.words . splitOn ',') configured) \role -> do
+        unless (validRoleName role) do
+            fail ("typedSql: invalid role name in IHP_TYPED_SQL_AUTO_DB_ROLES: " <> role)
+        runCheckedTracked tools database (psqlPath tools)
+            [ "-v", "ON_ERROR_STOP=1", "-h", adbPgHost, "-p", privatePostgreSqlPort
+            , "app", "-c", "CREATE ROLE \"" <> role <> "\" NOLOGIN"
+            ]
+  where
+    splitOn delimiter input = case break (== delimiter) input of
+        (prefix, []) -> [prefix]
+        (prefix, _:rest) -> prefix : splitOn delimiter rest
+    validRoleName [] = False
+    validRoleName (first:rest) =
+        (Char.isAsciiLower first || Char.isAsciiUpper first || first == '_')
+            && all (\character -> Char.isAlphaNum character || character == '_' || character == '$') rest
 
 dependentSchemaFiles :: IO [FilePath]
 dependentSchemaFiles = do
@@ -866,33 +886,39 @@ dependentSchemaFiles = do
 -- | Prefer generated dependencies scoped to the tables used by a typed query.
 -- Falls back to the full schema whenever the generated dependency set is not
 -- complete, which keeps standalone users and unsupported SQL shapes safe.
-dependentSchemaFilesForTables :: Maybe (Set.Set Text.Text) -> IO [FilePath]
+dependentSchemaFilesForTables :: Maybe (Set.Set Text.Text, Set.Set Text.Text) -> IO [FilePath]
 dependentSchemaFilesForTables Nothing = dependentSchemaFiles
-dependentSchemaFilesForTables (Just tables)
-    | Set.null tables = dependentSchemaFiles
-    | otherwise = do
-        findAppSchema >>= \case
-            Nothing -> dependentSchemaFiles
-            Just appSchema -> do
-                absoluteSchema <- canonicalizePath appSchema
-                let projectRoot = takeDirectory (takeDirectory absoluteSchema)
-                let generatedRoot = projectRoot </> "build" </> "Generated"
-                let globalDependency = generatedRoot </> "TypedSqlSchemaDependencies"
-                let tableDependencies =
-                        tables
-                            |> Set.toList
-                            |> map (\tableName ->
-                                generatedRoot
-                                    </> "ActualTypes"
-                                    </> CS.cs (tableNameToModelName tableName <> ".hs")
-                            )
-                let generatedDependencies = globalDependency : tableDependencies
-                generatedDependenciesExist <- and <$> mapM doesFileExist generatedDependencies
-                if not generatedDependenciesExist
-                    then dependentSchemaFiles
-                    else do
-                        ihpSchema <- findIhpSchema
-                        mapM canonicalizePath (generatedDependencies <> maybeToList ihpSchema)
+dependentSchemaFilesForTables (Just (tables, cteNames)) = do
+    findAppSchema >>= \case
+        Nothing -> dependentSchemaFiles
+        Just appSchema -> do
+            absoluteSchema <- canonicalizePath appSchema
+            let projectRoot = takeDirectory (takeDirectory absoluteSchema)
+            let generatedRoot = projectRoot </> "build" </> "Generated"
+            let globalDependency = generatedRoot </> "TypedSqlSchemaDependencies"
+            let tableDependencies =
+                    tables
+                        |> Set.toList
+                        |> map (\tableName ->
+                            generatedRoot
+                                </> "ActualTypes"
+                                </> CS.cs (tableNameToModelName tableName <> ".hs")
+                        )
+            let generatedDependencies = globalDependency : tableDependencies
+            generatedDependenciesExist <- and <$> mapM doesFileExist generatedDependencies
+            cteShadowsGeneratedTable <- or <$> mapM
+                (\tableName -> doesFileExist
+                    ( generatedRoot
+                        </> "ActualTypes"
+                        </> CS.cs (tableNameToModelName tableName <> ".hs")
+                    )
+                )
+                (Set.toList cteNames)
+            if cteShadowsGeneratedTable || not generatedDependenciesExist
+                then dependentSchemaFiles
+                else do
+                    ihpSchema <- findIhpSchema
+                    mapM canonicalizePath (generatedDependencies <> maybeToList ihpSchema)
 
 discoverSchemaInputs :: IO SchemaInputs
 discoverSchemaInputs = do

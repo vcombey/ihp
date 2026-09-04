@@ -51,7 +51,8 @@ import qualified Prelude
 tests :: Spec
 tests = do
     describe "TypedSql schema dependencies" do
-        let referencedTables sql = parseSql sql >>= extractReferencedTablesFromAst
+        let referencedTables sql = fmap fst (parseSql sql >>= extractReferencedTablesFromAst)
+        let referencedTablesAndCtes sql = parseSql sql >>= extractReferencedTablesFromAst
 
         it "extracts tables across joins and nested subqueries" do
             referencedTables "SELECT i.name FROM typed_sql_test_items i JOIN typed_sql_test_authors a ON a.id = i.author_id WHERE EXISTS (SELECT 1 FROM typed_sql_test_extras e WHERE e.id = i.id)"
@@ -65,11 +66,15 @@ tests = do
             referencedTables "DELETE FROM typed_sql_test_items USING typed_sql_test_extras WHERE typed_sql_test_extras.id = typed_sql_test_items.id"
                 `shouldBe` Just (Set.fromList ["typed_sql_test_items", "typed_sql_test_extras"])
 
-        it "falls back for CTEs and statements without a base table" do
+        it "extracts base tables through CTEs and accepts statements without a base table" do
             referencedTables "WITH items AS (SELECT id FROM typed_sql_test_items) SELECT id FROM items"
-                `shouldBe` Nothing
+                `shouldBe` Just (Set.fromList ["typed_sql_test_items"])
+            referencedTables "WITH first_items AS (SELECT id FROM typed_sql_test_items), joined_items AS (SELECT first_items.id FROM first_items JOIN typed_sql_test_extras ON typed_sql_test_extras.id = first_items.id) SELECT id FROM joined_items"
+                `shouldBe` Just (Set.fromList ["typed_sql_test_items", "typed_sql_test_extras"])
+            referencedTablesAndCtes "WITH typed_sql_test_items AS (SELECT id FROM typed_sql_test_extras) SELECT id FROM typed_sql_test_items"
+                `shouldBe` Just (Set.singleton "typed_sql_test_extras", Set.singleton "typed_sql_test_items")
             referencedTables "SELECT 1"
-                `shouldBe` Nothing
+                `shouldBe` Just Set.empty
 
     describe "TypedSql macro compile-time checks" do
         it "compiles valid typedSql queries with inferred types" do
@@ -694,7 +699,7 @@ tests = do
                         , ("IHP_TYPED_SQL_SCHEMA", schemaPath)
                         ]
                 ghciOutput <- ghciLoadModuleWithEnv
-                    (mkTestModule "TypedQuery Text"
+                    (mkTestModule "TypedQuery 'AtMostOneRow 'ReturnsRows Text"
                         "[typedSql| SELECT name FROM typed_sql_auto_role_items LIMIT 1 |]")
                     envOverrides
                 assertGhciSuccess ghciOutput
