@@ -570,7 +570,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.LandingPage where
                         fromRow = do
                             id <- field
-                            let theRecord = Generated.ActualTypes.LandingPage id (Generated.RelationQueries.ParagraphCta.filterByLandingPageId id) (Generated.RelationQueries.ParagraphCta.filterByToLandingPageId (Just id)) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.LandingPage id (QueryBuilder.filterWhereRelation "landingPageId" id (QueryBuilder.queryRelation @"paragraph_ctas")) (QueryBuilder.filterWhereRelation "toLandingPageId" (Just id) (QueryBuilder.queryRelation @"paragraph_ctas")) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
 
                     instance FromRowHasql Generated.ActualTypes.LandingPage where
@@ -622,7 +622,7 @@ tests = do
 
                     instance Record Generated.ActualTypes.LandingPage where
                         {-# INLINE newRecord #-}
-                        newRecord = Generated.ActualTypes.LandingPage def Generated.RelationQueries.ParagraphCta.queryBuilder Generated.RelationQueries.ParagraphCta.queryBuilder def
+                        newRecord = Generated.ActualTypes.LandingPage def (QueryBuilder.queryRelation @"paragraph_ctas") (QueryBuilder.queryRelation @"paragraph_ctas") def
 
 
                     instance QueryBuilder.FilterPrimaryKey "landing_pages" where
@@ -684,7 +684,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.Thing where
                         fromRow = do
                             thingArbitraryIdent <- field
-                            let theRecord = Generated.ActualTypes.Thing thingArbitraryIdent (Generated.RelationQueries.Other.filterByThingRef thingArbitraryIdent) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.Thing thingArbitraryIdent (QueryBuilder.filterWhereRelation "thingRef" thingArbitraryIdent (QueryBuilder.queryRelation @"others")) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
                     |]
             it "should compile Table instance" $ \statement -> do
@@ -766,7 +766,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.Part where
                         fromRow = do
                             partArbitraryIdent <- field
-                            let theRecord = Generated.ActualTypes.Part partArbitraryIdent (Generated.RelationQueries.BitPartRef.filterByPartRef partArbitraryIdent) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.Part partArbitraryIdent (QueryBuilder.filterWhereRelation "partRef" partArbitraryIdent (QueryBuilder.queryRelation @"bit_part_refs")) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
                     |]
             it "should compile QueryBuilder.FilterPrimaryKey instance" $ \statement -> do
