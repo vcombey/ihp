@@ -13,6 +13,44 @@ import IDE.SchemaDesigner.ParserSpec (parseSqlStatements)
 
 tests = do
     describe "SchemaCompiler" do
+        describe "granular schema dependencies" do
+            let baseSchema = parseSqlStatements [trimming|
+                    CREATE TABLE users (
+                        id UUID PRIMARY KEY NOT NULL
+                    );
+                |]
+
+            it "generates stable id aliases without importing record types" do
+                compileStableIds (Schema baseSchema)
+                    `shouldSatisfy` Text.isInfixOf "type UserId = Id' \"users\""
+
+            it "ignores runtime-only index and RLS changes" do
+                let runtimeSchema = parseSqlStatements [trimming|
+                        CREATE TABLE users (
+                            id UUID PRIMARY KEY NOT NULL
+                        );
+                        CREATE INDEX users_id_idx ON users (id);
+                        ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+                        CREATE POLICY users_policy ON users USING (true);
+                    |]
+                compileTypedSqlSchemaDependencies (Schema runtimeSchema)
+                    `shouldBe` compileTypedSqlSchemaDependencies (Schema baseSchema)
+
+            it "tracks enum changes" do
+                let enumSchema = baseSchema <> [CreateEnumType { name = "mood", values = ["happy"] }]
+                compileTypedSqlSchemaDependencies (Schema enumSchema)
+                    `shouldNotBe` compileTypedSqlSchemaDependencies (Schema baseSchema)
+
+            it "leaves table changes to table-scoped dependencies" do
+                let columnSchema = parseSqlStatements [trimming|
+                        CREATE TABLE users (
+                            id UUID PRIMARY KEY NOT NULL,
+                            name TEXT
+                        );
+                    |]
+                compileTypedSqlSchemaDependencies (Schema columnSchema)
+                    `shouldBe` compileTypedSqlSchemaDependencies (Schema baseSchema)
+
         describe "compileEnumDataDefinitions" do
             it "should deal with enum values that have spaces" do
                 let statement = CreateEnumType { name = "mood", values = ["happy", "very happy", "sad", "very sad"] }

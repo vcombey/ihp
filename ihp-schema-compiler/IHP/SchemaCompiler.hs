@@ -10,6 +10,8 @@ module IHP.SchemaCompiler
 , compileFetchByIdStatement
 , compileCreateManyStatement
 , compileRowDecoderModule
+, compileStableIds
+, compileTypedSqlSchemaDependencies
 , Schema(..)
 ) where
 
@@ -58,6 +60,7 @@ compileModules options schema =
     let ?compilerOptions = options
     in [ ("build/Generated/Enums.hs", compileEnums options schema)
        , ("build/Generated/ActualTypes/PrimaryKeys.hs", compilePrimaryKeysModule schema)
+       , ("build/Generated/Ids.hs", compileStableIds schema)
        ]
        <> actualTypesTableModules schema
        <> [ ("build/Generated/ActualTypes.hs", compileTypes options schema) ]
@@ -70,18 +73,37 @@ compileModules options schema =
 
 compileTypedSqlSchemaDependencies :: Schema -> Text
 compileTypedSqlSchemaDependencies (Schema statements) = Text.unlines
-    [ "typed-sql-schema-dependencies-v1"
-    , tshow tableInventory
-    , tshow nonTableStatements
+    [ "typed-sql-schema-dependencies-v3"
+    , Text.unlines (mapMaybe typedSqlGlobalDependency statements)
     ]
   where
-    tableInventory = statements |> mapMaybe (\case
-        StatementCreateTable table -> Just (table.name, tableHasPrimaryKey table)
+    -- Table-scoped dependencies track table and constraint changes. This file
+    -- only tracks schema-wide objects a query may use alongside its tables.
+    typedSqlGlobalDependency = \case
+        statement@CreateEnumType {} -> Just (tshow statement)
+        statement@DropEnumType {} -> Just (tshow statement)
+        statement@AddValueToEnumType {} -> Just (tshow statement)
+        CreateFunction { functionName, functionArguments, returns } ->
+            Just (tshow (functionName, functionArguments, returns))
+        statement@DropFunction {} -> Just (tshow statement)
+        statement@CreateExtension {} -> Just (tshow statement)
+        statement@UnknownStatement {} -> Just (tshow statement)
         _ -> Nothing
-        )
-    nonTableStatements = statements |> filter (\case
-        StatementCreateTable _ -> False
-        _ -> True
+
+compileStableIds :: Schema -> Text
+compileStableIds (Schema statements) = Text.unlines
+    [ "-- This file is auto generated and will be overriden regulary."
+    , "{-# LANGUAGE DataKinds #-}"
+    , "module Generated.Ids where"
+    , "import IHP.ModelSupport.Types (Id')"
+    , "import Generated.ActualTypes.PrimaryKeys ()"
+    , Text.unlines aliases
+    ]
+  where
+    aliases = statements |> mapMaybe (\case
+        StatementCreateTable table | tableHasPrimaryKey table ->
+            Just ("type " <> tableNameToModelName table.name <> "Id = Id' \"" <> table.name <> "\"")
+        _ -> Nothing
         )
 
 applyTables :: (CreateTable -> (OsPath, Text)) -> Schema -> [(OsPath, Text)]
