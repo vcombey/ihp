@@ -1221,7 +1221,7 @@ compileFromRowQueryBuilder table (refTableName, refFieldName, maybeRefColumn) =
         <> relationFilterFunctionName refFieldName <> " " <> primaryKeyField <> ")"
     where
         primaryKeyField :: Text
-        primaryKeyField = if refColumn.notNull then actualPrimaryKeyField else "Just " <> actualPrimaryKeyField
+        primaryKeyField = if refColumn.notNull then actualPrimaryKeyField else "(Just " <> actualPrimaryKeyField <> ")"
         actualPrimaryKeyField :: Text
         actualPrimaryKeyField = case maybeRefColumn of
                 -- When the FK constraint specifies the referenced column, use it directly.
