@@ -8,6 +8,7 @@ This module provides all the filterWhere* functions for building WHERE clauses.
 -}
 module IHP.QueryBuilder.Filter
 ( filterWhere
+, filterWhereRelation
 , filterWhereCaseInsensitive
 , filterWhereNot
 , filterWhereIn
@@ -96,6 +97,15 @@ filterWhere (name, value) queryBuilder = addCondition condition queryBuilder
         condition = let op = toEqOrIsOperator value in ColumnCondition columnName op (condValueForOp op value) Nothing Nothing
         columnName = qualifiedColumnName (queryBuilderTableName queryBuilder) (symbolToText @name)
 {-# INLINE filterWhere #-}
+
+-- | The generated relation equivalent of 'filterWhere'. The schema compiler
+-- supplies the field name, so no related model import is needed here.
+filterWhereRelation :: (DefaultParamEncoder value, EqOrIsOperator value) => Text -> value -> QueryBuilder table -> QueryBuilder table
+filterWhereRelation fieldName value queryBuilder = addCondition condition queryBuilder
+    where
+        condition = let op = toEqOrIsOperator value in ColumnCondition columnName op (condValueForOp op value) Nothing Nothing
+        columnName = qualifiedColumnName (queryBuilderTableName queryBuilder) fieldName
+{-# INLINE filterWhereRelation #-}
 
 -- | Like 'filterWhere' but negates the condition.
 --

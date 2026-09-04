@@ -8,6 +8,7 @@ This module provides functions to compile a QueryBuilder into SQL.
 -}
 module IHP.QueryBuilder.Compiler
 ( query
+, queryRelation
 , buildQuery
 , negateFilterOperator
 , qualifiedColumnName
@@ -68,6 +69,25 @@ query = let tn = tableName @model
     , offsetClause = Nothing
     } }
 {-# INLINE query #-}
+
+-- | Builds the initial query used by generated has-many relation fields without
+-- importing the related model. Fetching replaces the @table.*@ projection with
+-- the model's explicit column list before decoding.
+queryRelation :: forall table. KnownSymbol table => QueryBuilder table
+queryRelation =
+    let tn = symbolToText @table
+    in QueryBuilder { unQueryBuilder = SQLQuery
+        { selectFrom = tn
+        , columns = []
+        , columnsSql = tn <> ".*"
+        , distinctClause = False
+        , distinctOnClause = Nothing
+        , whereCondition = Nothing
+        , orderByClause = []
+        , limitClause = Nothing
+        , offsetClause = Nothing
+        } }
+{-# INLINE queryRelation #-}
 
 -- | Extract the SQLQuery from a QueryBuilder.
 {-# INLINE buildQuery #-}
