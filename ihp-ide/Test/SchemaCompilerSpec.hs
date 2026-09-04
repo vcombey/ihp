@@ -533,7 +533,7 @@ tests = do
                     CREATE TABLE paragraph_ctas (
                         id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL,
                         landing_page_id UUID NOT NULL,
-                        to_landing_page_id UUID NOT NULL
+                        to_landing_page_id UUID
                     );
                     ALTER TABLE paragraph_ctas ADD CONSTRAINT paragraph_ctas_ref_landing_page_id FOREIGN KEY (landing_page_id) REFERENCES landing_pages (id) ON DELETE NO ACTION;
                     ALTER TABLE paragraph_ctas ADD CONSTRAINT paragraph_ctas_ref_to_landing_page_id FOREIGN KEY (to_landing_page_id) REFERENCES landing_pages (id) ON DELETE NO ACTION;
@@ -570,7 +570,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.LandingPage where
                         fromRow = do
                             id <- field
-                            let theRecord = Generated.ActualTypes.LandingPage id (Generated.RelationQueries.ParagraphCta.filterByLandingPageId id) (Generated.RelationQueries.ParagraphCta.filterByToLandingPageId id) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.LandingPage id (Generated.RelationQueries.ParagraphCta.filterByLandingPageId id) (Generated.RelationQueries.ParagraphCta.filterByToLandingPageId (Just id)) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
 
                     instance FromRowHasql Generated.ActualTypes.LandingPage where
