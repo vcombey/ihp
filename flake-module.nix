@@ -22,6 +22,20 @@ ihpFlake:
             options.ihp = {
                 enable = lib.mkEnableOption "Enable IHP support";
 
+                devBuildCache = {
+                    enable = lib.mkEnableOption "Share completed development GHC objects between trusted Git worktrees";
+                    slots = lib.mkOption {
+                        type = lib.types.ints.between 1 64;
+                        default = 2;
+                        description = "Host-wide concurrent development compilations. Use the same value in all participating projects.";
+                    };
+                    extraInputs = lib.mkOption {
+                        type = lib.types.listOf lib.types.str;
+                        default = [];
+                        description = "Additional ignored project-relative files used by Template Haskell or preprocessing.";
+                    };
+                };
+
                 ghcCompiler = lib.mkOption {
                     description = ''
                         The GHC compiler to use for IHP.
@@ -555,6 +569,12 @@ ihpFlake:
                 # Disabled for now
                 # Can be re-enabled once postgres is provided by devenv instead of IHP
                 env.IHP_DEVENV = "1";
+                env.IHP_DEV_CACHE_HELPER = lib.mkIf cfg.devBuildCache.enable
+                    "${pkgs.writeShellScriptBin "ihp-dev-cache" ''
+                        exec ${pkgs.python3}/bin/python3 ${ihp}/ihp-ide/data/dev-cache.py "$@"
+                    ''}/bin/ihp-dev-cache";
+                env.IHP_DEV_BUILD_SLOTS = lib.mkIf cfg.devBuildCache.enable (toString cfg.devBuildCache.slots);
+                env.IHP_DEV_CACHE_INPUTS = lib.mkIf cfg.devBuildCache.enable (builtins.toJSON cfg.devBuildCache.extraInputs);
                 env.DATABASE_URL = "postgres:///app?host=${config.devenv.shells.default.env.PGHOST}";
                 env.PGDATABASE = "app";
                 # Lets typedSql typecheck in non-interactive GHCi/build sessions

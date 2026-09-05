@@ -16,6 +16,9 @@ This guide walks you through the tools IHP provides for each situation. It assum
 
 ## Reading Compiler Errors
 
+For repeated compilation across several Git worktrees, see
+[Sharing Development Builds Between Git Worktrees](development-build-cache.markdown).
+
 When the IHP dev server detects a code change, it recompiles your project automatically. If GHC finds an error, the dev server shows it directly in your browser instead of your application. You will see a dark-themed error page with the file name, line number, and error details.
 
 The most important part of any GHC error is the **first line**, which tells you the file, line, and column:

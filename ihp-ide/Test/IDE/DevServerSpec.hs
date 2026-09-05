@@ -4,6 +4,14 @@ import IHP.Prelude
 import Test.Hspec
 import qualified Data.ByteString.Char8 as ByteString
 import IHP.IDE.Types (extractCrashMessage)
+import IHP.IDE.GhciSupport (ghciLoadSucceeded)
+
+ghciTests :: Spec
+ghciTests = describe "GHCi compilation completion" do
+    forM_ ["Ok, one module loaded.", "Ok, one module reloaded.", "Ok, 25 modules loaded.", "Ok, 25 modules reloaded."] \message ->
+        it (cs message) (ghciLoadSucceeded message `shouldBe` True)
+    it "does not classify a failed load as successful" do
+        ghciLoadSucceeded "Failed, no modules loaded." `shouldBe` False
 
 tests :: Spec
 tests = describe "IHP.IDE.Types.extractCrashMessage" $ do

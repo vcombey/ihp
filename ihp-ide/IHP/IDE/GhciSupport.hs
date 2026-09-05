@@ -19,6 +19,7 @@ module IHP.IDE.GhciSupport
 , sendGhciCommands
   -- * Reading GHCi output
 , readHandleLines
+, ghciLoadSucceeded
   -- * Stopping GHCi
 , withSigTermHandler
 , stopProcessHandle
@@ -127,6 +128,12 @@ sendGhciCommand inputHandle command = do
 
 sendGhciCommands :: Handle -> [ByteString] -> IO ()
 sendGhciCommands handle commands = forM_ commands (sendGhciCommand handle)
+
+-- | GHC uses singular wording for a one-module application or worker.
+-- Both initial loads and reloads must release their compilation transaction.
+ghciLoadSucceeded :: ByteString -> Bool
+ghciLoadSucceeded line = not ("Failed," `isInfixOf` line) && any (`isInfixOf` line)
+    [ "modules loaded.", "modules reloaded.", "module loaded.", "module reloaded." ]
 
 -- | Read lines from a handle, accumulating output and classifying each line.
 -- Races against @stopVar@ being filled — when the MVar is readable, reading stops.

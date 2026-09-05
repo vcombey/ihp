@@ -14,7 +14,7 @@ category:            Web, IHP
 stability:           Stable
 tested-with:         GHC == 9.8.4
 build-type:          Simple
-extra-source-files:  changelog.md
+extra-source-files:  changelog.md, Test/dev-cache-test.py
 data-dir: data
 data-files:
       lib/IHP/Makefile.dist
@@ -22,6 +22,7 @@ data-files:
     , lib/IHP/applicationGhciConfig
     , lib/IHP/sharedApplicationGhciConfig
     , lib/IHP/workerApplicationGhciConfig
+    , dev-cache.py
     , IHPSchema.sql
     , static/IDE/*.css
     , static/IDE/*.js
@@ -231,6 +232,7 @@ library
         , IHP.IDE.LiveReloadNotificationServer
         , IHP.IDE.FileWatcher
         , IHP.IDE.GhciSupport
+        , IHP.IDE.DevCache
         , IHP.IDE.PortConfig
         , IHP.IDE.Postgres
         , IHP.IDE.SplitMode

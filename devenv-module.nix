@@ -9,6 +9,15 @@ that is defined in flake-module.nix
     let
                     ihpLib = config.packages.ihp-env-var-backwards-compat;
 
+                    devBuildCacheCheck = compiler: pkgs.runCommand "ihp-dev-build-cache-tests" {
+                        nativeBuildInputs = [ pkgs.python3 pkgs.git (compiler.ghc.withPackages (p: [ p.ihp ])) ];
+                    } ''
+                        export PYTHONDONTWRITEBYTECODE=1
+                        export IHP_TEST_DEV_WORKER=${compiler.ihp-ide}/bin/RunDevWorker
+                        python3 ${self}/ihp-ide/Test/dev-cache-test.py
+                        touch $out
+                    '';
+
                     # Wrap a package's check phase with a temporary PostgreSQL server
                     withTestPostgres = pkg: pkg.overrideAttrs (old: {
                         nativeCheckInputs = (old.nativeCheckInputs or [])
@@ -48,6 +57,7 @@ that is defined in flake-module.nix
             # Checks devShells
             ihp-devShell = self.devShells.${system}.default;
             boilerplate-devShell = inputs.ihp-boilerplate.devShells.${system}.default;
+            dev-build-cache = devBuildCacheCheck pkgs.ghc;
         }
             # Add all package outputs to the checks
             // (lib.filterAttrs (n: v: lib.isDerivation v && n != "default") self.packages.${system})
@@ -184,6 +194,7 @@ that is defined in flake-module.nix
             # GHC 9.14 packages that need a running PostgreSQL for their tests
             // {
                 ghc914-ihp = withTestPostgres pkgs.ghc914.ihp;
+                ghc914-dev-build-cache = devBuildCacheCheck pkgs.ghc914;
                 ghc914-ihp-datasync = withTestPostgres pkgs.ghc914.ihp-datasync;
                 ghc914-ihp-typed-sql = withTestPostgres pkgs.ghc914.ihp-typed-sql;
                 ghc914-ihp-pglistener = withTestPostgres pkgs.ghc914.ihp-pglistener;
