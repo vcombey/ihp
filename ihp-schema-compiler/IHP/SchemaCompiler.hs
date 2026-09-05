@@ -147,7 +147,7 @@ tableIncludeModule table =
             -- This file is auto generated and will be overriden regulary. Please edit `Application/Schema.sql` to change the Types\n"
             module $moduleName where
             $typesImports
-            import IHP.ModelSupport (Include, GetModelById)
+            import IHP.ModelSupport (Include, GetModelById, GetModelByTableName)
         |] <> "\n\n"
 
 
@@ -752,9 +752,8 @@ qualifiedConstructorNameFromTableName unqualifiedName = "Generated.ActualTypes."
 --
 -- These modules only reference the table's own record (qualified as
 -- @Generated.ActualTypes.<Model>@ — the alias import keeps those references
--- working), enums, primary keys and, with relation support enabled, the models
--- referencing this table (which appear unqualified in generated
--- @query \@Model@ expressions).
+-- working), enums and primary keys. Generated relation queries use only their
+-- table symbol and field name, so they do not import the related model.
 --
 -- Importing exactly these instead of the aggregator keeps a table module's
 -- interface hash independent of unrelated tables. That matters because these
@@ -763,7 +762,7 @@ qualifiedConstructorNameFromTableName unqualifiedName = "Generated.ActualTypes."
 -- transitively imported any per-table module was recompiled on every
 -- @Schema.sql@ change, no matter which table changed.
 generatedTypesImports :: (?schema :: Schema, ?compilerOptions :: CompilerOptions) => CreateTable -> Text
-generatedTypesImports table = Text.unlines (ownImports <> referencingImports)
+generatedTypesImports table = Text.unlines ownImports
     where
         modelName = tableNameToModelName table.name
         ownImports =
@@ -771,14 +770,6 @@ generatedTypesImports table = Text.unlines (ownImports <> referencingImports)
             , "import Generated.Enums"
             , "import Generated.ActualTypes.PrimaryKeys"
             ]
-        referencingImports =
-            if ?compilerOptions.compileRelationSupport
-                then columnsReferencingTable table.name
-                        |> map (\(refTableName, _, _) -> tableNameToModelName refTableName)
-                        |> filter (/= modelName)
-                        |> ordNub
-                        |> map ("import Generated.ActualTypes." <>)
-                else []
 
 --
 -- Trigger types don't have encoders as they're not real data columns.
@@ -919,10 +910,12 @@ compileFromRowHasqlInstance table@(CreateTable { name, columns }) =
 |]
 
 compileFromRowQueryBuilder :: (?schema :: Schema) => CreateTable -> (Text, Text, Maybe Text) -> Text
-compileFromRowQueryBuilder table (refTableName, refFieldName, maybeRefColumn) = "(QueryBuilder.filterWhere (#" <> columnNameToFieldName refFieldName <> ", " <> primaryKeyField <> ") (QueryBuilder.query @" <> tableNameToModelName refTableName <> "))"
+compileFromRowQueryBuilder table (refTableName, refFieldName, maybeRefColumn) =
+    "(QueryBuilder.filterWhereRelation " <> tshow (columnNameToFieldName refFieldName)
+        <> " " <> primaryKeyField <> " (QueryBuilder.queryRelation @" <> tshow refTableName <> "))"
     where
         primaryKeyField :: Text
-        primaryKeyField = if refColumn.notNull then actualPrimaryKeyField else "Just " <> actualPrimaryKeyField
+        primaryKeyField = if refColumn.notNull then actualPrimaryKeyField else "(Just " <> actualPrimaryKeyField <> ")"
         actualPrimaryKeyField :: Text
         actualPrimaryKeyField = case maybeRefColumn of
                 -- When the FK constraint specifies the referenced column, use it directly.
@@ -1016,7 +1009,9 @@ compileBuild table@(CreateTable { name }) =
         columns = allColumnsIncludingInherited table
         constructor = qualifiedConstructorNameFromTableName name
         qbDefaults = if ?compilerOptions.compileRelationSupport
-            then columnsReferencingTable name |> map (const "def") |> unwords
+            then columnsReferencingTable name
+                |> map (\(refTableName, _, _) -> "(QueryBuilder.queryRelation @" <> tshow refTableName <> ")")
+                |> unwords
             else ""
     in
         "instance Record " <> constructor <> " where\n"
@@ -1147,7 +1142,7 @@ compileInclude table@(CreateTable { name }) = (belongsToIncludes <> hasManyInclu
         compileBelongsTo column = includeType (columnNameToFieldName column.name) ("(GetModelById " <> columnNameToFieldName column.name <> ")")
 
         compileHasMany :: (Text, Text) -> Text
-        compileHasMany (refTableName, refColumnName) = includeType refColumnName ("[" <> tableNameToModelName refTableName <> "]")
+        compileHasMany (refTableName, refColumnName) = includeType refColumnName ("[GetModelByTableName " <> tshow refTableName <> "]")
 
 
 compileSetFieldInstances :: (?schema :: Schema, ?compilerOptions :: CompilerOptions) => CreateTable -> Text

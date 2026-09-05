@@ -533,7 +533,7 @@ tests = do
                     CREATE TABLE paragraph_ctas (
                         id UUID DEFAULT uuid_generate_v4() PRIMARY KEY NOT NULL,
                         landing_page_id UUID NOT NULL,
-                        to_landing_page_id UUID NOT NULL
+                        to_landing_page_id UUID
                     );
                     ALTER TABLE paragraph_ctas ADD CONSTRAINT paragraph_ctas_ref_landing_page_id FOREIGN KEY (landing_page_id) REFERENCES landing_pages (id) ON DELETE NO ACTION;
                     ALTER TABLE paragraph_ctas ADD CONSTRAINT paragraph_ctas_ref_to_landing_page_id FOREIGN KEY (to_landing_page_id) REFERENCES landing_pages (id) ON DELETE NO ACTION;
@@ -570,7 +570,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.LandingPage where
                         fromRow = do
                             id <- field
-                            let theRecord = Generated.ActualTypes.LandingPage id (QueryBuilder.filterWhere (#landingPageId, id) (QueryBuilder.query @ParagraphCta)) (QueryBuilder.filterWhere (#toLandingPageId, id) (QueryBuilder.query @ParagraphCta)) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.LandingPage id (QueryBuilder.filterWhereRelation "landingPageId" id (QueryBuilder.queryRelation @"paragraph_ctas")) (QueryBuilder.filterWhereRelation "toLandingPageId" (Just id) (QueryBuilder.queryRelation @"paragraph_ctas")) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
 
                     instance FromRowHasql Generated.ActualTypes.LandingPage where
@@ -622,7 +622,7 @@ tests = do
 
                     instance Record Generated.ActualTypes.LandingPage where
                         {-# INLINE newRecord #-}
-                        newRecord = Generated.ActualTypes.LandingPage def def def def
+                        newRecord = Generated.ActualTypes.LandingPage def (QueryBuilder.queryRelation @"paragraph_ctas") (QueryBuilder.queryRelation @"paragraph_ctas") def
 
 
                     instance QueryBuilder.FilterPrimaryKey "landing_pages" where
@@ -684,7 +684,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.Thing where
                         fromRow = do
                             thingArbitraryIdent <- field
-                            let theRecord = Generated.ActualTypes.Thing thingArbitraryIdent (QueryBuilder.filterWhere (#thingRef, thingArbitraryIdent) (QueryBuilder.query @Other)) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.Thing thingArbitraryIdent (QueryBuilder.filterWhereRelation "thingRef" thingArbitraryIdent (QueryBuilder.queryRelation @"others")) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
                     |]
             it "should compile Table instance" $ \statement -> do
@@ -766,7 +766,7 @@ tests = do
                     instance FromRow Generated.ActualTypes.Part where
                         fromRow = do
                             partArbitraryIdent <- field
-                            let theRecord = Generated.ActualTypes.Part partArbitraryIdent (QueryBuilder.filterWhere (#partRef, partArbitraryIdent) (QueryBuilder.query @BitPartRef)) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
+                            let theRecord = Generated.ActualTypes.Part partArbitraryIdent (QueryBuilder.filterWhereRelation "partRef" partArbitraryIdent (QueryBuilder.queryRelation @"bit_part_refs")) def { originalDatabaseRecord = Just (Data.Dynamic.toDyn theRecord) }
                             pure theRecord
                     |]
             it "should compile QueryBuilder.FilterPrimaryKey instance" $ \statement -> do
