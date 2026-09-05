@@ -65,7 +65,24 @@ compileModules options schema =
        <> statementModules schema
        <> [ ("build/Generated/Statements.hs", compileStatementsIndex schema)
           , ("build/Generated/Types.hs", compileIndex schema)
+          , ("build/Generated/TypedSqlSchemaDependencies", compileTypedSqlSchemaDependencies schema)
           ]
+
+compileTypedSqlSchemaDependencies :: Schema -> Text
+compileTypedSqlSchemaDependencies (Schema statements) = Text.unlines
+    [ "typed-sql-schema-dependencies-v1"
+    , tshow tableInventory
+    , tshow nonTableStatements
+    ]
+  where
+    tableInventory = statements |> mapMaybe (\case
+        StatementCreateTable table -> Just (table.name, tableHasPrimaryKey table)
+        _ -> Nothing
+        )
+    nonTableStatements = statements |> filter (\case
+        StatementCreateTable _ -> False
+        _ -> True
+        )
 
 applyTables :: (CreateTable -> (OsPath, Text)) -> Schema -> [(OsPath, Text)]
 applyTables applyFunction schema =
@@ -88,6 +105,7 @@ actualTypesTableModule table =
     where
         body = Text.unlines
             [ prelude
+            , "-- typedSql table dependency: " <> tshow (tshow table)
             , compileActualTypesForTable table
             ]
         moduleName = "Generated.ActualTypes." <> tableNameToModelName table.name
