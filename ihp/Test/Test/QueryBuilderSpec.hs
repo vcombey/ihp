@@ -7,6 +7,7 @@ module Test.QueryBuilderSpec where
 import Test.Hspec
 import IHP.Prelude
 import IHP.QueryBuilder
+import IHP.Fetch.Statement (selectModelColumns)
 import IHP.ModelSupport
 import IHP.Job.Types (JobStatus(..))
 import IHP.Job.Queue ()
@@ -21,6 +22,13 @@ tests = do
                 let theQuery = query @Post
 
                 (toSQL theQuery) `shouldBe` ("SELECT " <> postColumns <> " FROM posts")
+
+            it "should defer generated relation columns until fetch" do
+                let theQuery = queryRelation @"posts"
+                        |> filterWhereRelation "title" ("Test" :: Text)
+
+                toSQL theQuery `shouldBe` "SELECT posts.* FROM posts WHERE posts.title = $1"
+                toSQL (selectModelColumns @Post theQuery) `shouldBe` ("SELECT " <> postColumns <> " FROM posts WHERE posts.title = $1")
 
         describe "filterWhere" do
             it "should produce a SQL with a WHERE condition" do
