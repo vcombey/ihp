@@ -303,6 +303,19 @@ ghci
 
 IHP's `.ghci` configuration file automatically loads the right extensions and modules.
 
+### Using a GHCi Wrapper
+
+Set `IHP_DEV_GHCI` in `.envrc` when the development server should launch a
+project wrapper instead of `ghci` directly:
+
+```bash
+export IHP_DEV_GHCI="$PWD/scripts/ghci-wrapper"
+```
+
+The web and worker processes pass their normal GHCi arguments to this
+executable unchanged. This supports project-local object caches and shared
+build budgets without changing IHP. The default remains `ghci`.
+
 ### Checking Types
 
 Use `:t` to check the type of any expression:

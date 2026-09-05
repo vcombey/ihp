@@ -9,8 +9,11 @@ of dev-server state) and 'DevWorker' (which has almost none).
 module IHP.IDE.GhciSupport
 ( -- * Spawning GHCi
   ghciArguments
+, ghciArgumentsForScript
+, devGhciExecutable
 , procGhci
 , withGhci
+, withGhciArguments
   -- * Talking to GHCi
 , sendGhciCommand
 , sendGhciCommands
@@ -27,6 +30,7 @@ import qualified Control.Exception.Safe as Exception
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.Builder as ByteString
 import qualified GHC.IO.Handle as Handle
+import qualified IHP.EnvVar as EnvVar
 import qualified System.Exit as Exit
 import qualified System.Posix.Signals as Signals
 import qualified System.Process as Process
@@ -43,24 +47,41 @@ import qualified System.Process as Process
 -- hands accumulated heap back to the OS between reloads, keeping the footprint
 -- close to a fresh load.
 ghciArguments :: [String]
-ghciArguments =
+ghciArguments = ghciArgumentsForScript ".ghci"
+
+-- | Build the standard dev-mode GHCi argv with a specific project script.
+--
+-- The web process uses the regular @.ghci@, while the split worker uses a
+-- generated variant that loads @build/RunJobs.hs@ without first compiling the
+-- web application's @Main.hs@.
+ghciArgumentsForScript :: FilePath -> [String]
+ghciArgumentsForScript scriptPath =
     [ "-threaded"
     , "-fomit-interface-pragmas"
     , "-j"
     , "-O0"
     , "-package-env -" -- Don't load global package environments — they conflict with our pinned set
     , "-ignore-dot-ghci" -- Skip the global ~/.ghc/ghci.conf which sometimes sets `+c +s`
-    , "-ghci-script", ".ghci" -- Manually point at the project's .ghci since we just disabled defaults
+    , "-ghci-script", scriptPath -- Manually point at the project script since we just disabled defaults
     , "+RTS", "-A32m", "-n4m", "-H64m", "-Iw60", "-N4", "-Fd1"
     ]
+
+-- | Executable used for dev-mode GHCi processes. Set @IHP_DEV_GHCI@ to a
+-- project wrapper that configures a persistent object cache or build budget.
+-- The wrapper receives the standard GHCi arguments unchanged.
+devGhciExecutable :: IO FilePath
+devGhciExecutable = EnvVar.envOrDefault "IHP_DEV_GHCI" "ghci"
 
 -- | Build a 'Process.CreateProcess' that launches GHCi, optionally wrapped in
 -- @direnv exec .@ so dev-shell environment variables are inherited.
 procGhci :: Bool -> [String] -> Process.CreateProcess
-procGhci wrapWithDirenv args =
+procGhci = procGhciWithExecutable "ghci"
+
+procGhciWithExecutable :: FilePath -> Bool -> [String] -> Process.CreateProcess
+procGhciWithExecutable executable wrapWithDirenv args =
     if wrapWithDirenv
-        then Process.proc "direnv" (["exec", ".", "ghci"] <> args)
-        else Process.proc "ghci" args
+        then Process.proc "direnv" (["exec", ".", executable] <> args)
+        else Process.proc executable args
 
 -- | Spawn GHCi, wire up its stdio pipes, install a SIGTERM handler that
 -- gracefully tears down the GHCi process group, and run the callback with
@@ -71,8 +92,20 @@ withGhci
     -> Concurrent.ThreadId -- ^ thread to interrupt with 'Exit.ExitSuccess' on SIGTERM
     -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a)
     -> IO a
-withGhci wrapWithDirenv mainThreadId callback = do
-    let baseParams = procGhci wrapWithDirenv ghciArguments
+withGhci = withGhciArguments ghciArguments
+
+-- | Like 'withGhci', but with explicit GHCi arguments. This lets specialized
+-- dev processes select a different startup script while preserving the same
+-- process-group and shutdown behaviour.
+withGhciArguments
+    :: [String]
+    -> Bool                -- ^ wrap with @direnv exec .@?
+    -> Concurrent.ThreadId -- ^ thread to interrupt with 'Exit.ExitSuccess' on SIGTERM
+    -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a)
+    -> IO a
+withGhciArguments arguments wrapWithDirenv mainThreadId callback = do
+    executable <- devGhciExecutable
+    let baseParams = procGhciWithExecutable executable wrapWithDirenv arguments
     let params = baseParams
             { Process.std_in = Process.CreatePipe
             , Process.std_out = Process.CreatePipe
