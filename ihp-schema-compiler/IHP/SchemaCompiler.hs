@@ -68,18 +68,34 @@ compileModules options schema =
        <> statementModules schema
        <> [ ("build/Generated/Statements.hs", compileStatementsIndex schema)
           , ("build/Generated/Types.hs", compileIndex schema)
-          , ("build/Generated/TypedSqlSchemaDependencies", compileTypedSqlSchemaDependencies schema)
+          , ("build/Generated/TypedSqlSchemaDependenciesV4", compileTypedSqlSchemaDependencies schema)
           ]
 
 compileTypedSqlSchemaDependencies :: Schema -> Text
 compileTypedSqlSchemaDependencies (Schema statements) = Text.unlines
-    [ "typed-sql-schema-dependencies-v3"
+    [ "typed-sql-schema-dependencies-v4"
     , Text.unlines (mapMaybe typedSqlGlobalDependency statements)
     ]
   where
+    modeledTables = statements |> mapMaybe (\case
+        StatementCreateTable table | tableHasPrimaryKey table -> Just table.name
+        _ -> Nothing)
+    isUnmodeled tableName = tableName `notElem` modeledTables
     -- Table-scoped dependencies track table and constraint changes. This file
-    -- only tracks schema-wide objects a query may use alongside its tables.
+    -- tracks schema-wide objects and tables without generated model modules.
     typedSqlGlobalDependency = \case
+        statement@(StatementCreateTable table) | isUnmodeled table.name -> Just (tshow statement)
+        statement@AddConstraint { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@DropConstraint { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@AddColumn { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@DropColumn { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@DropTable { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@RenameColumn { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@DropNotNull { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@SetNotNull { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@RenameTable { from } | isUnmodeled from -> Just (tshow statement)
+        statement@SetDefaultValue { tableName } | isUnmodeled tableName -> Just (tshow statement)
+        statement@DropDefaultValue { tableName } | isUnmodeled tableName -> Just (tshow statement)
         statement@CreateEnumType {} -> Just (tshow statement)
         statement@DropEnumType {} -> Just (tshow statement)
         statement@AddValueToEnumType {} -> Just (tshow statement)

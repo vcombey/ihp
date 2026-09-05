@@ -13,7 +13,7 @@ import           Control.Concurrent       (MVar, forkFinally, forkIO, isEmptyMVa
                                             newMVar, putMVar, readMVar, takeMVar,
                                             tryTakeMVar, withMVar)
 import qualified Control.Exception        as Exception
-import           Control.Monad            (guard, void)
+import           Control.Monad            (filterM, guard, void)
 import           Data.Bits                (xor)
 import qualified Data.ByteString          as BS
 import qualified Data.ByteString.Char8    as BSC
@@ -897,7 +897,7 @@ dependentSchemaFilesForTables (Just (tables, cteNames)) = do
             absoluteSchema <- canonicalizePath appSchema
             let projectRoot = takeDirectory (takeDirectory absoluteSchema)
             let generatedRoot = projectRoot </> "build" </> "Generated"
-            let globalDependency = generatedRoot </> "TypedSqlSchemaDependencies"
+            let globalDependency = generatedRoot </> "TypedSqlSchemaDependenciesV4"
             let tableDependencies =
                     tables
                         |> Set.toList
@@ -906,8 +906,8 @@ dependentSchemaFilesForTables (Just (tables, cteNames)) = do
                                 </> "ActualTypes"
                                 </> CS.cs (tableNameToModelName tableName <> ".hs")
                         )
-            let generatedDependencies = globalDependency : tableDependencies
-            generatedDependenciesExist <- and <$> mapM doesFileExist generatedDependencies
+            existingTableDependencies <- filterM doesFileExist tableDependencies
+            globalDependencyExists <- doesFileExist globalDependency
             cteShadowsGeneratedTable <- or <$> mapM
                 (\tableName -> doesFileExist
                     ( generatedRoot
@@ -916,12 +916,12 @@ dependentSchemaFilesForTables (Just (tables, cteNames)) = do
                     )
                 )
                 (Set.toList cteNames)
-            if cteShadowsGeneratedTable || not generatedDependenciesExist
+            if cteShadowsGeneratedTable || not globalDependencyExists
                 then dependentSchemaFiles
                 else do
                     cwd <- getCurrentDirectory
                     ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
-                    pure (map (makeRelative cwd) generatedDependencies <> maybeToList ihpSchema)
+                    pure (map (makeRelative cwd) (globalDependency : existingTableDependencies) <> maybeToList ihpSchema)
 
 discoverSchemaInputs :: IO SchemaInputs
 discoverSchemaInputs = do

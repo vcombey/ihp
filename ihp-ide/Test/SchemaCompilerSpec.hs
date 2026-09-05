@@ -51,6 +51,21 @@ tests = do
                 compileTypedSqlSchemaDependencies (Schema columnSchema)
                     `shouldBe` compileTypedSqlSchemaDependencies (Schema baseSchema)
 
+            it "tracks changes to tables without generated models" do
+                let withoutPrimaryKey = parseSqlStatements [trimming|
+                        CREATE TABLE audit_log (
+                            message TEXT
+                        );
+                    |]
+                let changed = parseSqlStatements [trimming|
+                        CREATE TABLE audit_log (
+                            message TEXT,
+                            created_at TIMESTAMP WITH TIME ZONE
+                        );
+                    |]
+                compileTypedSqlSchemaDependencies (Schema withoutPrimaryKey)
+                    `shouldNotBe` compileTypedSqlSchemaDependencies (Schema changed)
+
         describe "compileEnumDataDefinitions" do
             it "should deal with enum values that have spaces" do
                 let statement = CreateEnumType { name = "mood", values = ["happy", "very happy", "sad", "very sad"] }
