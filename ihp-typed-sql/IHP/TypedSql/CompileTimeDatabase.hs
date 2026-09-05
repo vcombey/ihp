@@ -34,7 +34,7 @@ import           System.Directory         (canonicalizePath, createDirectory,
                                             removeFile, removePathForcibly)
 import           System.Environment       (lookupEnv)
 import           System.Exit              (ExitCode (ExitFailure, ExitSuccess))
-import           System.FilePath          (takeDirectory, takeFileName)
+import           System.FilePath          (makeRelative, takeDirectory, takeFileName)
 import           System.IO                (Handle, IOMode (WriteMode), appendFile,
                                             hClose, withFile)
 import           System.IO.Temp           (createTempDirectory)
@@ -859,9 +859,10 @@ initializeDatabase tools schemaInputs database@AutoDatabase { adbRoot, adbPgHost
 
 dependentSchemaFiles :: IO [FilePath]
 dependentSchemaFiles = do
-    appSchema <- findAppSchema
-    ihpSchema <- findIhpSchema
-    pure (catMaybes [appSchema, ihpSchema])
+    cwd <- getCurrentDirectory >>= canonicalizePath
+    appSchema <- findAppSchema >>= Prelude.traverse canonicalizePath
+    ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
+    pure (map (makeRelative cwd) (maybeToList appSchema) <> maybeToList ihpSchema)
 
 -- | Prefer generated dependencies scoped to the tables used by a typed query.
 -- Falls back to the full schema whenever the generated dependency set is not
@@ -891,8 +892,12 @@ dependentSchemaFilesForTables (Just tables)
                 if not generatedDependenciesExist
                     then dependentSchemaFiles
                     else do
-                        ihpSchema <- findIhpSchema
-                        mapM canonicalizePath (generatedDependencies <> maybeToList ihpSchema)
+                        cwd <- getCurrentDirectory >>= canonicalizePath
+                        appDependencies <- mapM canonicalizePath generatedDependencies
+                        ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
+                        -- Keep application usage paths relocatable across Git worktrees.
+                        -- The framework schema stays on its immutable package/store path.
+                        pure (map (makeRelative cwd) appDependencies <> maybeToList ihpSchema)
 
 discoverSchemaInputs :: IO SchemaInputs
 discoverSchemaInputs = do

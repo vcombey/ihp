@@ -16,8 +16,8 @@ mkDerivation {
     string-conversions template-haskell temporary text unix wai
   ];
   testHaskellDepends = [
-    base containers directory filepath hspec ihp fast-logger process
-    string-conversions temporary-ospath text unix
+    base bytestring containers directory filepath hspec ihp fast-logger process
+    string-conversions temporary temporary-ospath text unix
   ];
   homepage = "https://ihp.digitallyinduced.com/";
   description = "Compile-time typed SQL quasiquoter for IHP";
