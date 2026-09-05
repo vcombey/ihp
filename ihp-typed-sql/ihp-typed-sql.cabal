@@ -110,3 +110,24 @@ test-suite tests
             , unix
     other-modules:
         Test.TypedSqlSpec
+
+-- Compile the internal dependency selector directly without exposing it as API.
+-- This regression needs no database and runs separately from SQL integration tests.
+test-suite schema-dependency-paths
+    import: shared-properties
+    type: exitcode-stdio-1.0
+    main-is: SchemaDependencyPaths.hs
+    hs-source-dirs: Test, .
+    other-modules: IHP.TypedSql.CompileTimeDatabase
+    build-depends:
+            base >= 4.17.0 && < 4.23
+            , ihp
+            , bytestring
+            , containers
+            , directory
+            , filepath
+            , process
+            , string-conversions
+            , temporary
+            , text
+            , unix

@@ -4,6 +4,7 @@ module IHP.TypedSql.CompileTimeDatabase
     ( AutoDatabase (..)
     , autoDatabaseEnabled
     , dependentSchemaFiles
+    , dependentSchemaFilesForTables
     , withAutoDatabase
     ) where
 
@@ -19,7 +20,9 @@ import qualified Data.ByteString.Char8    as BSC
 import qualified Data.Char                as Char
 import           Data.Functor             ((<&>))
 import qualified Data.List                as List
+import qualified Data.Set                 as Set
 import qualified Data.String.Conversions  as CS
+import qualified Data.Text                as Text
 import           IHP.Prelude
 import           Numeric                  (showHex)
 import           System.Directory         (canonicalizePath, createDirectory,
@@ -31,7 +34,7 @@ import           System.Directory         (canonicalizePath, createDirectory,
                                             removeFile, removePathForcibly)
 import           System.Environment       (lookupEnv)
 import           System.Exit              (ExitCode (ExitFailure, ExitSuccess))
-import           System.FilePath          (takeDirectory, takeFileName)
+import           System.FilePath          (makeRelative, takeDirectory, takeFileName)
 import           System.IO                (Handle, IOMode (WriteMode), appendFile,
                                             hClose, withFile)
 import           System.IO.Temp           (createTempDirectory)
@@ -856,9 +859,45 @@ initializeDatabase tools schemaInputs database@AutoDatabase { adbRoot, adbPgHost
 
 dependentSchemaFiles :: IO [FilePath]
 dependentSchemaFiles = do
-    appSchema <- findAppSchema
-    ihpSchema <- findIhpSchema
-    pure (catMaybes [appSchema, ihpSchema])
+    cwd <- getCurrentDirectory >>= canonicalizePath
+    appSchema <- findAppSchema >>= Prelude.traverse canonicalizePath
+    ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
+    pure (map (makeRelative cwd) (maybeToList appSchema) <> maybeToList ihpSchema)
+
+-- | Prefer generated dependencies scoped to the tables used by a typed query.
+-- Falls back to the full schema whenever the generated dependency set is not
+-- complete, which keeps standalone users and unsupported SQL shapes safe.
+dependentSchemaFilesForTables :: Maybe (Set.Set Text.Text) -> IO [FilePath]
+dependentSchemaFilesForTables Nothing = dependentSchemaFiles
+dependentSchemaFilesForTables (Just tables)
+    | Set.null tables = dependentSchemaFiles
+    | otherwise = do
+        findAppSchema >>= \case
+            Nothing -> dependentSchemaFiles
+            Just appSchema -> do
+                absoluteSchema <- canonicalizePath appSchema
+                let projectRoot = takeDirectory (takeDirectory absoluteSchema)
+                let generatedRoot = projectRoot </> "build" </> "Generated"
+                let globalDependency = generatedRoot </> "TypedSqlSchemaDependencies"
+                let tableDependencies =
+                        tables
+                            |> Set.toList
+                            |> map (\tableName ->
+                                generatedRoot
+                                    </> "ActualTypes"
+                                    </> CS.cs (tableNameToModelName tableName <> ".hs")
+                            )
+                let generatedDependencies = globalDependency : tableDependencies
+                generatedDependenciesExist <- and <$> mapM doesFileExist generatedDependencies
+                if not generatedDependenciesExist
+                    then dependentSchemaFiles
+                    else do
+                        cwd <- getCurrentDirectory >>= canonicalizePath
+                        appDependencies <- mapM canonicalizePath generatedDependencies
+                        ihpSchema <- findIhpSchema >>= Prelude.traverse canonicalizePath
+                        -- Keep application usage paths relocatable across Git worktrees.
+                        -- The framework schema stays on its immutable package/store path.
+                        pure (map (makeRelative cwd) appDependencies <> maybeToList ihpSchema)
 
 discoverSchemaInputs :: IO SchemaInputs
 discoverSchemaInputs = do

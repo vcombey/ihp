@@ -12,6 +12,7 @@ import           IHP.ModelSupport                  (createModelContext,
                                                     unsafeSqlExecDiscardResult)
 import           IHP.Prelude
 import           IHP.TypedSql.ParamHints           (parseSql, extractJoinNullableTables,
+                                                    extractReferencedTablesFromAst,
                                                     extractNonNullableComputedColumnsFromAst,
                                                     detectStarSelects,
                                                     detectInsertWithoutColumns)
@@ -49,6 +50,27 @@ import qualified Prelude
 
 tests :: Spec
 tests = do
+    describe "TypedSql schema dependencies" do
+        let referencedTables sql = parseSql sql >>= extractReferencedTablesFromAst
+
+        it "extracts tables across joins and nested subqueries" do
+            referencedTables "SELECT i.name FROM typed_sql_test_items i JOIN typed_sql_test_authors a ON a.id = i.author_id WHERE EXISTS (SELECT 1 FROM typed_sql_test_extras e WHERE e.id = i.id)"
+                `shouldBe` Just (Set.fromList ["typed_sql_test_items", "typed_sql_test_authors", "typed_sql_test_extras"])
+
+        it "extracts mutation targets and source tables" do
+            referencedTables "INSERT INTO typed_sql_test_items (id, name) SELECT id, name FROM typed_sql_test_extras"
+                `shouldBe` Just (Set.fromList ["typed_sql_test_items", "typed_sql_test_extras"])
+            referencedTables "UPDATE typed_sql_test_items SET name = e.name FROM typed_sql_test_extras e WHERE e.id = typed_sql_test_items.id"
+                `shouldBe` Just (Set.fromList ["typed_sql_test_items", "typed_sql_test_extras"])
+            referencedTables "DELETE FROM typed_sql_test_items USING typed_sql_test_extras WHERE typed_sql_test_extras.id = typed_sql_test_items.id"
+                `shouldBe` Just (Set.fromList ["typed_sql_test_items", "typed_sql_test_extras"])
+
+        it "falls back for CTEs and statements without a base table" do
+            referencedTables "WITH items AS (SELECT id FROM typed_sql_test_items) SELECT id FROM items"
+                `shouldBe` Nothing
+            referencedTables "SELECT 1"
+                `shouldBe` Nothing
+
     describe "TypedSql macro compile-time checks" do
         it "compiles valid typedSql queries with inferred types" do
             requirePostgresTestHook
