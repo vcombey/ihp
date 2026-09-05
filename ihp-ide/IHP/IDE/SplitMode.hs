@@ -14,8 +14,10 @@ module IHP.IDE.SplitMode
 ( hasJobs
 , generateRunJobsModule
 , workerSocketPath
+, workerGhciScriptPath
 , runJobsModulePath
 , runJobsModuleContents
+, generateWorkerGhciScript
 ) where
 
 import ClassyPrelude
@@ -23,6 +25,8 @@ import qualified Data.ByteString as ByteString
 import qualified System.Directory as Directory
 import qualified System.FilePath as FilePath
 import qualified Data.Char as Char
+import qualified Control.Exception as Exception
+import qualified Prelude
 
 -- | Path to the Unix domain socket used by the web process to signal the worker
 -- process that it should reload.
@@ -32,6 +36,11 @@ workerSocketPath = "build/.dev-worker.sock"
 -- | Path to the generated worker entry module.
 runJobsModulePath :: FilePath
 runJobsModulePath = "build/RunJobs.hs"
+
+-- | GHCi startup script used by the split worker. It is generated from the
+-- project's @.ghci@ so project-specific commands remain active.
+workerGhciScriptPath :: FilePath
+workerGhciScriptPath = "build/.ghci-worker"
 
 -- | Detect whether the current project has any job modules.
 --
@@ -82,6 +91,27 @@ generateRunJobsModule = do
     case have of
         Just existing | existing == want -> pure ()
         _ -> ByteString.writeFile path want
+
+-- | Generate a worker-specific copy of the project's @.ghci@. The copy swaps
+-- the normal IHP application config for the worker config, which applies all
+-- the same extensions and include paths but deliberately does not load
+-- @Main.hs@. Failing loudly when the standard marker is absent avoids silently
+-- falling back to the expensive web-app load.
+generateWorkerGhciScript :: IO ()
+generateWorkerGhciScript = do
+    projectGhci <- ByteString.readFile ".ghci"
+    let applicationConfig = ":loadFromIHP applicationGhciConfig"
+    unless (applicationConfig `ByteString.isInfixOf` projectGhci) do
+        Exception.throwIO (Prelude.userError ".ghci must load applicationGhciConfig for the split worker")
+
+    Directory.createDirectoryIfMissing True "build"
+    let workerConfig = ":loadFromIHP workerApplicationGhciConfig"
+    let (before, fromMarker) = ByteString.breakSubstring applicationConfig projectGhci
+    let want = before <> workerConfig <> ByteString.drop (ByteString.length applicationConfig) fromMarker
+    have <- (Just <$> ByteString.readFile workerGhciScriptPath) `catchAny` \_ -> pure Nothing
+    case have of
+        Just existing | existing == want -> pure ()
+        _ -> ByteString.writeFile workerGhciScriptPath want
 
 -- | The exact bytes written to @build\/RunJobs.hs@. Mirrors the template in
 -- @NixSupport\/default.nix@ used by the production build.

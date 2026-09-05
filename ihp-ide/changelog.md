@@ -1,5 +1,11 @@
 # Changelog for `ihp-ide`
 
+## Unreleased
+
+- Add opt-in worktree-shared development object snapshots and bounded compilation
+  scheduling for web and worker sessions, with queue/transaction event reporting.
+- Recognize GHCi's singular load/reload completion message for one-module apps.
+
 ## v1.6.0
 
 - Split dev mode into separate web and worker processes

@@ -19,6 +19,7 @@ import Main.Utf8 (withUtf8)
 import qualified Control.Concurrent.Async as Async
 import qualified IHP.EnvVar as EnvVar
 import IHP.IDE.GhciSupport
+import IHP.IDE.DevCache (withDevCache, finishDevCache, withDevCacheCompilation)
 import qualified IHP.IDE.SplitMode as SplitMode
 import qualified IHP.IDE.WorkerSignal as WorkerSignal
 
@@ -65,8 +66,11 @@ waitUntilJobsReady waitForReload = do
 runWithJobs :: Concurrent.ThreadId -> IO () -> IO ()
 runWithJobs mainThreadId waitForReload = do
     wrapWithDirenv <- EnvVar.envOrDefault "IHP_DEV_WRAP_DIRENV" False
+    SplitMode.generateWorkerGhciScript
 
-    withGhci wrapWithDirenv mainThreadId \input output err _processHandle -> do
+    let workerGhciArguments = ghciArgumentsForScript SplitMode.workerGhciScriptPath
+    withDevCache "worker" wrapWithDirenv workerGhciArguments \arguments cache ->
+      withGhciArguments arguments wrapWithDirenv mainThreadId \input output err _processHandle -> do
         -- One iteration of the worker lifecycle. @loaded@ says whether the most
         -- recent @:l@ / @:r@ succeeded. When the worker is running we drain
         -- GHCi for its whole lifetime ('withRunningWorker'); when it isn't we
@@ -81,7 +85,7 @@ runWithJobs mainThreadId waitForReload = do
                     then withRunningWorker input output err waitForReload
                     else drainUntilReload output err waitForReload
                 putStrLn "[worker] Reload signal received."
-                result <- refreshGhci input output err
+                result <- withDevCacheCompilation cache (refreshGhci input output err)
                 case result of
                     Left out -> do
                         putStrLn "[worker] GHCi reload failed:"
@@ -89,7 +93,14 @@ runWithJobs mainThreadId waitForReload = do
                         loop False
                     Right _ -> loop True
 
-        initialLoad <- loadRunJobs input output err
+        -- Cache startup loads the home unit after configuring object mode.
+        -- Loading it again would put Main into GHC 9.14's interactive unit too.
+        initialLoad <- case cache of
+            Nothing -> loadRunJobs input output err
+            Just _ -> ghciLoadOrReload input output err do
+                sendGhciCommand input ":set prompt \"\""
+                sendGhciCommand input "import qualified ClassyPrelude"
+        finishDevCache cache initialLoad
         case initialLoad of
             Left out -> do
                 putStrLn "[worker] GHCi failed to load RunJobs.hs:"
@@ -184,7 +195,7 @@ ghciLoadOrReload _input output err sendLoadCmd = do
     resultVar <- newEmptyMVar
     let onMatch line
             | "Failed," `isInfixOf` line = void (tryPutMVar resultVar False)
-            | "modules loaded." `isInfixOf` line || "modules reloaded." `isInfixOf` line =
+            | ghciLoadSucceeded line =
                 void (tryPutMVar resultVar True)
             | otherwise = pure ()
 

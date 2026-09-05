@@ -25,7 +25,8 @@ import Main.Utf8 (withUtf8)
 import qualified IHP.FrameworkConfig as FrameworkConfig
 import qualified Control.Concurrent.Chan.Unagi as Queue
 import IHP.IDE.FileWatcher
-import IHP.IDE.GhciSupport (ghciArguments)
+import IHP.IDE.GhciSupport (devGhciExecutable, ghciArguments, ghciLoadSucceeded)
+import IHP.IDE.DevCache (DevCache, withDevCache, finishDevCache, withDevCacheCompilation)
 import qualified IHP.IDE.SplitMode as SplitMode
 import qualified IHP.IDE.WorkerSignal as WorkerSignal
 import qualified System.Environment as Env
@@ -187,9 +188,10 @@ fileWatcherParams liveReloadClients databaseNeedsMigration reloadGhciVar startSt
 
 -- 'ghciArguments' is shared with the dev worker — see 'IHP.IDE.GhciSupport'.
 
-withGHCI :: (?context :: Context) => Concurrent.ThreadId -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> IO a) -> IO a
-withGHCI mainThreadId callback = do
-    baseParams <- procDirenvAware "ghci" ghciArguments
+withGHCI :: (?context :: Context) => Concurrent.ThreadId -> (Handle -> Handle -> Handle -> Process.ProcessHandle -> Maybe DevCache -> IO a) -> IO a
+withGHCI mainThreadId callback = withDevCache "web" ?context.wrapWithDirenv ghciArguments \arguments cache -> do
+    executable <- devGhciExecutable >>= encodeUtf
+    baseParams <- procDirenvAware executable arguments
     let params = baseParams
             { Process.std_in = Process.CreatePipe
             , Process.std_out = Process.CreatePipe
@@ -201,7 +203,7 @@ withGHCI mainThreadId callback = do
         let sigTermHandler = do
                 stopProcessHandle processHandle
                 Concurrent.throwTo mainThreadId Exit.ExitSuccess
-        withSigTermHandler sigTermHandler (callback input output error processHandle)
+        withSigTermHandler sigTermHandler (callback input output error processHandle cache)
 
 initGHCICommands = 
     [ -- The app is loaded by loading .ghci, which then loads applicationGhciConfig, which triggers a ':l Main.hs'
@@ -220,7 +222,7 @@ runAppGhci mainThreadId ghciIsLoadingVar startStatusServer stopStatusServer stat
             (putMVar startStatusServer ())
             callback
 
-    let processResult inputHandle outputHandle errorHandle processHandle result = do
+    let processResult cache inputHandle outputHandle errorHandle processHandle result = do
             -- Handle the result of GHCi compilation, then wait for the next file change
             case result of
                 Left failed -> do
@@ -261,17 +263,18 @@ runAppGhci mainThreadId ghciIsLoadingVar startStatusServer stopStatusServer stat
             -- Clear logs in web ui
             clearStatusServer statusServerStandardOutput statusServerErrorOutput statusServerClients
 
-            result <- refresh inputHandle outputHandle errorHandle receiveAppOutput
+            result <- withDevCacheCompilation cache (refresh inputHandle outputHandle errorHandle receiveAppOutput)
 
             -- reload app
             notifyHaskellChange ?context.liveReloadClients
 
-            processResult inputHandle outputHandle errorHandle processHandle result
+            processResult cache inputHandle outputHandle errorHandle processHandle result
 
-    withGHCI mainThreadId \inputHandle outputHandle errorHandle processHandle -> do
+    withGHCI mainThreadId \inputHandle outputHandle errorHandle processHandle cache -> do
         writeIORef ghciIsLoadingVar True
         withLoadedApp inputHandle outputHandle errorHandle receiveAppOutput \result -> do
-            processResult inputHandle outputHandle errorHandle processHandle result
+            finishDevCache cache result
+            processResult cache inputHandle outputHandle errorHandle processHandle result
 
 -- | Read lines from a handle, accumulating output and classifying each line.
 --
@@ -295,7 +298,7 @@ withLoadedApp inputHandle outputHandle errorHandle logLine callback = do
     resultVar :: MVar Bool <- newEmptyMVar
     let onMatch line = case line of
             line | "Failed," `isInfixOf` line -> putMVar resultVar False
-            line | "modules loaded." `isInfixOf` line -> putMVar resultVar True
+            line | ghciLoadSucceeded line -> putMVar resultVar True
             _ -> pure ()
 
     let main = do
@@ -394,7 +397,7 @@ refresh inputHandle outputHandle errorHandle logOutput = do
     let onMatch line = case line of
             line | "Failed," `isInfixOf` line -> putMVar resultVar False
             -- Match both "modules loaded." (initial) and "modules reloaded." (after :r)
-            line | "modules loaded." `isInfixOf` line || "modules reloaded." `isInfixOf` line -> putMVar resultVar True
+            line | ghciLoadSucceeded line -> putMVar resultVar True
             line | "cannot find object file for module" `isInfixOf` line -> do
                 -- https://gitlab.haskell.org/ghc/ghc/-/issues/11596
                 sendGhciCommand inputHandle ":l"
@@ -459,9 +462,8 @@ tryCompileSchema reloadGhciVar startStatusServer = do
             putMVar startStatusServer ()
 
         Right _ -> do
-            previouslyHadSchemaError <- isJust <$> readIORef ?context.lastSchemaCompilerError
             writeIORef ?context.lastSchemaCompilerError Nothing
 
-            -- Use tryPutMVar to avoid double trigger if file watcher already triggered reload
-            -- This triggers a reload only if recovering from a previous schema error
-            when previouslyHadSchemaError $ void $ tryPutMVar reloadGhciVar ()
+            -- Generated modules live under the git-ignored build directory and are
+            -- not watched. Reload once after the complete generated snapshot exists.
+            void $ tryPutMVar reloadGhciVar ()

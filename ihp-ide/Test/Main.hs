@@ -43,4 +43,5 @@ main = hspec do
     IDE.ToolServer.MiddlewareSpec.tests
     IDE.Logs.ControllerSpec.tests
     IDE.DevServerSpec.tests
+    IDE.DevServerSpec.ghciTests
     ServerSpec.tests
