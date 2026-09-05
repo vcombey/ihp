@@ -460,9 +460,8 @@ tryCompileSchema reloadGhciVar startStatusServer = do
             putMVar startStatusServer ()
 
         Right _ -> do
-            previouslyHadSchemaError <- isJust <$> readIORef ?context.lastSchemaCompilerError
             writeIORef ?context.lastSchemaCompilerError Nothing
 
-            -- Use tryPutMVar to avoid double trigger if file watcher already triggered reload
-            -- This triggers a reload only if recovering from a previous schema error
-            when previouslyHadSchemaError $ void $ tryPutMVar reloadGhciVar ()
+            -- Generated modules live under the git-ignored build directory and are
+            -- not watched. Reload once after the complete generated snapshot exists.
+            void $ tryPutMVar reloadGhciVar ()
