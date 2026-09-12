@@ -268,7 +268,11 @@ getAvailableSessions autoRefreshServer = do
     let uuidCharCount = Text.length (UUID.toText UUID.nil)
     let allSessionIds = map (.id) allSessions
     let requestedSessionIds =
-            [cookieText, headerText, queryText]
+            -- Explicit client state replaces the older cookie snapshot. Discarded
+            -- fragments can remain on the server until GC, but must not grow the cookie.
+            (if Text.null headerText && Text.null queryText
+                then [cookieText]
+                else [headerText, queryText])
                 |> map (parseSessionIds uuidCharCount)
                 |> concat
                 |> List.nub
