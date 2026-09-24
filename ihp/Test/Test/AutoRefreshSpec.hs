@@ -15,6 +15,7 @@ import Network.Wai
 import Network.HTTP.Types
 import IHP.AutoRefresh
     ( getAvailableSessions
+    , notificationTriggerSQL
     , AutoRefreshChangeBatch (..)
     , addAutoRefreshRowChange
     , addQueryBuilderReadDependency
@@ -38,6 +39,8 @@ import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import IHP.QueryBuilder.Types (QueryBuilderRead (..), QueryBuilderReadKind (..), QueryBuilderPrimaryKey (..), SQLQuery (..))
 import IHP.Hasql.FromRow (FromRowHasql (..), HasqlDecodeColumn (..))
+import Control.Concurrent (threadDelay)
+import qualified System.Timeout as Timeout
 import qualified Control.Concurrent.MVar as MVar
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Exception as Exception
@@ -206,6 +209,36 @@ getOnlyAutoRefreshSession serverRef = do
 tests :: Spec
 tests = beforeAll (mockContextNoDatabase WebApplication config) do
     describe "AutoRefresh" do
+        describe "view notifications" do
+            it "tracks private tables through nested joined views without row triggers on views" $ \_ ->
+                withAutoRefreshDB \modelContext -> do
+                    let pool = modelContext.hasqlPool
+                    let cleanup = runHasqlScript pool "DROP VIEW IF EXISTS auto_refresh_test_view; DROP VIEW IF EXISTS auto_refresh_test_inner; DROP SCHEMA IF EXISTS auto_refresh_test_private CASCADE;"
+                    flip Exception.finally cleanup do
+                        cleanup
+                        runHasqlScript pool "CREATE SCHEMA auto_refresh_test_private; CREATE TABLE auto_refresh_test_private.left_items (id INT PRIMARY KEY); CREATE TABLE auto_refresh_test_private.right_items (id INT PRIMARY KEY); CREATE VIEW auto_refresh_test_inner AS SELECT id FROM auto_refresh_test_private.left_items; CREATE VIEW auto_refresh_test_view AS SELECT l.id FROM auto_refresh_test_inner l JOIN auto_refresh_test_private.right_items r USING (id);"
+                        runHasqlScript pool (notificationTriggerSQL "auto_refresh_test_view")
+                        runHasqlScript pool (notificationTriggerSQL "auto_refresh_test_view")
+                        runHasqlScript pool "DO $$ BEGIN IF (SELECT count(*) FROM pg_trigger WHERE tgname = 'ar_view_auto_refresh_test_view') <> 2 THEN RAISE EXCEPTION 'expected one trigger per base table'; END IF; END $$;"
+                        databaseUrl <- maybe "postgresql:///postgres" cs <$> lookupEnv "DATABASE_URL"
+                        PGListener.withPGListener databaseUrl testLogger \listener -> do
+                            changes <- MVar.newEmptyMVar
+                            _ <- PGListener.subscribeJSON "ar_did_change_auto_refresh_test_view" (MVar.putMVar changes) listener
+                            let waitForListener = do
+                                    channels <- MVar.readMVar listener.listeningTo
+                                    unless (Set.member "ar_did_change_auto_refresh_test_view" channels) (threadDelay 1000 >> waitForListener)
+                            Timeout.timeout 2000000 waitForListener `shouldReturn` Just ()
+                            forM_
+                                [ ("INSERT INTO auto_refresh_test_private.left_items VALUES (1)", "insert")
+                                , ("INSERT INTO auto_refresh_test_private.right_items VALUES (1)", "insert")
+                                , ("UPDATE auto_refresh_test_private.left_items SET id = 2", "update")
+                                , ("DELETE FROM auto_refresh_test_private.right_items", "delete")
+                                , ("TRUNCATE auto_refresh_test_private.left_items", "truncate")
+                                ] \(sql, operation) -> do
+                                    runHasqlScript pool sql
+                                    Timeout.timeout 2000000 (MVar.takeMVar changes)
+                                        `shouldReturn` Just (AutoRefreshRowChange operation Nothing)
+
         describe "getAvailableSessions" do
             let activeId = UUID.fromWords 0 0 0 1
             let staleId = UUID.fromWords 0 0 0 2

@@ -738,7 +738,8 @@ isSessionExpired now session = (now `diffUTCTime` session.lastPing) > (secondsTo
 channelName :: Text -> ByteString
 channelName tableName = "ar_did_change_" <> cs tableName
 
--- | Returns SQL that installs a compact row-level notification trigger.
+-- | Install row notifications for tables, or conservative statement notifications
+-- on the underlying tables of a view (including nested and private-schema views).
 --
 -- Wrapped in a DO $$ block with EXCEPTION handler because concurrent requests
 -- can race to CREATE OR REPLACE the same function, causing PostgreSQL to throw
@@ -747,11 +748,16 @@ channelName tableName = "ar_did_change_" <> cs tableName
 notificationTriggerSQL :: Text -> Text
 notificationTriggerSQL tableName =
         "DO $$\n"
+        <> "DECLARE source RECORD;\n"
         <> "BEGIN\n"
         <> "    CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $BODY$"
             <> "DECLARE\n"
             <> "    payload TEXT;\n"
             <> "BEGIN\n"
+            <> "    IF TG_LEVEL = 'STATEMENT' THEN\n"
+            <> "        PERFORM pg_notify('" <> cs (channelName tableName) <> "', jsonb_build_object('op', lower(TG_OP))::text);\n"
+            <> "        RETURN NULL;\n"
+            <> "    END IF;\n"
             <> "    IF (TG_OP = 'DELETE') THEN\n"
             <> "        payload := jsonb_build_object('op', lower(TG_OP), 'id', to_jsonb(OLD)->>'id')::text;\n"
             <> "        PERFORM pg_notify('" <> cs (channelName tableName) <> "', payload);\n"
@@ -763,6 +769,22 @@ notificationTriggerSQL tableName =
             <> "    END IF;\n"
             <> "END;\n"
             <> "$BODY$ language plpgsql;\n"
+        <> "    IF EXISTS (SELECT 1 FROM pg_class WHERE oid = '" <> tableName <> "'::regclass AND relkind = 'v') THEN\n"
+        <> "        FOR source IN WITH RECURSIVE dependencies(oid) AS (\n"
+        <> "            SELECT '" <> tableName <> "'::regclass::oid\n"
+        <> "            UNION SELECT d.refobjid FROM dependencies s\n"
+        <> "            JOIN pg_rewrite r ON r.ev_class = s.oid\n"
+        <> "            JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid\n"
+        <> "            WHERE d.refclassid = 'pg_class'::regclass AND d.refobjid <> s.oid\n"
+        <> "        ) SELECT c.oid, n.nspname, c.relname FROM dependencies d\n"
+        <> "          JOIN pg_class c ON c.oid = d.oid JOIN pg_namespace n ON n.oid = c.relnamespace\n"
+        <> "          WHERE c.relkind IN ('r', 'p') LOOP\n"
+        <> "            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = source.oid AND tgname = '" <> viewTriggerName <> "') THEN\n"
+        <> "                EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION %I()', '" <> viewTriggerName <> "', source.nspname, source.relname, '" <> functionName <> "');\n"
+        <> "            END IF;\n"
+        <> "        END LOOP;\n"
+        <> "        RETURN;\n"
+        <> "    END IF;\n"
         <> "    DROP TRIGGER IF EXISTS " <> insertTriggerName <> " ON " <> tableName <> ";\n"
         <> "    CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
         <> "    DROP TRIGGER IF EXISTS " <> updateTriggerName <> " ON " <> tableName <> ";\n"
@@ -779,6 +801,7 @@ notificationTriggerSQL tableName =
         insertTriggerName = "ar_did_insert_" <> tableName
         updateTriggerName = "ar_did_update_" <> tableName
         deleteTriggerName = "ar_did_delete_" <> tableName
+        viewTriggerName = "ar_view_" <> tableName
 
 autoRefreshStateVaultKey :: Vault.Key AutoRefreshState
 autoRefreshStateVaultKey = unsafePerformIO Vault.newKey
