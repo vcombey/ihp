@@ -26,6 +26,7 @@ module IHP.TypedSql.Hasql
     , sqlExecTypedWithPool
     ) where
 
+import qualified Data.Text                       as Text
 import           Data.Proxy                      (Proxy (..))
 import           GHC.TypeLits                    (ErrorMessage (Text), TypeError)
 import qualified Hasql.Decoders                  as HasqlDecoders
@@ -43,15 +44,30 @@ import           IHP.TypedSql.Types              (QueryCardinality (..), QueryEx
 
 class DecodeTypedQuery (cardinality :: QueryCardinality) where
     typedQueryResultDecoder :: Proxy cardinality -> HasqlDecoders.Row result -> HasqlDecoders.Result (TypedQueryResult cardinality result)
+    typedQueryResultWithIdsDecoder :: Proxy cardinality -> HasqlDecoders.Row result -> HasqlDecoders.Result (TypedQueryResult cardinality result, [Text.Text])
 
 instance DecodeTypedQuery 'ManyRows where
     typedQueryResultDecoder _ = HasqlDecoders.rowList
+    typedQueryResultWithIdsDecoder _ rowDecoder =
+        unzip <$> HasqlDecoders.rowList ((,) <$> rowDecoder <*> textColumn)
 
 instance DecodeTypedQuery 'AtMostOneRow where
     typedQueryResultDecoder _ = HasqlDecoders.rowMaybe
+    typedQueryResultWithIdsDecoder _ rowDecoder =
+        toResult <$> HasqlDecoders.rowMaybe ((,) <$> rowDecoder <*> textColumn)
+      where
+        toResult Nothing = (Nothing, [])
+        toResult (Just (row, rowId)) = (Just row, [rowId])
 
 instance DecodeTypedQuery 'ExactlyOneRow where
     typedQueryResultDecoder _ = HasqlDecoders.singleRow
+    typedQueryResultWithIdsDecoder _ rowDecoder =
+        toResult <$> HasqlDecoders.singleRow ((,) <$> rowDecoder <*> textColumn)
+      where
+        toResult (row, rowId) = (row, [rowId])
+
+textColumn :: HasqlDecoders.Row Text.Text
+textColumn = HasqlDecoders.column (HasqlDecoders.nonNullable HasqlDecoders.text)
 
 class DecodeTypedExec (execResult :: QueryExecResult) where
     typedExecResultDecoder :: Proxy execResult -> HasqlDecoders.Result (SqlExecTypedResult execResult)

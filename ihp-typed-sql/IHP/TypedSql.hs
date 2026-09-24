@@ -30,11 +30,15 @@ module IHP.TypedSql
 
 import qualified Hasql.Decoders                  as HasqlDecoders
 import qualified Hasql.DynamicStatements.Snippet as Snippet
-import           IHP.ModelSupport                (sqlExecHasql, sqlExecHasqlCount, sqlQueryHasql)
+import           IHP.ModelSupport                (isTableReadTrackingEnabled, sqlExecHasql, sqlExecHasqlCount, sqlQueryHasql, trackTableReadWithQuery)
 import           IHP.Prelude
 import           GHC.TypeLits                    (ErrorMessage (Text), TypeError)
+import qualified Data.List                       as List
+import qualified Data.Set                        as Set
+import qualified Data.Text                       as Text
+import           IHP.QueryBuilder.HasqlHelpers   (quoteIdentifier)
 
-import           IHP.TypedSql.Hasql              (DecodeTypedExec, DecodeTypedQuery (typedQueryResultDecoder),
+import           IHP.TypedSql.Hasql              (DecodeTypedExec, DecodeTypedQuery (typedQueryResultDecoder, typedQueryResultWithIdsDecoder),
                                                   sqlExecTypedSession, sqlExecTypedStatement,
                                                   sqlExecTypedWithPool,
                                                   sqlQueryTypedMaybeColumnPipelined,
@@ -58,8 +62,19 @@ import           IHP.TypedSql.Types              (QueryCardinality (..), QueryEx
 -- > users <- sqlQueryTyped [typedSql| SELECT name FROM users |] -- IO [Text]
 -- > total <- sqlQueryTyped [typedSql| SELECT count(*) FROM users |] -- IO Int64
 sqlQueryTyped :: forall cardinality result. (?modelContext :: ModelContext, DecodeTypedQuery cardinality) => TypedQuery cardinality 'ReturnsRows result -> IO (TypedQueryResult cardinality result)
-sqlQueryTyped TypedQuery { tqSnippet, tqResultDecoder } =
-    runTypedSqlSession tqSnippet (typedQueryResultDecoder (Proxy :: Proxy cardinality) tqResultDecoder)
+sqlQueryTyped TypedQuery { tqSnippet, tqResultDecoder, tqAutoRefreshTables, tqAutoRefreshRowMatchingSafe } = do
+    structuredTracking <- isTableReadTrackingEnabled
+    case (structuredTracking, tqAutoRefreshRowMatchingSafe, firstTrackableTable tqAutoRefreshTables) of
+      (True, True, Just (trackedTable, idColumn)) -> do
+        let trackedSnippet = appendTrackedId tqSnippet idColumn
+        (result, rowIds) <- runTypedSqlSession trackedSnippet (typedQueryResultWithIdsDecoder (Proxy :: Proxy cardinality) tqResultDecoder)
+        trackTypedSqlQuery tqSnippet tqAutoRefreshTables (Just (trackedTable, idColumn, Set.fromList rowIds))
+        pure result
+      _ -> do
+        result <- runTypedSqlSession tqSnippet (typedQueryResultDecoder (Proxy :: Proxy cardinality) tqResultDecoder)
+        when structuredTracking $
+            trackTypedSqlQuery tqSnippet tqAutoRefreshTables Nothing
+        pure result
 
 -- | Run a typed query that can return many rows.
 --
@@ -133,3 +148,52 @@ sqlExecTyped TypedQuery { tqSnippet } =
 runTypedSqlSession :: (?modelContext :: ModelContext) => Snippet.Snippet -> HasqlDecoders.Result result -> IO result
 runTypedSqlSession snippet decoder =
     sqlQueryHasql ?modelContext.hasqlPool snippet decoder
+
+-- | Find the one result column that can identify rows for a physical table.
+firstTrackableTable :: [(Text, Maybe Text)] -> Maybe (Text, Text)
+firstTrackableTable [] = Nothing
+firstTrackableTable ((tableName, Just idColumn):_) = Just (tableName, idColumn)
+firstTrackableTable (_:tables) = firstTrackableTable tables
+
+-- | Append a textual row ID while preserving the original result columns.
+appendTrackedId :: Snippet.Snippet -> Text -> Snippet.Snippet
+appendTrackedId snippet idColumn =
+    Snippet.sql "SELECT _ihp_auto_refresh_record.*, _ihp_auto_refresh_record."
+    <> quoteIdentifier idColumn
+    <> Snippet.sql "::text FROM ("
+    <> snippet
+    <> Snippet.sql ") AS _ihp_auto_refresh_record"
+
+-- | Register Typed SQL reads with AutoRefresh.
+--
+-- The matcher closes over 'tqSnippet', so every bound parameter remains encoded
+-- exactly as it was for the original query. The captured model context retains
+-- RLS identity but deliberately drops an active transaction runner and tracker.
+trackTypedSqlQuery :: (?modelContext :: ModelContext) => Snippet.Snippet -> [(Text, Maybe Text)] -> Maybe (Text, Text, Set.Set Text) -> IO ()
+trackTypedSqlQuery snippet tables tracked = do
+    let capturedModelContext = ?modelContext
+            { transactionRunner = Nothing
+            , trackTableReadCallback = Nothing
+            }
+    forM_ tables \(tableName, maybeIdColumn) ->
+        case (tracked, maybeIdColumn) of
+            (Just (trackedTable, idColumn, rowIds), Just _)
+                | tableName == trackedTable -> do
+                    let matchesIds changedIds =
+                            let matchSnippet =
+                                    Snippet.sql "SELECT EXISTS (SELECT 1 FROM ("
+                                    <> snippet
+                                    <> Snippet.sql ") AS _ihp_auto_refresh_records WHERE _ihp_auto_refresh_records."
+                                    <> quoteIdentifier idColumn
+                                    <> Snippet.sql " = ANY (ARRAY(SELECT (jsonb_populate_record(NULL::"
+                                    <> quoteIdentifierPath tableName
+                                    <> Snippet.sql ", jsonb_build_object('id', _ihp_changed_id))).id FROM unnest("
+                                    <> Snippet.param (Set.toList changedIds)
+                                    <> Snippet.sql "::text[]) AS _ihp_changed_id)))"
+                            in let ?modelContext = capturedModelContext
+                               in sqlQueryHasql capturedModelContext.hasqlPool matchSnippet (HasqlDecoders.singleRow (HasqlDecoders.column (HasqlDecoders.nonNullable HasqlDecoders.bool)))
+                    trackTableReadWithQuery tableName (Just rowIds) (Just matchesIds)
+            _ -> trackTableReadWithQuery tableName Nothing Nothing
+
+quoteIdentifierPath :: Text -> Snippet.Snippet
+quoteIdentifierPath = mconcat . List.intersperse (Snippet.sql ".") . map quoteIdentifier . Text.splitOn "."
