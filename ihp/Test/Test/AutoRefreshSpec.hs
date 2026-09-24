@@ -213,12 +213,13 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
             it "tracks private tables through nested joined views without row triggers on views" $ \_ ->
                 withAutoRefreshDB \modelContext -> do
                     let pool = modelContext.hasqlPool
-                    let cleanup = runHasqlScript pool "DROP VIEW IF EXISTS auto_refresh_test_view; DROP VIEW IF EXISTS auto_refresh_test_inner; DROP SCHEMA IF EXISTS auto_refresh_test_private CASCADE;"
+                    let cleanup = runHasqlScript pool "DROP VIEW IF EXISTS auto_refresh_test_view; DROP VIEW IF EXISTS auto_refresh_test_inner; DROP SCHEMA IF EXISTS auto_refresh_test_private CASCADE; DROP FUNCTION IF EXISTS ar_notify_did_change_auto_refresh_test_view();"
                     flip Exception.finally cleanup do
                         cleanup
                         runHasqlScript pool "CREATE SCHEMA auto_refresh_test_private; CREATE TABLE auto_refresh_test_private.left_items (id INT PRIMARY KEY); CREATE TABLE auto_refresh_test_private.right_items (id INT PRIMARY KEY); CREATE VIEW auto_refresh_test_inner AS SELECT id FROM auto_refresh_test_private.left_items; CREATE VIEW auto_refresh_test_view AS SELECT l.id FROM auto_refresh_test_inner l JOIN auto_refresh_test_private.right_items r USING (id);"
-                        runHasqlScript pool (notificationTriggerSQL "auto_refresh_test_view")
-                        runHasqlScript pool (notificationTriggerSQL "auto_refresh_test_view")
+                        let registerView = runHasqlScript pool (notificationTriggerSQL "auto_refresh_test_view")
+                        Async.replicateConcurrently_ 4 registerView
+                        registerView
                         runHasqlScript pool "DO $$ BEGIN IF (SELECT count(*) FROM pg_trigger WHERE tgname = 'ar_view_auto_refresh_test_view') <> 2 THEN RAISE EXCEPTION 'expected one trigger per base table'; END IF; END $$;"
                         databaseUrl <- maybe "postgresql:///postgres" cs <$> lookupEnv "DATABASE_URL"
                         PGListener.withPGListener databaseUrl testLogger \listener -> do

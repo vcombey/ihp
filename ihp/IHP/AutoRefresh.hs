@@ -741,15 +741,14 @@ channelName tableName = "ar_did_change_" <> cs tableName
 -- | Install row notifications for tables, or conservative statement notifications
 -- on the underlying tables of a view (including nested and private-schema views).
 --
--- Wrapped in a DO $$ block with EXCEPTION handler because concurrent requests
--- can race to CREATE OR REPLACE the same function, causing PostgreSQL to throw
--- 'tuple concurrently updated' (SQLSTATE XX000). This is safe to ignore: the
--- other connection's CREATE OR REPLACE will have succeeded.
+-- Serialize installation per notification function to avoid concurrent catalog
+-- inserts and updates. Retain the exception handler for older concurrent installers.
 notificationTriggerSQL :: Text -> Text
 notificationTriggerSQL tableName =
         "DO $$\n"
         <> "DECLARE source RECORD;\n"
         <> "BEGIN\n"
+        <> "    PERFORM pg_advisory_xact_lock(hashtextextended('" <> functionName <> "', 0));\n"
         <> "    CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS $BODY$"
             <> "DECLARE\n"
             <> "    payload TEXT;\n"
