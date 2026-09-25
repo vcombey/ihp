@@ -111,6 +111,7 @@ autoRefresh runAction = do
                                     autoRefreshServer
                                     id
                                     readDependencies
+                                    ?modelContext.rowLevelSecurity
                                 pure result
 
                     -- Pre-register the session before sending the response so the browser websocket
@@ -148,7 +149,7 @@ autoRefresh runAction = do
                             case capturedResponse of
                                 Just lastResponse -> do
                                     registerNotificationTrigger ?touchedTables autoRefreshServer
-                                    updateSession autoRefreshServer id (\session -> (setAutoRefreshReadDependencies readDependencies session) { lastResponse, lastPing })
+                                    updateSession autoRefreshServer id (\session -> (setAutoRefreshReadDependencies readDependencies ?modelContext.rowLevelSecurity session) { lastResponse, lastPing })
                                     totalSessions <- length . (.sessions) <$> readIORef autoRefreshServer
                                     ?request.frameworkConfig.logger (toLogStr ("AutoRefresh register session=" <> tshow id <> " path=" <> cs ?request.rawPathInfo <> " totalSessions=" <> tshow totalSessions))
                                     void (async (gcSessions autoRefreshServer))
@@ -401,10 +402,11 @@ commitAutoRefreshReadDependencies
     -> IORef AutoRefreshServer
     -> UUID
     -> Map.Map Text AutoRefreshReadDependency
+    -> Maybe RowLevelSecurityContext
     -> IO ()
-commitAutoRefreshReadDependencies registerNewTables autoRefreshServer sessionId readDependencies = do
+commitAutoRefreshReadDependencies registerNewTables autoRefreshServer sessionId readDependencies rowLevelSecurity = do
     registerNewTables
-    updateSession autoRefreshServer sessionId (setAutoRefreshReadDependencies readDependencies)
+    updateSession autoRefreshServer sessionId (setAutoRefreshReadDependencies readDependencies rowLevelSecurity)
 
 -- | Register tables touched by a rerender. Production registration skips
 -- already subscribed tables; development registration deliberately reinstalls
@@ -427,6 +429,8 @@ registerNotificationTrigger touchedTablesVar autoRefreshServer =
         let isDevelopment = ?request.frameworkConfig.environment == Development
 
         pgListener <- (.pgListener) <$> readIORef autoRefreshServer
+        -- Trigger installation must not run as the request's restricted role.
+        -- Relevance checks keep each session's actor; see 'sessionMatcherContext'.
         let matchingModelContext = ?modelContext
                 { transactionRunner = Nothing
                 , trackTableReadCallback = Nothing
@@ -494,6 +498,21 @@ runAutoRefreshBatchWorker batchWindowMicroseconds batchWorkerState processBatch 
             else pure (state, True)
     when continue (runAutoRefreshBatchWorker batchWindowMicroseconds batchWorkerState processBatch)
 
+-- | Relevance queries run on the listener pool, outside the browser request.
+-- Restore the actor captured when the page was rendered so FORCE RLS policies
+-- can see the same rows the page saw. Installation still uses a context with
+-- row-level security disabled.
+sessionMatcherContext :: ModelContext -> AutoRefreshSession -> ModelContext
+sessionMatcherContext modelContext session = modelContext
+    { transactionRunner = Nothing
+    , trackTableReadCallback = Nothing
+    , rowLevelSecurity = autoRefreshSessionRowLevelSecurity session
+    }
+
+autoRefreshSessionRowLevelSecurity :: AutoRefreshSession -> Maybe RowLevelSecurityContext
+autoRefreshSessionRowLevelSecurity TrackedAutoRefreshSession { rowLevelSecurity } = rowLevelSecurity
+autoRefreshSessionRowLevelSecurity AutoRefreshSession {} = Nothing
+
 processAutoRefreshChangeBatch
     :: ModelContext
     -> IORef AutoRefreshServer
@@ -507,7 +526,8 @@ processAutoRefreshChangeBatch modelContext autoRefreshServer table batch = do
         case Map.lookup table (getAutoRefreshReadDependencies session) of
             Nothing -> pure ()
             Just dependency -> do
-                shouldRefresh <- shouldRefreshForChangeBatchWithCache modelContext matcherCache dependency batch
+                let sessionContext = sessionMatcherContext modelContext session
+                shouldRefresh <- shouldRefreshForChangeBatchWithCache sessionContext matcherCache dependency batch
                 when shouldRefresh (void (MVar.tryPutMVar session.event ()))
 
 -- | Backwards-compatible single-notification entry point. The live listener
@@ -600,7 +620,10 @@ queryBuilderQueryAffects modelContext matcherCache changedIds queryRead = do
             pure (either (const True) (\value -> value) result)
     case queryBuilderMatcherCacheKey changedIds queryRead of
         Nothing -> runMatcher
-        Just cacheKey -> do
+        Just queryKey -> do
+            let cacheKey = case modelContext.rowLevelSecurity of
+                    Just RowLevelSecurityContext { rlsUserId } -> rlsUserId <> "\NUL" <> queryKey
+                    Nothing -> queryKey
             cached <- Map.lookup cacheKey <$> readIORef matcherCache
             case cached of
                 Just result -> pure result
@@ -779,17 +802,14 @@ notificationTriggerSQL tableName =
         <> "          JOIN pg_class c ON c.oid = d.oid JOIN pg_namespace n ON n.oid = c.relnamespace\n"
         <> "          WHERE c.relkind IN ('r', 'p') LOOP\n"
         <> "            IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = source.oid AND tgname = '" <> viewTriggerName <> "') THEN\n"
-        <> "                EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION %I()', '" <> viewTriggerName <> "', source.nspname, source.relname, '" <> functionName <> "');\n"
+        <> "                EXECUTE format('CREATE TRIGGER %I AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON %I.%I FOR EACH STATEMENT EXECUTE FUNCTION %s', '" <> viewTriggerName <> "', source.nspname, source.relname, '" <> functionName <> "()'::regprocedure);\n"
         <> "            END IF;\n"
         <> "        END LOOP;\n"
         <> "        RETURN;\n"
         <> "    END IF;\n"
-        <> "    DROP TRIGGER IF EXISTS " <> insertTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "    DROP TRIGGER IF EXISTS " <> updateTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
-        <> "    DROP TRIGGER IF EXISTS " <> deleteTriggerName <> " ON " <> tableName <> ";\n"
-        <> "    CREATE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    CREATE OR REPLACE TRIGGER " <> insertTriggerName <> " AFTER INSERT ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    CREATE OR REPLACE TRIGGER " <> updateTriggerName <> " AFTER UPDATE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
+        <> "    CREATE OR REPLACE TRIGGER " <> deleteTriggerName <> " AFTER DELETE ON \"" <> tableName <> "\" FOR EACH ROW EXECUTE PROCEDURE " <> functionName <> "();\n"
         <> "EXCEPTION\n"
         <> "    WHEN SQLSTATE 'XX000' THEN null; -- 'tuple concurrently updated': another connection installed it first\n"
         <> "END; $$"

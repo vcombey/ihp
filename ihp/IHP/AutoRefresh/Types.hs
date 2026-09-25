@@ -12,7 +12,7 @@ import qualified IHP.PGListener as PGListener
 import qualified Data.Map.Strict as Map
 import IHP.QueryBuilder.Types (QueryBuilderRead)
 import Network.Wai (Request, ResponseReceived)
-import IHP.ModelSupport.Types (TrackedQueryRead)
+import IHP.ModelSupport.Types (RowLevelSecurityContext, TrackedQueryRead)
 import qualified Data.Aeson as Aeson
 
 data AutoRefreshState = AutoRefreshEnabled { sessionId :: !UUID }
@@ -55,6 +55,10 @@ data AutoRefreshSession
         -- | Structured QueryBuilder reads, or a conservative whole-table
         -- dependency when raw SQL or another unknown read touched the table.
         , readDependencies :: !(Map.Map Text AutoRefreshReadDependency)
+        -- | Actor captured with the rendered page. Query relevance checks must
+        -- use it: the shared listener has no request, and FORCE RLS hides every
+        -- row from the application role when this context is missing.
+        , rowLevelSecurity :: !(Maybe RowLevelSecurityContext)
         , lastResponse :: !LByteString
         , lastPing :: !UTCTime
         }
@@ -68,11 +72,12 @@ getAutoRefreshReadDependencies AutoRefreshSession { tables } =
 
 -- | Replace a session's dependencies and upgrade legacy sessions to the
 -- tracked representation.
-setAutoRefreshReadDependencies :: Map.Map Text AutoRefreshReadDependency -> AutoRefreshSession -> AutoRefreshSession
-setAutoRefreshReadDependencies readDependencies session = case session of
+setAutoRefreshReadDependencies :: Map.Map Text AutoRefreshReadDependency -> Maybe RowLevelSecurityContext -> AutoRefreshSession -> AutoRefreshSession
+setAutoRefreshReadDependencies readDependencies rowLevelSecurity session = case session of
     TrackedAutoRefreshSession {} -> session
         { tables = Map.keysSet readDependencies
         , readDependencies
+        , rowLevelSecurity
         }
     AutoRefreshSession { id, renderView, event, lastResponse, lastPing } ->
         TrackedAutoRefreshSession
@@ -81,6 +86,7 @@ setAutoRefreshReadDependencies readDependencies session = case session of
             , event
             , tables = Map.keysSet readDependencies
             , readDependencies
+            , rowLevelSecurity
             , lastResponse
             , lastPing
             }

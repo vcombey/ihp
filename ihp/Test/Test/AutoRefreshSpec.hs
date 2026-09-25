@@ -213,7 +213,7 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
             it "tracks private tables through nested joined views without row triggers on views" $ \_ ->
                 withAutoRefreshDB \modelContext -> do
                     let pool = modelContext.hasqlPool
-                    let cleanup = runHasqlScript pool "DROP VIEW IF EXISTS auto_refresh_test_view; DROP VIEW IF EXISTS auto_refresh_test_inner; DROP SCHEMA IF EXISTS auto_refresh_test_private CASCADE; DROP FUNCTION IF EXISTS ar_notify_did_change_auto_refresh_test_view();"
+                    let cleanup = runHasqlScript pool "DROP VIEW IF EXISTS auto_refresh_test_view; DROP VIEW IF EXISTS auto_refresh_test_inner; DROP SCHEMA IF EXISTS auto_refresh_test_private CASCADE; DO $$ DECLARE f REGPROCEDURE; BEGIN FOR f IN SELECT oid::REGPROCEDURE FROM pg_proc WHERE proname = 'ar_notify_did_change_auto_refresh_test_view' LOOP EXECUTE format('DROP FUNCTION %s', f); END LOOP; END $$;"
                     flip Exception.finally cleanup do
                         cleanup
                         runHasqlScript pool "CREATE SCHEMA auto_refresh_test_private; CREATE TABLE auto_refresh_test_private.left_items (id INT PRIMARY KEY); CREATE TABLE auto_refresh_test_private.right_items (id INT PRIMARY KEY); CREATE VIEW auto_refresh_test_inner AS SELECT id FROM auto_refresh_test_private.left_items; CREATE VIEW auto_refresh_test_view AS SELECT l.id FROM auto_refresh_test_inner l JOIN auto_refresh_test_private.right_items r USING (id);"
@@ -272,6 +272,14 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                         let clientRequest = ?request { requestHeaders = headers, queryString = queryParams }
                         let ?request = clientRequest
                         getAvailableSessions serverRef `shouldReturn` expected
+        describe "trigger installation privileges" do
+            it "upgrades legacy triggers without owning the watched table" $ \_ ->
+                withAutoRefreshDB \modelContext -> do
+                    let setup = "BEGIN; CREATE ROLE auto_refresh_upgrade_role; CREATE TABLE auto_refresh_upgrade_table (id INT PRIMARY KEY); DO $$ DECLARE s TEXT; BEGIN FOR s IN SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema' LOOP EXECUTE format('GRANT USAGE, CREATE ON SCHEMA %I TO auto_refresh_upgrade_role', s); END LOOP; END $$; GRANT TRIGGER ON auto_refresh_upgrade_table TO auto_refresh_upgrade_role; SET LOCAL ROLE auto_refresh_upgrade_role;"
+                    let install = notificationTriggerSQL "auto_refresh_upgrade_table" <> ";"
+                    let legacy = "DO $$ DECLARE t RECORD; BEGIN FOR t IN SELECT tgname, tgfoid::REGPROCEDURE AS function_name, CASE WHEN (tgtype & 4) <> 0 THEN 'INSERT' WHEN (tgtype & 16) <> 0 THEN 'UPDATE' ELSE 'DELETE' END AS operation FROM pg_trigger WHERE tgrelid = 'auto_refresh_upgrade_table'::regclass LOOP EXECUTE format('CREATE OR REPLACE TRIGGER %I AFTER %s ON auto_refresh_upgrade_table FOR EACH STATEMENT EXECUTE FUNCTION %s', t.tgname, t.operation, t.function_name); END LOOP; END $$;"
+                    let verify = "DO $$ BEGIN IF (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'auto_refresh_upgrade_table'::regclass AND (tgtype & 1) = 1) <> 3 THEN RAISE EXCEPTION 'expected three row triggers'; END IF; END $$; ROLLBACK;"
+                    runHasqlScript modelContext.hasqlPool (setup <> install <> legacy <> install <> verify)
         describe "read dependency tracking" do
             let sqlQuery = SQLQuery
                     { selectFrom = "tasks"
@@ -530,6 +538,7 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                         , event
                         , tables = Map.keysSet oldDependencies
                         , readDependencies = oldDependencies
+                        , rowLevelSecurity = Nothing
                         , lastResponse = "old"
                         , lastPing = now
                         }
@@ -546,15 +555,26 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                         serverRef
                         UUID.nil
                         newDependencies
+                        Nothing
                 failed `shouldSatisfy` \case
                     Left _ -> True
                     Right _ -> False
                 getAutoRefreshReadDependencies <$> getOnlyAutoRefreshSession serverRef
                     `shouldReturn` oldDependencies
 
-                commitAutoRefreshReadDependencies (pure ()) serverRef UUID.nil newDependencies
+                commitAutoRefreshReadDependencies (pure ()) serverRef UUID.nil newDependencies Nothing
                 getAutoRefreshReadDependencies <$> getOnlyAutoRefreshSession serverRef
                     `shouldReturn` newDependencies
+                let actor = RowLevelSecurityContext
+                        { rlsAuthenticatedRole = "ihp_authenticated"
+                        , rlsUserId = "00000000-0000-0000-0000-000000000001"
+                        }
+                commitAutoRefreshReadDependencies (pure ()) serverRef UUID.nil newDependencies (Just actor)
+                storedSession <- getOnlyAutoRefreshSession serverRef
+                case storedSession of
+                    TrackedAutoRefreshSession { rowLevelSecurity = Just RowLevelSecurityContext { rlsUserId } } ->
+                        rlsUserId `shouldBe` ("00000000-0000-0000-0000-000000000001" :: Text)
+                    _ -> expectationFailure "expected the rendered actor to stay on the session"
 
         describe "parameterized query filtering" do
             it "uses the captured matcher for inserts" $ withContext do
