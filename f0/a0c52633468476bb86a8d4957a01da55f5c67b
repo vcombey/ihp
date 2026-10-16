@@ -1,0 +1,39 @@
+ihp-ide/IHP/IDE/CodeGen/MigrationGenerator.hs
+  s_2366cc6981989e::t_ad0b1d6de40fe8 880-881,950-951,985-986
+ihp-ide/IHP/IDE/SchemaDesigner/SchemaOperations.hs
+  s_2366cc6981989e::t_66cf808bcb4e3d 230-231,738-739,802-803
+ihp-postgres-parser/IHP/Postgres/Compiler.hs
+  s_2366cc6981989e::t_bc377256932038 212-218
+ihp-postgres-parser/IHP/Postgres/Parser.hs
+  s_2366cc6981989e::t_e75d0e28346679 259,263,525-535,539,549,553-568,579-585,666-668,1023,1060,1083-1084,1211,1247-1263,1268-1275,1297,1324-1335,1712-1742
+ihp-postgres-parser/IHP/Postgres/Types.hs
+  s_2366cc6981989e::t_b419be5145e2cd 257-258
+ihp-postgres-parser/Test/Postgres/ParserSpec.hs
+  s_2366cc6981989e::t_1dc6c989f2f8b2 19-82
+ihp-typed-sql/IHP/TypedSql/CompileTimeDatabase.hs
+  s_2366cc6981989e::t_72ddf74eeecc50 22-23,26,882,915-916
+ihp-typed-sql/IHP/TypedSql/NameSupport.hs
+  s_2366cc6981989e::t_f931dc40b515d9 1-39
+ihp-typed-sql/IHP/TypedSql/ParamHints.hs
+  s_2366cc6981989e::t_772d3bfc8f08fa 20
+ihp-typed-sql/IHP/TypedSql/TypeMapping.hs
+  s_2366cc6981989e::t_927be80152b9ab 25
+ihp-typed-sql/ihp-typed-sql.cabal
+  s_2366cc6981989e::t_ced2efbae6f997 60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f0a0c52633468476bb86a8d4957a01da55f5c67b",
+  "prompts": {},
+  "sessions": {
+    "s_2366cc6981989e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13f81-8046-7722-b6fc-c4242f84ebf2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
