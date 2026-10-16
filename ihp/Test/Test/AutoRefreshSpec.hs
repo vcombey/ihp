@@ -13,7 +13,10 @@ import IHP.FrameworkConfig
 import IHP.ControllerPrelude hiding (get, request)
 import Network.Wai
 import Network.HTTP.Types
-import IHP.AutoRefresh (getAvailableSessions, globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession)
+import IHP.AutoRefresh (getAvailableSessions, globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession, processAutoRefreshWithPayload, commitAutoRefreshTables, getSessionById)
+import IHP.AutoRefresh.ChangeSet (AutoRefreshChangeSet)
+import qualified Control.Concurrent.Async as Async
+import qualified Control.Exception as Exception
 import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified Control.Concurrent.MVar as MVar
@@ -209,3 +212,45 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
 
                 sessionResponseHasChanged serverRef UUID.nil "resolved" `shouldReturn` True
                 sessionResponseHasChanged serverRef UUID.nil "unresolved" `shouldReturn` False
+
+        describe "payload filtering without SQL" do
+            forM_ [(False, Nothing), (True, Just ())] \(decision, expected) ->
+                it ("obeys the predicate: " <> show decision) $ withContext do
+                    session <- payloadSession (const (pure decision))
+                    server <- payloadServer session
+                    processAutoRefreshWithPayload server "projects" "{\"op\":\"insert\",\"new\":{\"id\":1}}"
+                    MVar.tryTakeMVar session.event `shouldReturn` expected
+
+            it "invalidates unknown payloads without calling the predicate" $ withContext do
+                session <- payloadSession (\_ -> error "Unknown payload must not reach predicate")
+                server <- payloadServer session
+                processAutoRefreshWithPayload server "projects" "legacy"
+                MVar.tryTakeMVar session.event `shouldReturn` Just ()
+
+            it "propagates asynchronous cancellation from a predicate" $ withContext do
+                session <- payloadSession (\_ -> Exception.throwIO Async.AsyncCancelled)
+                server <- payloadServer session
+                processAutoRefreshWithPayload server "projects" "{\"op\":\"insert\",\"new\":{\"id\":1}}"
+                    `shouldThrow` (const True :: Async.AsyncCancelled -> Bool)
+                MVar.tryTakeMVar session.event `shouldReturn` Nothing
+
+            it "retains dependencies if registration fails" $ withContext do
+                session <- payloadSession (const (pure False))
+                server <- payloadServer session
+                commitAutoRefreshTables (ioError (userError "registration failed")) server session.id mempty
+                    `shouldThrow` anyIOException
+                current <- getSessionById server session.id
+                current.tables `shouldBe` session.tables
+
+payloadSession :: (AutoRefreshChangeSet -> IO Bool) -> IO AutoRefreshSession
+payloadSession predicate = do
+    event <- MVar.newEmptyMVar
+    lastPing <- getCurrentTime
+    pure FilteredAutoRefreshSession
+        { id = UUID.nil, renderView = \_ _ -> error "No render expected"
+        , event, tables = singleton "projects", lastResponse = "", lastPing
+        , shouldRefresh = predicate
+        }
+
+payloadServer :: AutoRefreshSession -> IO (IORef AutoRefreshServer)
+payloadServer session = newIORef ((newAutoRefreshServer (error "No database/listener available")) { sessions = [session] })

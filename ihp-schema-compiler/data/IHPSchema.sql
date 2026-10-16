@@ -1,6 +1,9 @@
 -- Provides all the default settings for a IHP database in development mode
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
+-- AutoRefresh notification functions live outside the application schema.
+CREATE SCHEMA IF NOT EXISTS ihp_runtime;
+
 -- Used by IHP.Job
 CREATE TYPE JOB_STATUS AS ENUM ('job_status_not_started', 'job_status_running', 'job_status_failed', 'job_status_timed_out', 'job_status_succeeded', 'job_status_retry');
 

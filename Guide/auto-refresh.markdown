@@ -279,3 +279,27 @@ Each fragment gets its own Auto Refresh session and updates independently.
 - With `hx-swap="innerHTML"`, return only inner content, not another wrapper with the same `id`
 - Keep the target container stable across renders so morphdom can preserve `hx-*` attributes and input state
 - If updates affect too much UI, split the page into smaller HTMX fragments or switch to `autoRefreshWith` filtering
+
+
+## Explicit notification filtering
+
+Use `autoRefreshWith AutoRefreshOptions { shouldRefresh = predicate }` to decide
+in Haskell whether a table notification should rerender an action. Configure
+`option (AutoRefreshPayloadColumns ["id", "organization_id", "ticket_id"])`
+in `Config.hs` (import `IHP.AutoRefresh`). Only explicitly allowed columns are
+published. The default publishes no row data. Notifications bypass RLS: never
+include secrets or message bodies in that projection.
+
+The predicate receives `IHP.AutoRefresh.ChangeSet.AutoRefreshChangeSet` with OLD
+and NEW rows. Check both for transfers between scopes. Missing keys are unknown;
+use a conservative result. Invalid, legacy, oversized and statement notifications
+refresh conservatively; no SQL payload storage or lookup is used. The predicate
+should perform no SQL. A relevant change reruns the usual action with its
+original request context.
+
+This fork does not capture query parameters, retain result IDs, batch relevance
+queries or rerun SQL to test notification relevance. Plain `autoRefresh` keeps
+whole-table dependencies. Explicit `trackTableRead` is required for raw/typed SQL
+reads that do not pass through model fetching.
+
+The default IHP schema creates `ihp_runtime` for notification functions. Existing databases upgrading from an older IHP schema need `CREATE SCHEMA IF NOT EXISTS ihp_runtime` once, run by their database owner.

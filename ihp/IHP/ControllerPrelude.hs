@@ -77,7 +77,7 @@ import IHP.ViewSupport (View (..), JsonView (..))
 import qualified IHP.ViewSupport as ViewSupport
 
 import IHP.Job.Types
-import IHP.AutoRefresh (autoRefresh)
+import IHP.AutoRefresh (autoRefresh, autoRefreshWith, AutoRefreshOptions (..))
 
 import IHP.LoginSupport.Helper.Controller
 import IHP.PageHead.ControllerFunctions

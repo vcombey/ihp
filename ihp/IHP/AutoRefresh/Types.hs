@@ -9,6 +9,7 @@ import IHP.Prelude
 import Wai.Request.Params.Middleware (Respond)
 import Control.Concurrent.MVar (MVar)
 import qualified IHP.PGListener as PGListener
+import IHP.AutoRefresh.ChangeSet (AutoRefreshChangeSet)
 import Network.Wai (Request, ResponseReceived)
 
 data AutoRefreshState = AutoRefreshEnabled { sessionId :: !UUID }
@@ -24,6 +25,16 @@ data AutoRefreshSession = AutoRefreshSession
         , lastResponse :: !LByteString
         -- | Keep track of the last ping to this session to close it after too much time has passed without anything happening
         , lastPing :: !UTCTime
+        }
+
+    | FilteredAutoRefreshSession
+        { id :: !UUID
+        , renderView :: !(Request -> Respond -> IO ResponseReceived)
+        , event :: !(MVar ())
+        , tables :: !(Set Text)
+        , lastResponse :: !LByteString
+        , lastPing :: !UTCTime
+        , shouldRefresh :: !(AutoRefreshChangeSet -> IO Bool)
         }
 
 data AutoRefreshServer = AutoRefreshServer
