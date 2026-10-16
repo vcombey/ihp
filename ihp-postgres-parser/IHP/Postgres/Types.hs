@@ -254,6 +254,8 @@ data Expression =
     -- | value::type
     | TypeCastExpression Expression PostgresType
     | SelectExpression Select
+    | ScalarSelectExpression Expression
+    | CaseExpression (Maybe Expression) [(Expression, Expression)] (Maybe Expression)
     | DotExpression Expression Text
     | ConcatenationExpression Expression Expression -- ^ a || b
     -- | An infix operator the schema representation does not model on its own,

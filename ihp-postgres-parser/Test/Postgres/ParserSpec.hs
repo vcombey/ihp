@@ -10,14 +10,76 @@ import IHP.Postgres.Parser
 import IHP.Postgres.Compiler (compileSql)
 import IHP.Postgres.Types
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.String.Conversions (cs)
 import Data.Either (isLeft)
 import qualified Text.Megaparsec as Megaparsec
-import GHC.IO (evaluate)
 
 spec :: Spec
 spec = do
+    describe "Elron schema and view statements" do
+        it "preserves restrictive policy semantics" do
+            let sql = "CREATE POLICY owner_guard ON items AS RESTRICTIVE FOR UPDATE USING (owner_id = user_id());"
+            compileSql [parseSql sql] `shouldBe` (sql <> "\n")
+        it "preserves a schema-qualified table copy" do
+            let sql = "CREATE TABLE next.items (LIKE public.items INCLUDING ALL);"
+            compileSql [parseSql sql] `shouldBe` (sql <> "\n")
+        it "preserves a policy with JOINs that the Select AST cannot model" do
+            let sql = "CREATE POLICY item_access ON items USING (EXISTS (SELECT 1 FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = user_id));"
+            compileSql [parseSql sql] `shouldBe` (sql <> "\n")
+        it "does not mistake a quoted JOIN for an unsupported query" do
+            Megaparsec.parse parseDDL "input" "CREATE POLICY item_access ON items USING ('JOIN' AND );" `shouldSatisfy` isLeft
+        it "retains inline foreign keys and CHECK constraints as table constraints" do
+            let parsed = parseSql "CREATE TABLE items (id UUID PRIMARY KEY, org_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, count INT NOT NULL CHECK (count >= 0));"
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+            case parsed of
+                StatementCreateTable CreateTable { constraints } -> length constraints `shouldBe` 2
+                _ -> expectationFailure "expected a modeled table"
+        it "preserves multiple constraints in one ALTER TABLE" do
+            let sql = "ALTER TABLE items ADD CONSTRAINT item_a FOREIGN KEY (a) REFERENCES other (id) ON DELETE RESTRICT, ADD CONSTRAINT item_b CHECK (b > 0);"
+            parseSql sql `shouldBe` UnknownStatement { raw = "ALTER TABLE items ADD CONSTRAINT item_a FOREIGN KEY (a) REFERENCES other (id) ON DELETE RESTRICT, ADD CONSTRAINT item_b CHECK (b > 0)" }
+        it "rejects a malformed constraint in a multi-action ALTER TABLE" do
+            Megaparsec.parse parseDDL "input" "ALTER TABLE items ADD CHECK (a > 0), ADD CHECK ();" `shouldSatisfy` isLeft
+        mapM_ (\sql -> it ("round trips a CASE check: " <> cs sql) do
+            let parsed = parseSql sql
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+            ) [ "ALTER TABLE items ADD CONSTRAINT status_check CHECK (status IN ('pending', 'sent') AND CASE status WHEN 'pending' THEN sent_at IS NULL ELSE sent_at IS NOT NULL END);"
+              , "ALTER TABLE items ADD CONSTRAINT value_check CHECK (CASE WHEN value IS NULL THEN TRUE WHEN value > 0 THEN TRUE ELSE FALSE END);"
+              ]
+        it "parses boolean expressions after custom enum casts" do
+            let sql = "CREATE POLICY owner_scope ON items USING (scope = 'ticket'::item_scope OR owner_id = current_user_id());"
+            let parsed = parseSql sql
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+        it "round trips a scalar SELECT in a cast RLS array" do
+            let sql = "CREATE POLICY org_scope ON items USING (organization_id = ANY((SELECT public.organization_ids())::UUID[]));"
+            let parsed = parseSql sql
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+        it "preserves aliases in policy subqueries" do
+            let sql = "CREATE POLICY org_scope ON items USING (EXISTS (SELECT 1 FROM public.users AS u WHERE u.id = user_id));"
+            let parsed = parseSql sql
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+        it "preserves conditional index creation" do
+            parseSql "CREATE INDEX IF NOT EXISTS labels_idx ON items (label);" `shouldBe`
+                UnknownStatement { raw = "CREATE INDEX IF NOT EXISTS labels_idx ON items (label)" }
+        it "parses multiline calls in checks" do
+            let parsed = parseSql "ALTER TABLE items ADD CONSTRAINT scope_check CHECK (a = jsonb_build_object(\n 'x', b\n ));"
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+        it "preserves a private schema move" do
+            parseSql "ALTER TABLE credentials SET SCHEMA private;" `shouldBe`
+                UnknownStatement { raw = "ALTER TABLE credentials SET SCHEMA private" }
+        it "parses boolean expressions after IN lists" do
+            let parsed = parseSql "ALTER TABLE items ADD CONSTRAINT scope_check CHECK ((a IN ('x') AND b IN ('y')));"
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+        mapM_ (\operator -> it ("round trips " <> cs operator) do
+            let sql = "ALTER TABLE items ADD CONSTRAINT scope_check CHECK (a " <> operator <> " b);"
+            let parsed = parseSql sql
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+            ) ["IS DISTINCT FROM", "IS NOT DISTINCT FROM"]
+        it "preserves semicolons in quoted view expressions" do
+            parseSql "CREATE VIEW sample AS SELECT ';' AS label;" `shouldBe`
+                UnknownStatement { raw = "CREATE VIEW sample AS SELECT ';' AS label" }
+        it "preserves schema declarations" do
+            parseSql "CREATE SCHEMA IF NOT EXISTS ihp_runtime;" `shouldBe`
+                UnknownStatement { raw = "CREATE SCHEMA IF NOT EXISTS ihp_runtime" }
     describe "The Schema.sql Parser" do
         it "should parse an empty CREATE TABLE statement" do
             parseSql "CREATE TABLE users ();"  `shouldBe` StatementCreateTable (table "users")

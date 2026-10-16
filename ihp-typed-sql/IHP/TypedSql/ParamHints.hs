@@ -17,7 +17,7 @@ import           Data.Function                ((&))
 import qualified Data.Data                    as Data
 import qualified Data.List                   as List
 import qualified Data.Map.Strict             as Map
-import           Data.Maybe                   (catMaybes, mapMaybe, maybeToList, isJust)
+import           Data.Maybe                   (catMaybes, mapMaybe, maybeToList)
 import qualified Data.Set                    as Set
 import           Data.Text                    (Text)
 import qualified Data.Text                   as Text

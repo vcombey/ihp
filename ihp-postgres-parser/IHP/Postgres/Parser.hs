@@ -256,11 +256,11 @@ parseDDL = optional Char.space >> (manyTill statement eof)
 
 statement = do
     Char.space
-    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createPolicyFallback <|> try createSchema <|> try createView <|> try createSequence
+    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createTableLike <|> try createIndexIfNotExists <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createOpaquePolicy <|> try createSchema <|> try createView <|> try createSequence
     let alter = do
             lexeme "ALTER"
             alterTable <|> alterType <|> alterSequence
-    s <- setStatement <|> create <|> alter <|> selectStatement <|> try opaqueStatement <|> try doStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
+    s <- setStatement <|> create <|> try alterTableSchema <|> try alterTableMultipleConstraints <|> alter <|> selectStatement <|> try opaqueStatement <|> try doStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
     Char.space
     pure s
 
@@ -522,10 +522,21 @@ dollarQuoteTag = do
     char '$'
     pure ("$" <> maybe "" id tag <> "$")
 
+-- The policy AST cannot represent restrictive policies or JOINs. Preserve
+-- these policies verbatim, as the fork did before the upstream rebase. PostgreSQL
+-- validates their SQL; unlike a generic CREATE fallback, simple malformed policies
+-- still fail in the structured parser.
+createOpaquePolicy = do
+    lexeme "CREATE"
+    lexeme "POLICY"
+    chunks <- someTill opaqueChunk (char ';')
+    when (not (any ((`elem` ["JOIN", "RESTRICTIVE", "PERMISSIVE"]) . Text.toUpper) chunks)) (fail "not an unmodeled policy")
+    pure UnknownStatement { raw = Text.stripEnd ("CREATE POLICY " <> mconcat chunks) }
+
 createSchema = do
     lexeme "CREATE"
     lexeme "SCHEMA"
-    raw <- cs <$> someTill anySingle (char ';')
+    raw <- mconcat <$> someTill opaqueChunk (char ';')
     pure UnknownStatement { raw = Text.stripEnd ("CREATE SCHEMA " <> raw) }
 
 createView = do
@@ -535,15 +546,26 @@ createView = do
         lexeme "REPLACE"
     recursive <- isJust <$> optional (lexeme "RECURSIVE")
     lexeme "VIEW"
-    raw <- cs <$> someTill anySingle (char ';')
+    raw <- mconcat <$> someTill opaqueChunk (char ';')
     let prefix = "CREATE " <> (if orReplace then "OR REPLACE " else "") <> (if recursive then "RECURSIVE " else "") <> "VIEW "
     pure UnknownStatement { raw = Text.stripEnd (prefix <> raw) }
 
-createPolicyFallback = do
-    lexeme "CREATE"
-    lexeme "POLICY"
-    raw <- cs <$> someTill anySingle (char ';')
-    pure UnknownStatement { raw = Text.stripEnd ("CREATE POLICY " <> raw) }
+-- LIKE copies an existing schema at execution time, without a local column AST.
+createTableLike = do
+    raw <- fst <$> match do
+        lexeme "CREATE"
+        optional (lexeme "UNLOGGED")
+        lexeme "TABLE"
+        qualifiedIdentifier
+        symbol "("
+        lexeme "LIKE"
+        qualifiedIdentifier
+        many do
+            lexeme "INCLUDING" <|> lexeme "EXCLUDING"
+            choice (map lexeme ["ALL", "COMMENTS", "COMPRESSION", "CONSTRAINTS", "DEFAULTS", "GENERATED", "IDENTITY", "INDEXES", "STATISTICS", "STORAGE"])
+        symbol ")"
+    char ';'
+    pure UnknownStatement { raw = Text.stripEnd raw }
 
 createTable = do
     lexeme "CREATE"
@@ -554,8 +576,13 @@ createTable = do
     -- Process columns (tagged if they're primary key) and table constraints
     -- together, as they can be in any order
     (taggedColumns, allConstraints) <- between (char '(' >> space) (char ')' >> space) do
-        columnsAndConstraints <- ((Right <$> parseTableConstraint) <|> (Left <$> parseColumn)) `sepBy` (char ',' >> space)
-        pure (lefts columnsAndConstraints, rights columnsAndConstraints)
+        let columnWithConstraints = do
+                tagged@(_, Column { name }) <- parseColumn
+                inlineConstraints <- many ((parseReferences Nothing [name]) <|> parseCheckConstraint Nothing)
+                pure (tagged, inlineConstraints)
+        columnsAndConstraints <- ((Right <$> parseTableConstraint) <|> (Left <$> columnWithConstraints)) `sepBy` (char ',' >> space)
+        let parsedColumns = lefts columnsAndConstraints
+        pure (map fst parsedColumns, rights columnsAndConstraints <> map Right (concatMap snd parsedColumns))
 
     inherits <- optional do
         lexeme "INHERITS"
@@ -636,6 +663,9 @@ parseForeignKeyConstraint name = do
     lexeme "FOREIGN"
     lexeme "KEY"
     columnNames <- between (char '(' >> space) (char ')' >> space) (postgresIdentifier `sepBy1` (char ',' >> space))
+    parseReferences name columnNames
+
+parseReferences name columnNames = do
     lexeme "REFERENCES"
     referenceTable <- foldingQualifiedIdentifier
     referenceColumns <- optional $ between (char '(' >> space) (char ')' >> space) (postgresIdentifier `sepBy1` (char ',' >> space))
@@ -990,6 +1020,7 @@ sqlType = choice $ map optionalArray
 
                 customType = do
                     theType <- sourceQualifiedTypeIdentifier
+                    space
                     -- Custom typmods are flat here; nested parenthesized
                     -- modifiers are not supported by this parser.
                     typeModifier <- optional $ try do
@@ -1026,7 +1057,7 @@ intervalFields =  [ "YEAR TO MONTH", "DAY TO HOUR", "DAY TO MINUTE", "DAY TO SEC
                    , "YEAR",  "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"]
 
 
-term = parens expression <|> try variadicExpr <|> try arrayExpr <|> try typedLiteralExpr <|> try callExpr <|> try doubleExpr <|> try intExpr <|> selectExpr <|> varExpr <|> (textExpr <* optional space)
+term = parens expression <|> try caseExpr <|> try variadicExpr <|> try arrayExpr <|> try typedLiteralExpr <|> try callExpr <|> try doubleExpr <|> try intExpr <|> selectExpr <|> varExpr <|> (textExpr <* optional space)
     where
         parens f = between (char '(' >> space) (char ')' >> space) f
 
@@ -1049,6 +1080,8 @@ table = highPrecedenceTable <> genericOperatorTable <>
             , binary "<"  LessThanExpression
             , binary ">="  GreaterThanOrEqualToExpression
             , binary ">"  GreaterThanExpression
+            , keywordOperator "IS NOT DISTINCT FROM"
+            , keywordOperator "IS DISTINCT FROM"
             , binary "IS" IsExpression
             , prefix "NOT" NotExpression
             , prefix "EXISTS" ExistsExpression
@@ -1175,7 +1208,7 @@ typedLiteralExpr = do
 callExpr :: Parser Expression
 callExpr = do
     func <- functionIdentifier
-    args <- between (char '(') (char ')') (expression `sepBy` (char ',' >> space))
+    args <- between (symbol "(") (symbol ")") (expression `sepBy` (char ',' >> space))
     space
     pure (CallExpression func args)
 
@@ -1211,11 +1244,35 @@ textExpr' = cs <$> do
             pure ""
     (try (char '\'' *> many (try (string "''" $> '\'') <|> (notFollowedBy (char '\'') *> Lexer.charLiteral)) <* char '\'')) <|> emptyByteString
 
+-- | Simple and searched CASE expressions used in CHECK constraints.
+caseExpr :: Parser Expression
+caseExpr = do
+    keyword "CASE"
+    operand <- optional (notFollowedBy (keyword "WHEN") *> expression)
+    branches <- some do
+        keyword "WHEN"
+        condition <- expression
+        keyword "THEN"
+        value <- expression
+        pure (condition, value)
+    fallback <- optional (keyword "ELSE" *> expression)
+    keyword "END"
+    pure (CaseExpression operand branches fallback)
+    where
+        keyword name = try (lexeme (string' name <* notFollowedBy (satisfy isIdentifierCharacter)))
+
 selectExpr :: Parser Expression
 selectExpr = do
     symbol' "SELECT"
     columns <- expression `sepBy` (char ',' >> space)
-    symbol' "FROM"
+    fromKeyword <- optional (symbol' "FROM")
+    case (fromKeyword, columns) of
+        (Nothing, [scalar]) -> pure (ScalarSelectExpression scalar)
+        (Nothing, _) -> fail "SELECT without FROM must select exactly one expression"
+        (Just _, _) -> selectExprWithFrom columns
+
+selectExprWithFrom :: [Expression] -> Parser Expression
+selectExprWithFrom columns = do
     from <- expression
 
 
@@ -1237,7 +1294,7 @@ selectExpr = do
 
 inArrayExpression :: Parser Expression
 inArrayExpression = do
-    values <- between (char '(') (char ')') (expression `sepBy` (char ',' >> space))
+    values <- between (symbol "(") (symbol ")") (expression `sepBy` (char ',' >> space))
     pure (InArrayExpression values)
 
 
@@ -1263,6 +1320,18 @@ comment = do
     (char '-' >> char '-') <?> "Line comment"
     content <- takeWhileP Nothing (/= '\n')
     pure Comment { content }
+
+-- The index AST has no IF NOT EXISTS flag, so preserve this form verbatim.
+createIndexIfNotExists = do
+    prefix <- fst <$> match do
+        lexeme "CREATE"
+        optional (lexeme "UNIQUE")
+        lexeme "INDEX"
+        lexeme "IF"
+        lexeme "NOT"
+        lexeme "EXISTS"
+    body <- mconcat <$> someTill opaqueChunk (char ';')
+    pure UnknownStatement { raw = Text.stripEnd (prefix <> body) }
 
 createIndex = do
     lexeme "CREATE"
@@ -1639,6 +1708,37 @@ triggerEvent = (lexeme "INSERT" >> pure TriggerOnInsert) <|> (lexeme "UPDATE" >>
                 lexeme "OF"
                 postgresIdentifier `sepBy1` (char ',' >> space)
             pure (maybe TriggerOnUpdate TriggerOnUpdateOf columns)
+
+-- Schema moves are preserved verbatim; the model name stays unqualified.
+alterTableSchema = do
+    raw <- fst <$> match do
+        lexeme "ALTER"
+        lexeme "TABLE"
+        optional (lexeme "ONLY")
+        qualifiedIdentifier
+        lexeme "SET"
+        lexeme "SCHEMA"
+        identifier
+    char ';'
+    pure UnknownStatement { raw = Text.stripEnd raw }
+
+-- Keep multi-action constraints intact; Statement represents only one action.
+-- Parse each constraint so malformed DDL still fails instead of being hidden.
+alterTableMultipleConstraints = do
+    raw <- fst <$> match do
+        lexeme "ALTER"
+        lexeme "TABLE"
+        optional (lexeme "ONLY")
+        qualifiedIdentifier
+        let add = do
+                lexeme "ADD"
+                parseTableConstraint
+                optional parseDeferrable
+                optional parseDeferrableType
+        add
+        some (symbol "," *> add)
+    char ';'
+    pure UnknownStatement { raw = Text.stripEnd raw }
 
 alterTable = do
     lexeme "TABLE"

@@ -9,7 +9,6 @@ import Test.Hspec
 import IHP.Postgres.Compiler (compileExpression, compilePostgresType, compileSql)
 import IHP.Postgres.Types
 import Data.Text (Text)
-import qualified Data.Text as Text
 import Data.String.Conversions (cs)
 import qualified Text.Megaparsec as Megaparsec
 import IHP.Postgres.Parser (parseDDL)

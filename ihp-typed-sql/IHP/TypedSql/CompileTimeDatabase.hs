@@ -19,9 +19,11 @@ import           Data.Bits                (xor)
 import qualified Data.ByteString          as BS
 import qualified Data.ByteString.Char8    as BSC
 import qualified Data.Char                as Char
+import           Data.Function            ((&))
+import           IHP.TypedSql.NameSupport  (tableNameToModelName)
 import           Data.Functor             ((<&>))
 import qualified Data.List                as List
-import           Data.Maybe               (catMaybes, fromMaybe, listToMaybe)
+import           Data.Maybe               (catMaybes, fromMaybe, listToMaybe, maybeToList)
 import qualified Data.String.Conversions  as CS
 import           Data.Time.Clock          (diffUTCTime, getCurrentTime)
 import           Data.Word                (Word64)
@@ -877,7 +879,7 @@ createConfiguredRoles tools database@AutoDatabase { adbPgHost } = do
             fail ("typedSql: invalid role name in IHP_TYPED_SQL_AUTO_DB_ROLES: " <> role)
         runCheckedTracked tools database (psqlPath tools)
             [ "-v", "ON_ERROR_STOP=1", "-h", adbPgHost, "-p", privatePostgreSqlPort
-            , "app", "-c", "CREATE ROLE \"" <> role <> "\" NOLOGIN"
+            , "-U", privatePostgreSqlUser, "app", "-c", "CREATE ROLE \"" <> role <> "\" NOLOGIN"
             ]
   where
     splitOn delimiter input = case break (== delimiter) input of
@@ -910,8 +912,8 @@ dependentSchemaFilesForTables (Just (tables, cteNames)) = do
             let globalDependency = generatedRoot </> "TypedSqlSchemaDependenciesV4"
             let tableDependencies =
                     tables
-                        |> Set.toList
-                        |> map (\tableName ->
+                        & Set.toList
+                        & map (\tableName ->
                             generatedRoot
                                 </> "ActualTypes"
                                 </> CS.cs (tableNameToModelName tableName <> ".hs")

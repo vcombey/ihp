@@ -209,7 +209,13 @@ compileExpression (DoubleExpression double) = tshow double
 compileExpression (NumericExpression value) = value
 compileExpression (IntExpression integer) = tshow integer
 compileExpression (TypeCastExpression value type_) = compileExpressionWithOptionalParenthese value <> "::" <> compilePostgresType type_
-compileExpression (SelectExpression Select { columns, from, whereClause }) = "SELECT " <> intercalate ", " (map compileExpression columns) <> " FROM " <> compileExpression from <> " WHERE " <> compileExpression whereClause
+compileExpression (SelectExpression Select { columns, from, whereClause, alias }) = "SELECT " <> intercalate ", " (map compileExpression columns) <> " FROM " <> compileExpression from <> maybe "" (\name -> " AS " <> compileIdentifier name) alias <> " WHERE " <> compileExpression whereClause
+compileExpression (ScalarSelectExpression scalar) = "SELECT " <> compileExpression scalar
+compileExpression (CaseExpression operand branches fallback) = "CASE"
+    <> maybe "" ((" " <>) . compileExpression) operand
+    <> foldMap (\(condition, value) -> " WHEN " <> compileExpression condition <> " THEN " <> compileExpression value) branches
+    <> maybe "" ((" ELSE " <>) . compileExpression) fallback
+    <> " END"
 compileExpression (ExistsExpression a) = "EXISTS " <> compileExpressionWithOptionalParenthese a
 compileExpression (DotExpression a b) = compileExpressionWithOptionalParenthese a <> "." <> compileIdentifier b
 compileExpression (ConcatenationExpression a b) = compileExpressionWithOptionalParenthese a <> " || " <> compileExpressionWithOptionalParenthese b
