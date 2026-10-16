@@ -1,0 +1,19 @@
+ihp-typed-sql/IHP/TypedSql/CompileTimeDatabase.hs
+  s_2366cc6981989e::t_34ff8b9cfe2ca5 41,893-896,932-934
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d62412acbe54686bf7eff5594e65614d03c2f7ad",
+  "prompts": {},
+  "sessions": {
+    "s_2366cc6981989e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13f81-8046-7722-b6fc-c4242f84ebf2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
