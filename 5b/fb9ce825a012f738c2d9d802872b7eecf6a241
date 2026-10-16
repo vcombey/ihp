@@ -1,0 +1,35 @@
+Guide/auto-refresh.markdown
+  s_2366cc6981989e::t_7b5e3c68d15ea8 282-305
+ihp-ide/data/IHPSchema.sql
+  s_2366cc6981989e::t_b89a8e699329b1 4-6
+ihp-schema-compiler/data/IHPSchema.sql
+  s_2366cc6981989e::t_eb216ce58f7ed6 4-6
+ihp/IHP/AutoRefresh.hs
+  s_2366cc6981989e::t_4f40b9dc934a76 10-11,19,21,24,47-50,62-71,79-98,127-138,153-158,178,182,204-232,244,266-272,274-293,296-335,385,393,414,418,424-425,427-428,430-433,435,437-444,446-448,450-462,465-482,487-497,501-502
+ihp/IHP/AutoRefresh/ChangeSet.hs
+  s_2366cc6981989e::t_b48ba53dcc810d 1-60
+ihp/IHP/AutoRefresh/Types.hs
+  s_2366cc6981989e::t_5f76cb807020b9 12,30-39
+ihp/IHP/ControllerPrelude.hs
+  s_2366cc6981989e::t_dddb16d0def970 80
+ihp/Test/Test/AutoRefreshSpec.hs
+  s_2366cc6981989e::t_d8b568f62984bc 16-19,215-256
+ihp/ihp.cabal
+  s_2366cc6981989e::t_e564137b53671c 243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5bfb9ce825a012f738c2d9d802872b7eecf6a241",
+  "prompts": {},
+  "sessions": {
+    "s_2366cc6981989e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13f81-8046-7722-b6fc-c4242f84ebf2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
