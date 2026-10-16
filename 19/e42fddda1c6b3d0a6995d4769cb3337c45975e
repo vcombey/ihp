@@ -1,0 +1,29 @@
+ihp-hsx/Test/Main.hs
+  s_2366cc6981989e::t_4856a9dab613d9 9,16
+ihp-hsx/app/hsxfmt/Main.hs
+  s_2366cc6981989e::t_7a0e4d0b308561 1-86
+ihp-hsx/formatter/IHP/HSX/Format/Backend.hs
+  s_2366cc6981989e::t_39e248645a66cb 1-105
+ihp-hsx/formatter/IHP/HSX/Format/Locate.hs
+  s_2366cc6981989e::t_14f81309f90f93 1-107
+ihp-hsx/formatter/IHP/HSX/Format/Types.hs
+  s_2366cc6981989e::t_8a06d44c1192c2 1-47
+ihp-hsx/ihp-hsx.cabal
+  s_2366cc6981989e::t_d892f15bca5a0c 150-167,171-173,180-186,197
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "19e42fddda1c6b3d0a6995d4769cb3337c45975e",
+  "prompts": {},
+  "sessions": {
+    "s_2366cc6981989e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13f81-8046-7722-b6fc-c4242f84ebf2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
