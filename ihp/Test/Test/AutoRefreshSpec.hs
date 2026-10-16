@@ -28,6 +28,7 @@ import IHP.Server (initMiddlewareStack)
 import Network.Wai.Test (runSession, request, SResponse(..), simpleBody)
 import IHP.Test.Mocking
 import qualified Data.UUID as UUID
+import qualified Data.Set as Set
 import qualified Network.Wai as Wai
 
 data WebApplication = WebApplication deriving (Eq, Show, Data)
@@ -215,7 +216,7 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
 
         describe "payload filtering without SQL" do
             forM_ [(False, Nothing), (True, Just ())] \(decision, expected) ->
-                it ("obeys the predicate: " <> show decision) $ withContext do
+                it ("obeys the predicate: " <> cs (show decision)) $ withContext do
                     session <- payloadSession (const (pure decision))
                     server <- payloadServer session
                     processAutoRefreshWithPayload server "projects" "{\"op\":\"insert\",\"new\":{\"id\":1}}"
@@ -225,6 +226,12 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                 session <- payloadSession (\_ -> error "Unknown payload must not reach predicate")
                 server <- payloadServer session
                 processAutoRefreshWithPayload server "projects" "legacy"
+                MVar.tryTakeMVar session.event `shouldReturn` Just ()
+
+            it "refreshes if evaluating a predicate result throws" $ withContext do
+                session <- payloadSession (\_ -> pure (error "invalid predicate result"))
+                server <- payloadServer session
+                processAutoRefreshWithPayload server "projects" "{\"op\":\"insert\",\"new\":{\"id\":1}}"
                 MVar.tryTakeMVar session.event `shouldReturn` Just ()
 
             it "propagates asynchronous cancellation from a predicate" $ withContext do
@@ -248,7 +255,7 @@ payloadSession predicate = do
     lastPing <- getCurrentTime
     pure FilteredAutoRefreshSession
         { id = UUID.nil, renderView = \_ _ -> error "No render expected"
-        , event, tables = singleton "projects", lastResponse = "", lastPing
+        , event, tables = Set.singleton "projects", lastResponse = "", lastPing
         , shouldRefresh = predicate
         }
 

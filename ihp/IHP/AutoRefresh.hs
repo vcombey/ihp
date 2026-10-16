@@ -325,7 +325,7 @@ processAutoRefreshWithPayload server table payload = do
             | table `Set.member` tables -> do
                 refresh <- case changes of
                     Nothing -> pure True
-                    Just value -> shouldRefresh value `Exception.catch` \(exception :: SomeException) ->
+                    Just value -> (shouldRefresh value >>= Exception.evaluate) `Exception.catch` \(exception :: SomeException) ->
                         case Exception.fromException exception :: Maybe Exception.SomeAsyncException of
                             Just asyncException -> Exception.throwIO asyncException
                             Nothing -> pure True
