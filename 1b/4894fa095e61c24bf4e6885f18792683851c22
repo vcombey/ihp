@@ -1,0 +1,29 @@
+ihp-ide/Test/SchemaCompilerSpec.hs
+  s_12f9f5d5095bed::t_78f3dc170f5dc2 18-33
+ihp-schema-compiler/IHP/SchemaCompiler.hs
+  s_c19a9116ae32c7::t_19ebfca6df1f51 63,77,79-93,102,141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b4894fa095e61c24bf4e6885f18792683851c22",
+  "prompts": {},
+  "sessions": {
+    "s_12f9f5d5095bed": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14905-41b1-74c3-842d-dd53334d62be",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    },
+    "s_c19a9116ae32c7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14907-7f0e-75c1-8171-8b389c7fbb31",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
