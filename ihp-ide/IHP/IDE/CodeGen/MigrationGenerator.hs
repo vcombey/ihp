@@ -879,6 +879,7 @@ normalizeExpressionWith preserveSemanticCasts = normalize
                 unqualifiedName name = name
         normalize (CaseExpression operand branches fallback) = CaseExpression (normalize <$> operand) [(normalize condition, normalize value) | (condition, value) <- branches] (normalize <$> fallback)
         normalize (ScalarSelectExpression scalar) = ScalarSelectExpression (normalize scalar)
+        normalize (SelectAliasExpression value alias) = SelectAliasExpression (normalize value) alias
         normalize (DotExpression a b) = DotExpression (normalize a) (Text.toLower b)
         normalize (ExistsExpression a) = ExistsExpression (normalize a)
         normalize (InArrayExpression exprs) = InArrayExpression (map normalize exprs)
@@ -949,6 +950,7 @@ unqualifyExpression scope expression = doUnqualify expression
                 SelectExpression Select { columns = (recurse <$> columns), from = from, whereClause = recurse whereClause, alias }
         doUnqualify (CaseExpression operand branches fallback) = CaseExpression (doUnqualify <$> operand) [(doUnqualify condition, doUnqualify value) | (condition, value) <- branches] (doUnqualify <$> fallback)
         doUnqualify (ScalarSelectExpression scalar) = ScalarSelectExpression (doUnqualify scalar)
+        doUnqualify (SelectAliasExpression value alias) = SelectAliasExpression (doUnqualify value) alias
         doUnqualify (ExistsExpression a) = ExistsExpression (doUnqualify a)
         doUnqualify (InArrayExpression exprs) = InArrayExpression (map doUnqualify exprs)
         doUnqualify (ArrayLiteralExpression exprs) = ArrayLiteralExpression (map doUnqualify exprs)
@@ -984,6 +986,7 @@ resolveAlias (Just alias) fromExpression expression =
         e@(TypeCastExpression a b) -> (TypeCastExpression (rec a) b)
         CaseExpression operand branches fallback -> CaseExpression (rec <$> operand) [(rec condition, rec value) | (condition, value) <- branches] (rec <$> fallback)
         ScalarSelectExpression scalar -> ScalarSelectExpression (rec scalar)
+        SelectAliasExpression value alias -> SelectAliasExpression (rec value) alias
         e@(SelectExpression Select { columns, from, whereClause, alias }) -> SelectExpression Select { columns = rec <$> columns, from = rec from, whereClause = rec whereClause, alias = alias }
         e@(DotExpression a b) -> DotExpression (rec a) b
         e@(ExistsExpression a) -> ExistsExpression (rec a)

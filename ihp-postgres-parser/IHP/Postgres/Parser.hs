@@ -256,13 +256,22 @@ parseDDL = optional Char.space >> (manyTill statement eof)
 
 statement = do
     Char.space
-    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createTableLike <|> try createIndexIfNotExists <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createOpaquePolicy <|> try createSchema <|> try createView <|> try createSequence
+    let create = try createExtension <|> try (StatementCreateTable <$> createTable) <|> try createTableLike <|> try createIndexIfNotExists <|> try createIndex <|> try createFunction <|> try createTrigger <|> try createEnumType <|> try createPolicy <|> try createOpaquePolicy <|> try createSchema <|> try createStatistics <|> try createView <|> try createSequence
     let alter = do
             lexeme "ALTER"
             alterTable <|> alterType <|> alterSequence
     s <- setStatement <|> create <|> try alterTableSchema <|> try alterTableMultipleConstraints <|> alter <|> selectStatement <|> try opaqueStatement <|> try doStatement <|> try dropTable <|> try dropIndex <|> try dropPolicy <|> try dropFunction <|> try dropType <|> dropTrigger <|> commentStatement <|> comment <|> begin <|> commit <|> restrict <|> unrestrict
     Char.space
     pure s
+
+
+-- Extended statistics are database planner metadata, preserved verbatim for
+-- dumps and schema comparison without adding an ORM representation.
+createStatistics :: Parser Statement
+createStatistics = do
+    prefix <- try (string "CREATE STATISTICS" <* lookAhead space1)
+    body <- mconcat <$> someTill opaqueChunk (char ';')
+    pure UnknownStatement { raw = Text.stripEnd (prefix <> body) }
 
 
 createExtension = do
@@ -1264,7 +1273,11 @@ caseExpr = do
 selectExpr :: Parser Expression
 selectExpr = do
     symbol' "SELECT"
-    columns <- expression `sepBy` (char ',' >> space)
+    let column = do
+            value <- expression
+            alias <- optional (symbol' "AS" >> identifier)
+            pure (maybe value (SelectAliasExpression value) alias)
+    columns <- column `sepBy` (char ',' >> space)
     fromKeyword <- optional (symbol' "FROM")
     case (fromKeyword, columns) of
         (Nothing, [scalar]) -> pure (ScalarSelectExpression scalar)

@@ -211,6 +211,7 @@ compileExpression (IntExpression integer) = tshow integer
 compileExpression (TypeCastExpression value type_) = compileExpressionWithOptionalParenthese value <> "::" <> compilePostgresType type_
 compileExpression (SelectExpression Select { columns, from, whereClause, alias }) = "SELECT " <> intercalate ", " (map compileExpression columns) <> " FROM " <> compileExpression from <> maybe "" (\name -> " AS " <> compileIdentifier name) alias <> " WHERE " <> compileExpression whereClause
 compileExpression (ScalarSelectExpression scalar) = "SELECT " <> compileExpression scalar
+compileExpression (SelectAliasExpression value alias) = compileExpression value <> " AS " <> compileIdentifier alias
 compileExpression (CaseExpression operand branches fallback) = "CASE"
     <> maybe "" ((" " <>) . compileExpression) operand
     <> foldMap (\(condition, value) -> " WHEN " <> compileExpression condition <> " THEN " <> compileExpression value) branches

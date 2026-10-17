@@ -17,6 +17,17 @@ import qualified Text.Megaparsec as Megaparsec
 spec :: Spec
 spec = do
     describe "Elron schema and view statements" do
+        it "round trips scalar SELECT aliases emitted by pg_dump" do
+            let sql = "CREATE POLICY scope ON items USING (organization_id = ANY ((SELECT public.organization_ids() AS organization_ids)::UUID[]));"
+            let parsed = parseSql sql
+            parseSql (compileSql [parsed]) `shouldBe` parsed
+        it "rejects an incomplete scalar SELECT alias" do
+            Megaparsec.parse parseDDL "input" "CREATE POLICY scope ON items USING ((SELECT TRUE AS));" `shouldSatisfy` isLeft
+
+        it "preserves PostgreSQL extended statistics from schema dumps" do
+            let sql = "CREATE STATISTICS private.items_scope_stats (dependencies, mcv) ON organization_id, status FROM private.items;"
+            compileSql [parseSql sql] `shouldBe` sql <> "\n"
+
         it "preserves restrictive policy semantics" do
             let sql = "CREATE POLICY owner_guard ON items AS RESTRICTIVE FOR UPDATE USING (owner_id = user_id());"
             compileSql [parseSql sql] `shouldBe` (sql <> "\n")

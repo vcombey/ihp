@@ -229,6 +229,7 @@ updateColumn options@(UpdateColumnOptions { .. }) schema =
             TypeCastExpression expression postgresType -> TypeCastExpression (renameExpressionColumns expression) postgresType
             CaseExpression operand branches fallback -> CaseExpression (renameExpressionColumns <$> operand) [(renameExpressionColumns condition, renameExpressionColumns value) | (condition, value) <- branches] (renameExpressionColumns <$> fallback)
             ScalarSelectExpression scalar -> ScalarSelectExpression (renameExpressionColumns scalar)
+            SelectAliasExpression value alias -> SelectAliasExpression (renameExpressionColumns value) alias
             SelectExpression select@Select { columns, whereClause } -> SelectExpression (select { columns = map renameExpressionColumns columns, whereClause = renameExpressionColumns whereClause })
             DotExpression expression name -> DotExpression (renameExpressionColumns expression) (renameColumn name)
             ConcatenationExpression left right -> ConcatenationExpression (renameExpressionColumns left) (renameExpressionColumns right)
@@ -737,6 +738,7 @@ deleteColumn DeleteColumnOptions { .. } schema =
                 isRef (SelectExpression _) = False
                 isRef (CaseExpression operand branches fallback) = any isRef operand || any (\(condition, value) -> isRef condition || isRef value) branches || any isRef fallback
                 isRef (ScalarSelectExpression scalar) = isRef scalar
+                isRef (SelectAliasExpression value _) = isRef value
                 isRef (DotExpression a _) = isRef a
                 isRef (ConcatenationExpression a b) = isRef a || isRef b
                 isRef (BinaryOperatorExpression _ a b) = isRef a || isRef b
@@ -801,6 +803,7 @@ expressionReferencesColumn columnName = \case
     TypeCastExpression expression _ -> references expression
     CaseExpression operand branches fallback -> any references operand || any (\(condition, value) -> references condition || references value) branches || any references fallback
     ScalarSelectExpression scalar -> references scalar
+    SelectAliasExpression value _ -> references value
     SelectExpression Select { columns, from, whereClause } -> any references columns || references from || references whereClause
     DotExpression expression name -> name == columnName || references expression
     ConcatenationExpression a b -> references a || references b

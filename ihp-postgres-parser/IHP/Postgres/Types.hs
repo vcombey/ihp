@@ -255,6 +255,7 @@ data Expression =
     | TypeCastExpression Expression PostgresType
     | SelectExpression Select
     | ScalarSelectExpression Expression
+    | SelectAliasExpression Expression Text
     | CaseExpression (Maybe Expression) [(Expression, Expression)] (Maybe Expression)
     | DotExpression Expression Text
     | ConcatenationExpression Expression Expression -- ^ a || b
