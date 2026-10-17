@@ -15,6 +15,22 @@ import System.OsPath (decodeUtf)
 
 tests = do
     describe "SchemaCompiler" do
+        describe "private schema tables" do
+            it "keeps private tables out of model modules while retaining their SQL dependencies" do
+                let schema = Schema (parseSqlStatements [trimming|
+                        CREATE TABLE users (id UUID PRIMARY KEY NOT NULL);
+                        CREATE TABLE private.organization_user_accesses (
+                            user_id UUID PRIMARY KEY NOT NULL REFERENCES users(id)
+                        );
+                        ALTER TABLE private.organization_user_accesses ADD CONSTRAINT user_fk FOREIGN KEY (user_id) REFERENCES users(id);
+                    |])
+                forEach [True, False] \relations -> do
+                    let modules = compileModules fullCompileOptions { compileRelationSupport = relations } schema
+                    let bodies = Text.concat (map snd modules)
+                    bodies `shouldNotSatisfy` Text.isInfixOf "OrganizationUserAccess"
+                compileStableIds schema `shouldBe` compileStableIds (Schema (parseSqlStatements "CREATE TABLE users (id UUID PRIMARY KEY NOT NULL);"))
+                compileTypedSqlSchemaDependencies schema `shouldSatisfy` Text.isInfixOf "private.organization_user_accesses"
+
         describe "granular schema dependencies" do
             let baseSchema = parseSqlStatements [trimming|
                     CREATE TABLE users (

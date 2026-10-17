@@ -60,7 +60,7 @@ compile = do
                     writeIfDifferent path body
 
 compileModules :: CompilerOptions -> Schema -> [(OsPath, Text)]
-compileModules options schema =
+compileModules options fullSchema =
     let ?compilerOptions = options
     in [ ("build/Generated/Enums.hs", compileEnumsIndex schema)
        , ("build/Generated/ActualTypes/PrimaryKeys.hs", compilePrimaryKeysModule schema)
@@ -74,8 +74,23 @@ compileModules options schema =
        <> statementModules schema
        <> [ ("build/Generated/Statements.hs", compileStatementsIndex schema)
           , ("build/Generated/Types.hs", compileIndex schema)
-          , ("build/Generated/TypedSqlSchemaDependenciesV4", compileTypedSqlSchemaDependencies schema)
+          , ("build/Generated/TypedSqlSchemaDependenciesV4", compileTypedSqlSchemaDependencies fullSchema)
           ]
+    where
+        schema = modelSchema fullSchema
+
+-- Qualified non-public objects remain available to SQL/migration tooling, but
+-- cannot become unqualified Haskell models or reverse relation fields.
+modelSchema :: Schema -> Schema
+modelSchema (Schema statements) = Schema (filter isModelStatement statements)
+    where
+        isModelStatement (StatementCreateTable table) = isModelName table.name
+        isModelStatement AddConstraint { tableName } = isModelName tableName
+        isModelStatement CreateEnumType { name } = isModelName name
+        isModelStatement _ = True
+
+isModelName :: Text -> Bool
+isModelName = not . Text.isInfixOf "."
 
 compileTypedSqlSchemaDependencies :: Schema -> Text
 compileTypedSqlSchemaDependencies (Schema statements) = Text.unlines
@@ -84,7 +99,7 @@ compileTypedSqlSchemaDependencies (Schema statements) = Text.unlines
     ]
   where
     modeledTables = statements |> mapMaybe (\case
-        StatementCreateTable table | tableHasPrimaryKey table -> Just table.name
+        StatementCreateTable table | tableHasPrimaryKey table && isModelName table.name -> Just table.name
         _ -> Nothing)
     isUnmodeled tableName = tableName `notElem` modeledTables
     -- Table-scoped dependencies track table and constraint changes. This file
@@ -123,7 +138,7 @@ compileStableIds (Schema statements) = Text.unlines
     ]
   where
     aliases = statements |> mapMaybe (\case
-        StatementCreateTable table | tableHasPrimaryKey table ->
+        StatementCreateTable table | tableHasPrimaryKey table && isModelName table.name ->
             Just ("type " <> tableNameToModelName table.name <> "Id = Id' \"" <> table.name <> "\"")
         _ -> Nothing
         )
