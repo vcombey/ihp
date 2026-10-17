@@ -1,0 +1,29 @@
+ihp-ide/IHP/IDE/CodeGen/MigrationGenerator.hs
+  s_2366cc6981989e::t_56677bbad49946 882,953,989
+ihp-ide/IHP/IDE/SchemaDesigner/SchemaOperations.hs
+  s_2366cc6981989e::t_ed4893b086b383 232,741,806
+ihp-postgres-parser/IHP/Postgres/Compiler.hs
+  s_2366cc6981989e::t_19fb8765a1a900 214
+ihp-postgres-parser/IHP/Postgres/Parser.hs
+  s_2366cc6981989e::t_ab326e4cd27ad7 259,268-276,1276-1280
+ihp-postgres-parser/IHP/Postgres/Types.hs
+  s_2366cc6981989e::t_3bbf0683368fb3 258
+ihp-postgres-parser/Test/Postgres/ParserSpec.hs
+  s_2366cc6981989e::t_ea84a1a6825cd8 20-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7f28eaf0638ad607e23caa4bb151e79b62cbe314",
+  "prompts": {},
+  "sessions": {
+    "s_2366cc6981989e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13f81-8046-7722-b6fc-c4242f84ebf2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
