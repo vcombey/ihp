@@ -40,24 +40,26 @@ import IHP.RequestVault (pgListenerVaultKey)
 import IHP.FrameworkConfig.Types (FrameworkConfig(..))
 import IHP.Environment (Environment(..))
 
-{-# NOINLINE globalAutoRefreshServerVar #-}
-globalAutoRefreshServerVar :: MVar.MVar (Maybe (IORef AutoRefreshServer))
-globalAutoRefreshServerVar = unsafePerformIO (MVar.newMVar Nothing)
+{-# NOINLINE autoRefreshServerVaultKey #-}
+autoRefreshServerVaultKey :: Vault.Key (IORef AutoRefreshServer)
+autoRefreshServerVaultKey = unsafePerformIO Vault.newKey
+
+-- The state must share the application's lifetime: GHCi retains library globals
+-- across reloads, while the application's PGListener is stopped and recreated.
+initAutoRefreshMiddleware :: PGListener.PGListener -> IO Middleware
+initAutoRefreshMiddleware pgListener = do
+    server <- newIORef (newAutoRefreshServer pgListener)
+    pure \app request respond ->
+        app request { vault = Vault.insert autoRefreshServerVaultKey server request.vault } respond
 
 {-# NOINLINE notificationTriggerRegistrationLock #-}
 notificationTriggerRegistrationLock :: MVar.MVar ()
 notificationTriggerRegistrationLock = unsafePerformIO (MVar.newMVar ())
 
 getOrCreateAutoRefreshServer :: (?request :: Request) => IO (IORef AutoRefreshServer)
-getOrCreateAutoRefreshServer =
-    MVar.modifyMVar globalAutoRefreshServerVar $ \case
-        Just server -> pure (Just server, server)
-        Nothing -> do
-            let pgListener = case Vault.lookup pgListenerVaultKey ?request.vault of
-                    Just pl -> pl
-                    Nothing -> error "getOrCreateAutoRefreshServer: PGListener not found in request vault"
-            server <- newIORef (newAutoRefreshServer pgListener)
-            pure (Just server, server)
+getOrCreateAutoRefreshServer = case Vault.lookup autoRefreshServerVaultKey ?request.vault of
+    Just server -> pure server
+    Nothing -> error "getOrCreateAutoRefreshServer: AutoRefresh middleware not initialized"
 
 -- | Columns safe to publish in PostgreSQL notifications. Configure once in
 -- Config.hs with @option (AutoRefreshPayloadColumns ["id", "organization_id"])@.

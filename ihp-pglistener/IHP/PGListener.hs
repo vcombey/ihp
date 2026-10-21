@@ -123,8 +123,11 @@ init databaseUrl logger = do
 -- > PGListener.stop pgListener
 --
 stop :: PGListener -> IO ()
-stop PGListener { notifyLoopAsync } = do
+stop PGListener { notifyLoopAsync, subscriptions } = do
     cancel notifyLoopAsync
+    -- Readers retain their callbacks (and application state) after a hot reload.
+    remaining <- atomicModifyIORef' subscriptions (\current -> (HashMap.empty, concat (HashMap.elems current)))
+    forM_ remaining (uninterruptibleCancel . (.reader))
 
 withPGListener :: ByteString -> Logger -> (PGListener -> IO a) -> IO a
 withPGListener databaseUrl logger =

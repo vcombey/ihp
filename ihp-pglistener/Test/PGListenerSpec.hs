@@ -67,6 +67,18 @@ execSQL connStr sql = Exception.bracket (acquireConnection connStr) Hasql.releas
 tests :: Spec
 tests = do
     describe "IHP.PGListener" do
+        describe "stop" do
+            it "stops subscription readers when the application listener stops" do
+                PGListener.withPGListener "" logger \pgListener -> do
+                    subscription <- pgListener & PGListener.subscribe "reload_lifecycle" (const (pure ()))
+                    PGListener.stop pgListener
+                    result <- Async.poll subscription.reader
+                    case result of
+                        Just (Left _) -> pure ()
+                        _ -> expectationFailure "Subscription reader is still alive after listener shutdown"
+                    HashMap.null <$> readIORef pgListener.subscriptions `shouldReturn` True
+                    PGListener.stop pgListener
+
         describe "subscribe" do
             it "should add a subscriber" do
                 PGListener.withPGListener "" logger \pgListener -> do

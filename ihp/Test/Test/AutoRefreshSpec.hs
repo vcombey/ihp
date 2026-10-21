@@ -13,10 +13,11 @@ import IHP.FrameworkConfig
 import IHP.ControllerPrelude hiding (get, request)
 import Network.Wai
 import Network.HTTP.Types
-import IHP.AutoRefresh (getAvailableSessions, globalAutoRefreshServerVar, sessionResponseHasChanged, updateSession, processAutoRefreshWithPayload, commitAutoRefreshTables, getSessionById)
+import IHP.AutoRefresh (getAvailableSessions, getOrCreateAutoRefreshServer, sessionResponseHasChanged, updateSession, processAutoRefreshWithPayload, commitAutoRefreshTables, getSessionById)
 import IHP.AutoRefresh.ChangeSet (AutoRefreshChangeSet)
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Exception as Exception
+import Control.Monad (void)
 import IHP.AutoRefresh.Types
 import IHP.AutoRefresh.View (autoRefreshMeta)
 import qualified Control.Concurrent.MVar as MVar
@@ -75,7 +76,7 @@ callActionWithQueryParams
     => PGListener.PGListener
     -> controller
     -> [(ByteString, ByteString)]
-    -> IO SResponse
+    -> IO (SResponse, IORef AutoRefreshServer)
 callActionWithQueryParams pgListener controller queryParams = do
     let MockContext { frameworkConfig, modelContext } = ?mocking
 
@@ -90,7 +91,9 @@ callActionWithQueryParams pgListener controller queryParams = do
             runActionWithNewContext controller
 
     middlewareStack <- initMiddlewareStack frameworkConfig modelContext (Just pgListener)
-    runSession (request baseRequest) (middlewareStack controllerApp)
+    server <- captureServer middlewareStack
+    response <- runSession (request baseRequest) (middlewareStack controllerApp)
+    pure (response, server)
 
 testLogger :: FastLogger
 testLogger = noopLogger
@@ -98,6 +101,38 @@ testLogger = noopLogger
 tests :: Spec
 tests = beforeAll (mockContextNoDatabase WebApplication config) do
     describe "AutoRefresh" do
+        describe "application lifecycle" do
+            it "creates fresh state after the previous application's listener has stopped" $ withContext do
+                let MockContext { frameworkConfig, modelContext } = ?mocking
+                oldServer <- PGListener.withPGListener "" testLogger \pgListener -> do
+                    middleware <- initMiddlewareStack frameworkConfig modelContext (Just pgListener)
+                    server <- captureServer middleware
+                    ((== server) <$> captureServer middleware) `shouldReturn` True
+                    session <- payloadSession (const (pure True))
+                    modifyIORef' server (\state -> state { sessions = [session], subscribedTables = Set.singleton "projects" })
+                    pure server
+                PGListener.withPGListener "" testLogger \pgListener -> do
+                    middleware <- initMiddlewareStack frameworkConfig modelContext (Just pgListener)
+                    server <- captureServer middleware
+                    (server == oldServer) `shouldBe` False
+                    current <- readIORef server
+                    Async.asyncThreadId current.pgListener.notifyLoopAsync
+                        `shouldBe` Async.asyncThreadId pgListener.notifyLoopAsync
+                    length current.sessions `shouldBe` 0
+                    current.subscribedTables `shouldBe` mempty
+
+            it "keeps overlapping application instances independent" $ withContext do
+                let MockContext { frameworkConfig, modelContext } = ?mocking
+                PGListener.withPGListener "" testLogger \firstListener ->
+                    PGListener.withPGListener "" testLogger \secondListener -> do
+                        first <- initMiddlewareStack frameworkConfig modelContext (Just firstListener)
+                        second <- initMiddlewareStack frameworkConfig modelContext (Just secondListener)
+                        firstServer <- captureServer first
+                        secondServer <- captureServer second
+                        (firstServer == secondServer) `shouldBe` False
+                        ((== firstServer) <$> captureServer first) `shouldReturn` True
+                        ((== secondServer) <$> captureServer second) `shouldReturn` True
+
         describe "getAvailableSessions" do
             let activeId = UUID.fromWords 0 0 0 1
             let staleId = UUID.fromWords 0 0 0 2
@@ -133,32 +168,20 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
 
         describe "autoRefreshMeta" do
             it "renders the ihp-auto-refresh-id meta tag on the initial response" $ withContext do
-                MVar.modifyMVar_ globalAutoRefreshServerVar (\_ -> pure Nothing)
-
                 PGListener.withPGListener "" testLogger \pgListener -> do
-                    response <- callActionWithQueryParams pgListener ShowItemHtmlAction [("marketId", "abc-123")]
+                    (response, _) <- callActionWithQueryParams pgListener ShowItemHtmlAction [("marketId", "abc-123")]
                     let bodyBs = LBS.toStrict (simpleBody response)
                     BS.isInfixOf "ihp-auto-refresh-id" bodyBs `shouldBe` True
 
-                    MVar.modifyMVar_ globalAutoRefreshServerVar (\_ -> pure Nothing)
-
         describe "renderView" do
             it "should preserve query parameters when re-rendering with a websocket request" $ withContext do
-                -- Clean up any leftover global state from previous tests
-                MVar.modifyMVar_ globalAutoRefreshServerVar (\_ -> pure Nothing)
-
                 PGListener.withPGListener "" testLogger \pgListener -> do
                     -- 1. Call the action with query params — this triggers autoRefresh
                     --    which stores a session with renderView
-                    response <- callActionWithQueryParams pgListener ShowItemAction [("marketId", "abc-123")]
+                    (response, serverRef) <- callActionWithQueryParams pgListener ShowItemAction [("marketId", "abc-123")]
                     cs (simpleBody response) `shouldBe` ("abc-123" :: Text)
 
                     -- 2. Extract the stored renderView from the AutoRefreshSession
-                    maybeServerRef <- MVar.readMVar globalAutoRefreshServerVar
-                    serverRef <- case maybeServerRef of
-                        Just ref -> pure ref
-                        Nothing -> error "AutoRefreshServer was not created"
-
                     server <- readIORef serverRef
                     session <- case server.sessions of
                         (s:_) -> pure s
@@ -170,22 +193,11 @@ tests = beforeAll (mockContextNoDatabase WebApplication config) do
                     -- If query params are NOT preserved, this would throw ParamNotFoundException
                     cs (simpleBody reResponse) `shouldBe` ("abc-123" :: Text)
 
-                    -- Cleanup
-                    MVar.modifyMVar_ globalAutoRefreshServerVar (\_ -> pure Nothing)
-
         describe "graceful degradation without PGListener" do
             it "should run the action without crashing when PGListener is not available" $ withContext do
-                MVar.modifyMVar_ globalAutoRefreshServerVar (\_ -> pure Nothing)
-
                 response <- callActionWithParams ShowItemAction [("marketId", "degraded-ok")]
                 body <- responseBody response
                 cs body `shouldBe` ("degraded-ok" :: Text)
-
-                -- Verify autoRefresh skipped subscription machinery entirely
-                maybeServerRef <- MVar.readMVar globalAutoRefreshServerVar
-                case maybeServerRef of
-                    Nothing -> pure ()
-                    Just _ -> expectationFailure "Expected globalAutoRefreshServerVar to be Nothing"
 
         describe "session state tracking" do
             it "should compare re-rendered html against the latest session response" $ withContext do
@@ -261,3 +273,13 @@ payloadSession predicate = do
 
 payloadServer :: AutoRefreshSession -> IO (IORef AutoRefreshServer)
 payloadServer session = newIORef ((newAutoRefreshServer (error "No database/listener available")) { sessions = [session] })
+
+captureServer :: Middleware -> IO (IORef AutoRefreshServer)
+captureServer middleware = do
+    captured <- MVar.newEmptyMVar
+    let app request respond = do
+            let ?request = request
+            getOrCreateAutoRefreshServer >>= MVar.putMVar captured
+            respond (Wai.responseLBS status200 [] "")
+    void (runSession (request defaultRequest) (middleware app))
+    MVar.takeMVar captured

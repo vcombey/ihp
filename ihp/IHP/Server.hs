@@ -17,7 +17,7 @@ import qualified IHP.PGListener as PGListener
 import IHP.FrameworkConfig
 import IHP.ModelSupport (withModelContext)
 import IHP.RouterSupport (frontControllerToWAIApp, FrontController)
-import IHP.AutoRefresh (AutoRefreshWSApp)
+import IHP.AutoRefresh (AutoRefreshWSApp, initAutoRefreshMiddleware)
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Network.Wai.Middleware.Cors as Cors
 import qualified Network.Wai.Middleware.Approot as Approot
@@ -141,6 +141,7 @@ initMiddlewareStack frameworkConfig modelContext maybePgListener = do
     sessionMiddleware <- initSessionMiddleware frameworkConfig
     approotMiddleware <- Approot.envFallback
     assetPathMiddleware <- AssetPath.assetPathFromEnvMiddleware "IHP_ASSET_VERSION" "IHP_ASSET_BASEURL"
+    autoRefreshMiddleware <- maybe (pure id) initAutoRefreshMiddleware maybePgListener
 
     let corsMiddleware = initCorsMiddleware frameworkConfig
     let CustomMiddleware customMiddleware = frameworkConfig.customMiddleware
@@ -169,6 +170,7 @@ initMiddlewareStack frameworkConfig modelContext maybePgListener = do
         . requestBodyMiddlewareWith frameworkConfig.fileUploadBackend frameworkConfig.parseRequestBodyOptions
         . ErrorController.requestContextMiddleware
         . pgListenerMw
+        . autoRefreshMiddleware
         . assetPathMiddleware
 
 application :: (FrontController RootApplication) => Application -> Middleware -> Application
