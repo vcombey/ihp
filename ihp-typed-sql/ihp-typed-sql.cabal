@@ -58,6 +58,7 @@ library
         IHP.TypedSql.RowType
     other-modules:
         IHP.TypedSql.NameSupport
+        IHP.TypedSql.TableReads
         IHP.TypedSql.Cardinality
         IHP.TypedSql.CompileTimeDatabase
     build-depends:
