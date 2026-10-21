@@ -1,0 +1,21 @@
+ihp/IHP/ModelSupport.hs
+  s_028c7e4ba3dedc::t_4fc67b02a89bf8 27,985
+ihp/Test/Test/ModelSupportSpec.hs
+  s_028c7e4ba3dedc::t_45c6722f5820a2 15-19,23-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ea20c5e8de12974580771cdd737a6f1dd3073bf5",
+  "prompts": {},
+  "sessions": {
+    "s_028c7e4ba3dedc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15d6b-c209-7a30-9ec3-21af417b7b8a",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
