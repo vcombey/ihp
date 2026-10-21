@@ -1,0 +1,55 @@
+Guide/typed-sql.markdown
+  s_12e7fa27032c8d::t_c80a4235653c56 88-111
+ihp-typed-sql/IHP/TypedSql/Metadata.hs
+  s_12e7fa27032c8d::t_afae4d60555570 19-23,56,210-238
+ihp-typed-sql/IHP/TypedSql/Quoter.hs
+  s_0eb22462229b60::t_3631b598030882 89,97,188,190-191
+ihp-typed-sql/IHP/TypedSql/TableReads.hs
+  s_12e7fa27032c8d::t_9f4a5abb3697eb 1-60
+ihp-typed-sql/IHP/TypedSql/Types.hs
+  s_c2ebc7f1e39423::t_cb483cd1b80ee0 9,53-54
+ihp-typed-sql/Test/Test/TypedSqlSpec.hs
+  s_12e7fa27032c8d::t_2530ba4ce34263 22,69-80,1041-1042,2173-2195
+ihp-typed-sql/changelog.md
+  s_12e7fa27032c8d::t_a4ef6b8f1cdca0 5-11
+ihp-typed-sql/ihp-typed-sql.cabal
+  s_c2ebc7f1e39423::t_dd94626e8ca640 60
+ihp/IHP/TypedSql.hs
+  s_12e7fa27032c8d::t_9ec3948ba4cbe9 34,58-59,73-76
+ihp/IHP/TypedSql/Pagination.hs
+  s_0eb22462229b60::t_1ba299eb137522 24,59,82,90,113
+ihp/Test/Test/TypedSqlSpec.hs
+  s_12e7fa27032c8d::t_8b859b821cd4a1 28,852,858,892-897,944-975
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3263477ef7e6da327722bcc7c9f690f07ec54b12",
+  "prompts": {},
+  "sessions": {
+    "s_0eb22462229b60": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15460-3eec-7790-ab14-f93fdb6cf3b2",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    },
+    "s_12e7fa27032c8d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13e97-10b5-7eb3-85df-264f95d399f0",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    },
+    "s_c2ebc7f1e39423": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15594-b05d-7013-9050-49556141e83c",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
