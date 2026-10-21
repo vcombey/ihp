@@ -1,0 +1,19 @@
+ihp/IHP/AutoRefresh.hs
+  s_12e7fa27032c8d::t_6c1f380325b834 482
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f91a7991c33d63aa2095375d7f4e3eb43a7821b6",
+  "prompts": {},
+  "sessions": {
+    "s_12e7fa27032c8d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13e97-10b5-7eb3-85df-264f95d399f0",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
