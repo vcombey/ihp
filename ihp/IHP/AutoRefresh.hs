@@ -479,7 +479,7 @@ notificationTriggerSQLWithColumns columns tableName = "DO " <> sqlLiteral block
             <> "       AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = '" <> sqlString (identifier tableName) <> "'::regclass AND tgname = '" <> sqlString truncateTriggerName <> "') THEN\n"
             <> "        RETURN;\n"
             <> "    END IF;\n"
-            <> "    PERFORM pg_advisory_xact_lock(hashtextextended('" <> sqlString functionName <> "', 0));\n"
+            <> "    PERFORM pg_advisory_xact_lock(hashtextextended('" <> sqlString ("ihp_runtime.ar_notify_did_change_" <> tableName) <> "', 0));\n"
             <> "    CREATE OR REPLACE FUNCTION " <> functionName <> "() RETURNS TRIGGER AS " <> sqlLiteral functionBody <> " language plpgsql;\n"
             <> "    IF EXISTS (SELECT 1 FROM pg_class WHERE oid = '" <> sqlString (identifier tableName) <> "'::regclass AND relkind = 'v') THEN\n"
             <> "        FOR source IN WITH RECURSIVE dependencies(oid) AS (\n"
