@@ -1,0 +1,14 @@
+Guide/auto-refresh.markdown
+  h_39ce90a04346de 214,216-217,219,221-223,225,227,229-241,245,252,259,261,263,267-268,273-275,277-279,282,284,287-290,293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f769da979f2906d0eb9cd0d3adb308ac3c14a2d9",
+  "prompts": {},
+  "humans": {
+    "h_39ce90a04346de": {
+      "author": "vcombey <vincent.combey@gmail.com>"
+    }
+  }
+}
